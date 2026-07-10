@@ -66,19 +66,7 @@ app.use((request, response, next) => {
   next();
 });
 
-app.use(cors({
-  origin(origin, callback) {
-    if (!origin || isLocalOrigin(origin) || allowedCorsOrigins.includes(origin)) {
-      callback(null, true);
-      return;
-    }
-    if (!allowedCorsOrigins.length && process.env.NODE_ENV !== "production") {
-      callback(null, true);
-      return;
-    }
-    callback(new Error("CORS origin not allowed."));
-  }
-}));
+aapp.use(cors({ origin: "*" }));
 
 function requestIdentity(request, auth = null) {
   return auth?.userId || request.header?.("x-slt-user-id") || request.ip || request.socket?.remoteAddress || "anonymous";
