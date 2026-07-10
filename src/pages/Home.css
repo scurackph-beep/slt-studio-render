@@ -1,0 +1,338 @@
+.home {
+  background: var(--bg);
+  color: var(--ink);
+}
+
+/* ─── Hero ─── */
+.hero {
+  position: relative;
+  min-height: 100vh;
+  padding: calc(var(--navbar-height) + 12vh) 48px 16vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.hero-inner {
+  max-width: 920px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.hero-headline {
+  font-size: clamp(2.4rem, 6.5vw, 5.5rem);
+  font-weight: var(--weight-light);
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+  margin-bottom: 32px;
+}
+
+.hero-lead {
+  max-width: 640px;
+  margin: 0 auto 48px;
+  font-size: clamp(0.95rem, 1.6vw, 1.125rem);
+  font-weight: var(--weight-regular);
+  line-height: 1.75;
+  color: var(--ink-muted);
+}
+
+.hero-cta {
+  font-size: 11px;
+  letter-spacing: var(--tracking-nav);
+  text-transform: uppercase;
+}
+
+.hero-disciplines {
+  position: absolute;
+  right: 48px;
+  bottom: 12vh;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  text-align: right;
+}
+
+.hero-disciplines li {
+  font-size: 10px;
+  font-weight: var(--weight-light);
+  letter-spacing: 0.35em;
+  text-transform: uppercase;
+  color: var(--ink-subtle);
+}
+
+/* ─── Sections ─── */
+.home-section {
+  padding: 18vh 48px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.home-section--contact {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 64px;
+  padding-bottom: 24vh;
+}
+
+.section-kicker {
+  font-size: 10px;
+  font-weight: var(--weight-light);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-subtle);
+  margin-bottom: 24px;
+}
+
+.section-title {
+  font-size: clamp(1.75rem, 3.5vw, 2.75rem);
+  font-weight: var(--weight-light);
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  margin-bottom: 24px;
+  max-width: 720px;
+}
+
+.section-body {
+  max-width: 560px;
+  font-size: 1rem;
+  font-weight: var(--weight-regular);
+  line-height: 1.8;
+  color: var(--ink-muted);
+  margin-bottom: 64px;
+}
+
+.section-body--left {
+  margin-left: 0;
+}
+
+/* ─── Text grids (no boxes) ─── */
+.text-grid {
+  display: grid;
+  gap: 48px 40px;
+}
+
+.text-grid--3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.text-grid--4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.text-grid--studios {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  border-top: 1px solid var(--line);
+}
+
+.text-cell h3,
+.studio-link-name {
+  font-size: 1rem;
+  font-weight: var(--weight-light);
+  letter-spacing: 0.04em;
+  margin-bottom: 12px;
+}
+
+.text-cell p,
+.studio-link-desc {
+  font-size: 0.875rem;
+  font-weight: var(--weight-regular);
+  line-height: 1.7;
+  color: var(--ink-muted);
+}
+
+.text-cell-index {
+  display: block;
+  font-size: 10px;
+  font-weight: var(--weight-thin);
+  letter-spacing: 0.3em;
+  color: var(--ink-subtle);
+  margin-bottom: 20px;
+}
+
+/* ─── Studio links ─── */
+.studio-link {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 8px 16px;
+  padding: 32px 0;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  transition: opacity var(--fade);
+  opacity: 0.55;
+}
+
+.studio-link:hover {
+  opacity: 1;
+}
+
+.studio-link-name {
+  grid-column: 1;
+  grid-row: 1;
+  font-size: 1.125rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin: 0;
+}
+
+.studio-link-desc {
+  grid-column: 1;
+  grid-row: 2;
+  margin: 0;
+}
+
+.studio-link-arrow {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  font-size: 1rem;
+  font-weight: var(--weight-thin);
+  color: var(--ink-subtle);
+  transition: opacity var(--fade);
+}
+
+.studio-link:hover .studio-link-arrow {
+  opacity: 1;
+  color: var(--ink);
+}
+
+/* ─── Text links ─── */
+.text-link {
+  font-size: 11px;
+  font-weight: var(--weight-light);
+  letter-spacing: var(--tracking-nav);
+  text-transform: uppercase;
+  color: var(--ink);
+  opacity: 0.85;
+  transition: opacity var(--fade);
+  padding: 0;
+}
+
+.text-link:hover {
+  opacity: 1;
+}
+
+.text-link--muted {
+  color: var(--ink-muted);
+}
+
+.contact-links {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 20px;
+}
+
+/* ─── Media placeholders ─── */
+.media-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 48px;
+}
+
+.media-placeholder {
+  margin: 0;
+}
+
+.media-placeholder-inner {
+  aspect-ratio: 16 / 10;
+  background: linear-gradient(135deg, #1a1a1a 0%, #0a0a0a 100%);
+  filter: grayscale(100%);
+  opacity: 0.35;
+  transition: opacity var(--fade);
+}
+
+.media-placeholder:hover .media-placeholder-inner {
+  opacity: 0.5;
+}
+
+.media-placeholder figcaption {
+  display: block;
+  margin-top: 16px;
+  font-size: 10px;
+  font-weight: var(--weight-light);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-subtle);
+}
+
+/* ─── Journal ─── */
+.journal-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border-top: 1px solid var(--line);
+  max-width: 800px;
+}
+
+.journal-entry {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 32px;
+  padding: 28px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.journal-entry-title {
+  font-size: 11px;
+  font-weight: var(--weight-light);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+.journal-entry-copy {
+  font-size: 0.875rem;
+  font-weight: var(--weight-regular);
+  line-height: 1.7;
+  color: var(--ink-muted);
+}
+
+/* ─── Responsive ─── */
+@media (max-width: 900px) {
+  .hero {
+    padding: calc(var(--navbar-height) + 8vh) 24px 12vh;
+  }
+
+  .hero-disciplines {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 12px 24px;
+    margin-top: 12vh;
+    text-align: center;
+  }
+
+  .home-section {
+    padding: 14vh 24px;
+  }
+
+  .text-grid--3,
+  .text-grid--4,
+  .text-grid--studios {
+    grid-template-columns: 1fr;
+  }
+
+  .home-section--contact {
+    grid-template-columns: 1fr;
+    gap: 40px;
+  }
+
+  .contact-links {
+    align-items: flex-start;
+  }
+
+  .media-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .journal-entry {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+}

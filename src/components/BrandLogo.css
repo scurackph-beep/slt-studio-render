@@ -1,0 +1,48 @@
+.brand-logo {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  line-height: 1.2;
+  color: var(--ink);
+}
+
+.brand-logo-top {
+  font-size: 11px;
+  font-weight: var(--weight-light);
+  letter-spacing: var(--tracking-logo-top);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.brand-logo-sub {
+  font-size: 8px;
+  font-weight: var(--weight-thin);
+  letter-spacing: var(--tracking-logo-sub);
+  text-transform: uppercase;
+  margin-top: 4px;
+  white-space: nowrap;
+}
+
+.brand-logo--hero .brand-logo-top {
+  font-size: clamp(14px, 2.5vw, 22px);
+  letter-spacing: var(--tracking-logo-top);
+}
+
+.brand-logo--hero .brand-logo-sub {
+  font-size: clamp(10px, 1.5vw, 14px);
+  letter-spacing: var(--tracking-logo-sub);
+  margin-top: 10px;
+}
+
+
+@media (min-width: 768px) {
+  .brand-logo-top {
+    font-size: 12px;
+  }
+
+  .brand-logo-sub {
+    font-size: 9px;
+  }
+}

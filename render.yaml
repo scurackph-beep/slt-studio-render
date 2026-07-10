@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: slt-studio-v2
+    env: node
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SLT_STATIC_DIR
+        value: ./dist
+      - key: PUBLIC_MAX_VIDEO_SECONDS
+        value: "15"
+      - key: API_RATE_LIMIT_PER_MINUTE
+        value: "90"
+      - key: GENERATE_RATE_LIMIT_PER_MINUTE
+        value: "10"
