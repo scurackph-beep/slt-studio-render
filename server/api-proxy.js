@@ -66,7 +66,7 @@ app.use((request, response, next) => {
   next();
 });
 
-aapp.use(cors({ origin: "*" }));
+app.use(cors({ origin: "*" }));
 
 function requestIdentity(request, auth = null) {
   return auth?.userId || request.header?.("x-slt-user-id") || request.ip || request.socket?.remoteAddress || "anonymous";
