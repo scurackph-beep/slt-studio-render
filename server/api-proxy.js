@@ -349,6 +349,8 @@ const state = {
     status: "active",
     renewsAt: "2026-06-18",
     credits: creditsForPlan("Free"),
+    heldCredits: 0,
+    capturedCredits: 0,
     cancellationReason: "",
     stripeCustomerId: process.env.STRIPE_CUSTOMER_ID || "",
     stripeSubscriptionId: ""
@@ -370,7 +372,38 @@ const state = {
   projects: [],
   history: [],
   jobs: [],
-  webhookEvents: []
+  webhookEvents: [],
+  wallet: {
+    tenantId: "demo-user",
+    availableCredits: creditsForPlan("Free"),
+    heldCredits: 0,
+    capturedCredits: 0
+  },
+  creditReservations: [],
+  creditTransactions: [
+    {
+      id: "credit_tx_opening_demo_user_free",
+      idempotencyKey: "opening:demo-user:free",
+      idempotency_key: "opening:demo-user:free",
+      type: "opening_balance",
+      status: "posted",
+      amount: creditsForPlan("Free"),
+      reservationId: null,
+      jobId: null,
+      tenantId: "demo-user",
+      entries: [
+        { account: "SLT.CreditIssuer", direction: "debit", amount: creditsForPlan("Free") },
+        { account: "Tenant.Available", direction: "credit", amount: creditsForPlan("Free") }
+      ],
+      balanceDeltas: {
+        availableCredits: creditsForPlan("Free"),
+        heldCredits: 0,
+        capturedCredits: 0
+      },
+      metadata: { plan: "Free", source: "startup_migration" },
+      createdAt: new Date().toISOString()
+    }
+  ]
 };
 
 const sessions = new Map();
@@ -399,6 +432,242 @@ function envNumber(key, fallback) {
 
 function requestId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function creditAccount(name) {
+  return `Tenant.${name}`;
+}
+
+function ledgerSnapshot() {
+  return {
+    tenantId: state.wallet.tenantId,
+    availableCredits: state.wallet.availableCredits,
+    heldCredits: state.wallet.heldCredits,
+    capturedCredits: state.wallet.capturedCredits,
+    transactionCount: state.creditTransactions.length,
+    reservationCount: state.creditReservations.length
+  };
+}
+
+function syncCreditViews() {
+  state.subscription.credits = state.wallet.availableCredits;
+  state.subscription.heldCredits = state.wallet.heldCredits;
+  state.subscription.capturedCredits = state.wallet.capturedCredits;
+  state.user.credits = state.wallet.availableCredits;
+  return ledgerSnapshot();
+}
+
+function findCreditTransactionByIdempotency(idempotencyKey = "") {
+  return state.creditTransactions.find((transaction) => transaction.idempotencyKey === idempotencyKey) || null;
+}
+
+function appendCreditTransaction({
+  type,
+  amount,
+  debitAccount,
+  creditAccount: creditedAccount,
+  idempotencyKey,
+  reservationId = null,
+  jobId = null,
+  tenantId = state.wallet.tenantId,
+  status = "posted",
+  metadata = {},
+  availableDelta = 0,
+  heldDelta = 0,
+  capturedDelta = 0
+}) {
+  const existing = findCreditTransactionByIdempotency(idempotencyKey);
+  if (existing) return { transaction: existing, idempotent: true, wallet: ledgerSnapshot() };
+
+  const transaction = {
+    id: requestId("credit_tx"),
+    idempotencyKey,
+    idempotency_key: idempotencyKey,
+    type,
+    status,
+    amount,
+    reservationId,
+    jobId,
+    tenantId,
+    entries: [
+      { account: debitAccount, direction: "debit", amount },
+      { account: creditedAccount, direction: "credit", amount }
+    ],
+    balanceDeltas: {
+      availableCredits: availableDelta,
+      heldCredits: heldDelta,
+      capturedCredits: capturedDelta
+    },
+    metadata,
+    createdAt: new Date().toISOString()
+  };
+
+  state.wallet.availableCredits += availableDelta;
+  state.wallet.heldCredits += heldDelta;
+  state.wallet.capturedCredits += capturedDelta;
+  if (state.wallet.availableCredits < 0 || state.wallet.heldCredits < 0) {
+    state.wallet.availableCredits -= availableDelta;
+    state.wallet.heldCredits -= heldDelta;
+    state.wallet.capturedCredits -= capturedDelta;
+    const error = new Error("Credit ledger would produce a negative balance.");
+    error.code = "negative_ledger_balance";
+    error.statusCode = 409;
+    throw error;
+  }
+
+  state.creditTransactions.unshift(transaction);
+  state.creditTransactions = state.creditTransactions.slice(0, 500);
+  syncCreditViews();
+  return { transaction, idempotent: false, wallet: ledgerSnapshot() };
+}
+
+function grantCredits({ amount, idempotencyKey, reason = "credit_grant", metadata = {} }) {
+  if (!amount) return { transaction: null, wallet: ledgerSnapshot(), skipped: true };
+  return appendCreditTransaction({
+    type: reason,
+    amount: Math.abs(amount),
+    debitAccount: "SLT.CreditIssuer",
+    creditAccount: creditAccount("Available"),
+    idempotencyKey,
+    status: "posted",
+    metadata,
+    availableDelta: Math.abs(amount)
+  });
+}
+
+function adjustAvailableCredits({ targetAmount, idempotencyKey, reason = "plan_credit_adjustment", metadata = {} }) {
+  const target = Math.max(0, Number(targetAmount) || 0);
+  const delta = target - state.wallet.availableCredits;
+  if (delta === 0) return { transaction: null, wallet: ledgerSnapshot(), skipped: true };
+  if (delta > 0) {
+    return grantCredits({ amount: delta, idempotencyKey, reason, metadata });
+  }
+  return appendCreditTransaction({
+    type: reason,
+    amount: Math.abs(delta),
+    debitAccount: creditAccount("Available"),
+    creditAccount: "SLT.CreditExpiry",
+    idempotencyKey,
+    status: "posted",
+    metadata,
+    availableDelta: delta
+  });
+}
+
+function findCreditReservation(reservationId = "") {
+  return state.creditReservations.find((reservation) => reservation.id === reservationId) || null;
+}
+
+function reserveCredits({ amount, kind, auth, request, idempotencyKey, metadata = {} }) {
+  const cost = Math.max(0, Number(amount) || 0);
+  const tenantId = requestIdentity(request, auth);
+  if (!cost) {
+    return {
+      reservation: null,
+      transaction: null,
+      wallet: ledgerSnapshot(),
+      skipped: true,
+      message: "No reservation needed for zero-credit operation."
+    };
+  }
+
+  const existingTransaction = findCreditTransactionByIdempotency(idempotencyKey);
+  if (existingTransaction?.reservationId) {
+    return {
+      reservation: findCreditReservation(existingTransaction.reservationId),
+      transaction: existingTransaction,
+      wallet: ledgerSnapshot(),
+      idempotent: true
+    };
+  }
+
+  if (state.wallet.availableCredits < cost) {
+    const error = new Error("Insufficient Credits");
+    error.code = "insufficient_credits";
+    error.statusCode = 402;
+    error.readableError = "You do not have enough credits for this action.";
+    throw error;
+  }
+
+  const reservation = {
+    id: requestId("reservation"),
+    tenantId,
+    kind,
+    amount: cost,
+    status: "reserved",
+    idempotencyKey,
+    idempotency_key: idempotencyKey,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    capturedAt: null,
+    releasedAt: null,
+    jobId: metadata.jobId || null,
+    metadata
+  };
+  state.creditReservations.unshift(reservation);
+  state.creditReservations = state.creditReservations.slice(0, 300);
+
+  const result = appendCreditTransaction({
+    type: "reserve",
+    amount: cost,
+    debitAccount: creditAccount("Available"),
+    creditAccount: creditAccount("HeldByReservation"),
+    idempotencyKey,
+    reservationId: reservation.id,
+    jobId: metadata.jobId || null,
+    tenantId,
+    status: "reserved",
+    metadata,
+    availableDelta: -cost,
+    heldDelta: cost
+  });
+  return { reservation, transaction: result.transaction, wallet: result.wallet, idempotent: result.idempotent };
+}
+
+function resolveReservation({ reservationId, outcome, jobId = null, idempotencyKey, reason = "" }) {
+  const reservation = findCreditReservation(reservationId);
+  if (!reservation) {
+    return { reservation: null, transaction: null, wallet: ledgerSnapshot(), skipped: true, reason: "reservation_not_found" };
+  }
+  if (["captured", "released"].includes(reservation.status)) {
+    return { reservation, transaction: findCreditTransactionByIdempotency(idempotencyKey), wallet: ledgerSnapshot(), idempotent: true };
+  }
+
+  const capture = outcome === "capture";
+  const transaction = appendCreditTransaction({
+    type: capture ? "capture" : "release",
+    amount: reservation.amount,
+    debitAccount: creditAccount("HeldByReservation"),
+    creditAccount: capture ? "SLT.CapturedRevenue" : creditAccount("Available"),
+    idempotencyKey,
+    reservationId,
+    jobId: jobId || reservation.jobId,
+    tenantId: reservation.tenantId,
+    status: capture ? "captured" : "released",
+    metadata: { reason, originalReservationKey: reservation.idempotencyKey },
+    availableDelta: capture ? 0 : reservation.amount,
+    heldDelta: -reservation.amount,
+    capturedDelta: capture ? reservation.amount : 0
+  });
+
+  reservation.status = capture ? "captured" : "released";
+  reservation.updatedAt = new Date().toISOString();
+  reservation.jobId = jobId || reservation.jobId;
+  if (capture) reservation.capturedAt = reservation.updatedAt;
+  else reservation.releasedAt = reservation.updatedAt;
+  return { reservation, transaction: transaction.transaction, wallet: transaction.wallet, idempotent: transaction.idempotent };
+}
+
+function generationIdempotencyKey(request, kind, phase) {
+  const auth = getAuth(request);
+  const clientKey =
+    request.header("Idempotency-Key") ||
+    request.body?.idempotencyKey ||
+    request.body?.clientRequestId ||
+    request.body?.request_id ||
+    request.body?.requestId ||
+    requestId(`${kind}_request`);
+  return `${phase}:${requestIdentity(request, auth)}:${kind}:${clientKey}`;
 }
 
 function getAuth(request) {
@@ -665,25 +934,39 @@ function validatePlan(kind, request, auth) {
 
 function validateCredits(kind, auth = {}) {
   const cost = creditCostFor(kind);
+  const wallet = ledgerSnapshot();
   if (isOwnerAuth(auth)) {
     return {
       ok: true,
       cost: 0,
       originalCost: cost,
-      remaining: state.subscription.credits,
+      remaining: wallet.availableCredits,
+      available: wallet.availableCredits,
+      held: wallet.heldCredits,
+      wallet,
       mode: "ceo-unmetered",
       message: "CEO mode: internal SLT credits are not charged."
     };
   }
-  if (state.subscription.credits < cost) {
+  if (wallet.availableCredits < cost) {
     return {
       ok: false,
       code: "insufficient_credits",
       message: "Insufficient Credits",
-      readableError: "You do not have enough credits for this action."
+      readableError: "You do not have enough credits for this action.",
+      available: wallet.availableCredits,
+      held: wallet.heldCredits,
+      wallet
     };
   }
-  return { ok: true, cost, remaining: state.subscription.credits - cost };
+  return {
+    ok: true,
+    cost,
+    remaining: wallet.availableCredits - cost,
+    available: wallet.availableCredits,
+    held: wallet.heldCredits,
+    wallet
+  };
 }
 
 const providerMaxClipSeconds = {
@@ -838,6 +1121,8 @@ function createJob({ kind, title, providerName, prompt, payload, checks, request
     providerJobId: null,
     historyItemId: null,
     projectId: null,
+    reservationId: checks.credits?.reservation?.id || null,
+    reservationStatus: checks.credits?.reservation?.status || null,
     outputUrl: null,
     outputUrls: [],
     error: null,
@@ -858,7 +1143,7 @@ function createJob({ kind, title, providerName, prompt, payload, checks, request
     providerRoute: [],
     providerFallback: null,
     creditCost: checks.credits?.cost || 0,
-    creditsRemaining: checks.credits?.remaining ?? state.subscription.credits,
+    creditsRemaining: checks.credits?.wallet?.availableCredits ?? checks.credits?.remaining ?? state.subscription.credits,
     usageKey: usageBucketKey({ kind, request, auth: checks.auth })
   };
   job.requestId = job.id;
@@ -899,6 +1184,8 @@ function serializeJob(job) {
     outputUrls: job.outputUrls || [],
     previewUrl: job.outputUrl || null,
     error: job.error,
+    reservationId: job.reservationId,
+    reservationStatus: job.reservationStatus,
     providerRoute: job.providerRoute || [],
     providerFallback: job.providerFallback || null
   };
@@ -942,6 +1229,8 @@ function buildQueuedHistoryEntry({ job, checks }) {
       request_id: job.id,
       status: "processing",
       state: job.status,
+      reservationId: job.reservationId,
+      reservationStatus: job.reservationStatus,
       note: `Poll /api/jobs/${job.id} for status.`,
       providerRoute: [],
       fallback: null,
@@ -1433,8 +1722,12 @@ function applyStripeWebhookEvent(event = {}) {
       const pack = creditPackById(object.metadata?.creditPackId);
       const credits = Number(object.metadata?.credits || pack?.credits || 0);
       if (credits > 0) {
-        state.subscription.credits += credits;
-        state.user.credits = state.subscription.credits;
+        grantCredits({
+          amount: credits,
+          idempotencyKey: `stripe:credit_pack:${event.id || object.id || requestId("stripe_event")}`,
+          reason: "credit_pack_purchase",
+          metadata: { stripeSessionId: object.id, packId: pack?.id || object.metadata?.creditPackId || "" }
+        });
       }
       state.billing.stripeCustomerId = object.customer || state.billing.stripeCustomerId;
       state.subscription.stripeCustomerId = object.customer || state.subscription.stripeCustomerId;
@@ -1455,9 +1748,13 @@ function applyStripeWebhookEvent(event = {}) {
     state.subscription.stripeSubscriptionId = object.subscription || state.subscription.stripeSubscriptionId;
     state.subscription.plan = object.metadata?.plan || state.subscription.plan;
     state.subscription.status = "active";
-    state.subscription.credits = creditsForPlan(state.subscription.plan);
     state.user.plan = state.subscription.plan;
-    state.user.credits = state.subscription.credits;
+    adjustAvailableCredits({
+      targetAmount: creditsForPlan(state.subscription.plan),
+      idempotencyKey: `stripe:subscription_plan:${event.id || object.id || requestId("stripe_event")}`,
+      reason: "subscription_plan_credit_reset",
+      metadata: { stripeSessionId: object.id, plan: state.subscription.plan }
+    });
     saveHistory({
       id: requestId("billing"),
       kind: "billing",
@@ -3200,29 +3497,46 @@ function applyUsageForJob(job) {
 }
 
 function completeAsyncJob({ job, providerRun, providerResult, message }) {
+  if (!job) return { job: null, historyItem: null, project: null };
   const result = providerResult || providerRun?.providerResult || {};
   const outputUrls = extractProviderOutputUrls(result);
   const outputUrl = outputUrls[0] || result.previewUrl || null;
   const providerName = providerRun?.providerName || job.provider;
   const providerRoute = providerRun?.route || job.providerRoute || [];
   const providerFallback = providerRun?.fallback || job.providerFallback || null;
+  const ledgerResolution = job.reservationId
+    ? resolveReservation({
+        reservationId: job.reservationId,
+        outcome: "capture",
+        jobId: job.id,
+        idempotencyKey: `capture:${job.reservationId}`,
+        reason: "provider_completed"
+      })
+    : { reservation: null, transaction: null, wallet: ledgerSnapshot(), skipped: true };
   updateJob(job.id, {
     status: jobStates.completed,
     provider: providerName,
     providerJobId: result.providerJobId || job.providerJobId,
+    reservationStatus: ledgerResolution.reservation?.status || job.reservationStatus,
+    ledgerTransactionId: ledgerResolution.transaction?.id || job.ledgerTransactionId || null,
     outputUrl,
     outputUrls,
     providerRoute,
     providerFallback,
     error: null
   });
-  state.subscription.credits = job.creditsRemaining;
   applyUsageForJob(job);
   const entry = updateHistoryItem(job.historyItemId, {
     provider: providerName,
     status: "completed",
     message: message || `${job.kind} generation completed with ${providerName}.`,
     creditsUsed: job.creditCost,
+    ledger: {
+      reservationId: job.reservationId,
+      resolution: "capture",
+      transactionId: ledgerResolution.transaction?.id || null,
+      wallet: ledgerResolution.wallet
+    },
     result: {
       ...result,
       providerJobId: job.id,
@@ -3231,6 +3545,8 @@ function completeAsyncJob({ job, providerRun, providerResult, message }) {
       request_id: job.id,
       status: "completed",
       state: jobStates.completed,
+      reservationId: job.reservationId,
+      reservationStatus: ledgerResolution.reservation?.status || null,
       previewUrl: outputUrl,
       outputUrl,
       outputUrls,
@@ -3245,11 +3561,23 @@ function completeAsyncJob({ job, providerRun, providerResult, message }) {
 }
 
 function failAsyncJob({ job, error, providerRun = null }) {
+  if (!job) return { job: null, historyItem: null };
   const code = error?.code || "provider_error";
   const message = readableProviderError(error, providerRun?.providerName || job.provider);
   const providerRoute = error?.route || providerRun?.route || job.providerRoute || [];
+  const ledgerResolution = job.reservationId
+    ? resolveReservation({
+        reservationId: job.reservationId,
+        outcome: "release",
+        jobId: job.id,
+        idempotencyKey: `release:${job.reservationId}`,
+        reason: code
+      })
+    : { reservation: null, transaction: null, wallet: ledgerSnapshot(), skipped: true };
   updateJob(job.id, {
     status: jobStates.failed,
+    reservationStatus: ledgerResolution.reservation?.status || job.reservationStatus,
+    ledgerTransactionId: ledgerResolution.transaction?.id || job.ledgerTransactionId || null,
     error: { code, message },
     providerRoute
   });
@@ -3258,12 +3586,20 @@ function failAsyncJob({ job, error, providerRun = null }) {
     code,
     message,
     creditsUsed: 0,
+    ledger: {
+      reservationId: job.reservationId,
+      resolution: "release",
+      transactionId: ledgerResolution.transaction?.id || null,
+      wallet: ledgerResolution.wallet
+    },
     result: {
       providerJobId: job.id,
       jobId: job.id,
       request_id: job.id,
       status: "failed",
       state: jobStates.failed,
+      reservationId: job.reservationId,
+      reservationStatus: ledgerResolution.reservation?.status || null,
       error: message,
       providerRoute,
       exportFormats: exportFormatsFor(job.kind)
@@ -3277,6 +3613,29 @@ async function processAsyncGenerationJob({ jobId, kind, prompt, title, payload, 
   if (!job) return;
   appendJobEvent(job, { type: "started" });
   try {
+    if (payload.webhookOnly === true || payload.deferProviderUntilWebhook === true) {
+      updateJob(job.id, {
+        status: jobStates.processing,
+        providerJobId: payload.providerJobId || job.id
+      });
+      updateHistoryItem(job.historyItemId, (entry) => ({
+        message: `${kind} generation reserved and waiting for provider webhook.`,
+        result: {
+          ...entry.result,
+          providerJobId: job.id,
+          providerRequestId: payload.providerJobId || job.id,
+          jobId: job.id,
+          request_id: job.id,
+          status: "processing",
+          state: jobStates.processing,
+          note: "Webhook-only simulation is waiting for a signed provider callback.",
+          exportFormats: exportFormatsFor(kind)
+        }
+      }));
+      appendJobEvent(findJob(job.id), { type: "webhook_only_wait" });
+      return;
+    }
+
     const providerRun = kind === "video" && payload.videoPlan?.mode === "timeline"
       ? {
           providerName: job.provider,
@@ -3452,6 +3811,7 @@ function handleGenerate(kind) {
     const providerName = checks.provider.name;
     let selectedProviderName = providerName;
     let runtimeChecks = checks;
+    let activeReservation = null;
     try {
       let payload = request.body || {};
       let videoPlan = null;
@@ -3460,8 +3820,42 @@ function handleGenerate(kind) {
         payload = { ...payload, videoPlan };
       }
 
+      const reservationResult = reserveCredits({
+        amount: checks.credits.cost,
+        kind,
+        auth: checks.auth,
+        request,
+        idempotencyKey: generationIdempotencyKey(request, kind, "reserve"),
+        metadata: {
+          title,
+          provider: providerName,
+          promptHash: crypto.createHash("sha256").update(prompt).digest("hex")
+        }
+      });
+      activeReservation = reservationResult.reservation;
+      const ledgerCredits = {
+        ...checks.credits,
+        reservation: reservationResult.reservation,
+        reserveTransactionId: reservationResult.transaction?.id || null,
+        remaining: reservationResult.wallet.availableCredits,
+        available: reservationResult.wallet.availableCredits,
+        held: reservationResult.wallet.heldCredits,
+        wallet: reservationResult.wallet
+      };
+      const ledgerChecks = {
+        ...checks,
+        credits: ledgerCredits,
+        ledger: {
+          reservationId: reservationResult.reservation?.id || null,
+          reserveTransactionId: reservationResult.transaction?.id || null,
+          wallet: reservationResult.wallet,
+          skipped: Boolean(reservationResult.skipped)
+        }
+      };
+      runtimeChecks = ledgerChecks;
+
       if (isAsyncGenerationKind(kind) && payload.sync !== true) {
-        const job = createJob({ kind, title, providerName, prompt, payload, checks, request });
+        const job = createJob({ kind, title, providerName, prompt, payload, checks: ledgerChecks, request });
         const webhookUrl = webhookUrlFor(request, checks.provider);
         const asyncPayload = {
           ...payload,
@@ -3473,7 +3867,7 @@ function handleGenerate(kind) {
           callback_url: webhookUrl
         };
         const queuedChecks = {
-          ...checks,
+          ...ledgerChecks,
           requestedProvider: checks.provider,
           providerWebhook: {
             provider: webhookProviderForStatus(checks.provider),
@@ -3483,8 +3877,12 @@ function handleGenerate(kind) {
         };
         const queuedEntry = buildQueuedHistoryEntry({ job, checks: queuedChecks });
         saveHistory(queuedEntry);
-        updateJob(job.id, { historyItemId: queuedEntry.id });
-        enqueueAsyncGeneration({ job, kind, prompt, title, payload: asyncPayload, checks });
+        if (activeReservation) {
+          activeReservation.jobId = job.id;
+          activeReservation.updatedAt = new Date().toISOString();
+        }
+        updateJob(job.id, { historyItemId: queuedEntry.id, reservationId: activeReservation?.id || null, reservationStatus: activeReservation?.status || null });
+        enqueueAsyncGeneration({ job: findJob(job.id), kind, prompt, title, payload: asyncPayload, checks: ledgerChecks });
         response.status(202).json({
           ok: true,
           accepted: true,
@@ -3518,7 +3916,7 @@ function handleGenerate(kind) {
           });
       selectedProviderName = providerRun.providerName;
       runtimeChecks = {
-        ...checks,
+        ...ledgerChecks,
         requestedProvider: checks.provider,
         provider: providerRun.providerStatus,
         providerFallback: providerRun.fallback,
@@ -3533,6 +3931,18 @@ function handleGenerate(kind) {
         status: "completed",
         message: `${kind} generation completed with ${selectedProviderName}.`,
         creditsUsed: checks.credits.cost,
+        ledger: activeReservation
+          ? {
+              reservationId: activeReservation.id,
+              resolution: "capture",
+              ...resolveReservation({
+                reservationId: activeReservation.id,
+                outcome: "capture",
+                idempotencyKey: `capture:${activeReservation.id}`,
+                reason: "sync_provider_completed"
+              })
+            }
+          : { reservationId: null, resolution: "none", wallet: ledgerSnapshot() },
         result: {
           ...providerRun.providerResult,
           fallback: providerRun.fallback,
@@ -3541,7 +3951,6 @@ function handleGenerate(kind) {
         },
         createdAt: new Date().toISOString()
       };
-      state.subscription.credits = checks.credits.remaining;
       incrementUsage({ kind, request, auth: checks.auth });
       saveHistory(entry);
       const project = saveProjectFromEntry(entry);
@@ -3556,6 +3965,15 @@ function handleGenerate(kind) {
         errorFallback: errorFallbackFor(kind)
       });
     } catch (error) {
+      let releasedReservation = null;
+      if (activeReservation?.id) {
+        releasedReservation = resolveReservation({
+          reservationId: activeReservation.id,
+          outcome: "release",
+          idempotencyKey: `release:${activeReservation.id}`,
+          reason: error.code || "sync_provider_failed"
+        });
+      }
       const code = error.code || "provider_error";
       const readableError = code === "provider_not_connected" ? providerFallbackMessage : readableProviderError(error, selectedProviderName);
       const failedEntry = buildFailedEntry({
@@ -3566,9 +3984,19 @@ function handleGenerate(kind) {
         message: readableError,
         code
       });
+      failedEntry.ledger = releasedReservation
+        ? {
+            reservationId: activeReservation.id,
+            resolution: "release",
+            transactionId: releasedReservation.transaction?.id || null,
+            wallet: releasedReservation.wallet
+          }
+        : null;
       saveHistory(failedEntry);
       const statusCode = code === "provider_not_connected"
         ? 400
+        : code === "insufficient_credits"
+        ? 402
         : ["owner_long_video_required", "video_duration_limit", "ceo_video_duration_limit"].includes(code)
         ? 403
         : 502;
@@ -4146,8 +4574,30 @@ app.post("/api/assist", async (request, response) => {
       });
       return;
     }
+    let assistReservation = null;
     try {
+      const reservationResult = reserveCredits({
+        amount: checks.credits.cost,
+        kind: "assist",
+        auth,
+        request,
+        idempotencyKey: generationIdempotencyKey(request, "assist", "reserve"),
+        metadata: {
+          title,
+          provider: "OpenRouter Hermes",
+          promptHash: crypto.createHash("sha256").update(prompt).digest("hex")
+        }
+      });
+      assistReservation = reservationResult.reservation;
       const providerResult = await callOpenRouterHermes({ prompt, title });
+      const ledgerResolution = assistReservation
+        ? resolveReservation({
+            reservationId: assistReservation.id,
+            outcome: "capture",
+            idempotencyKey: `capture:${assistReservation.id}`,
+            reason: "assist_completed"
+          })
+        : { reservation: null, transaction: null, wallet: ledgerSnapshot(), skipped: true };
       const entry = {
         id: requestId("assist"),
         kind: "assist",
@@ -4158,13 +4608,27 @@ app.post("/api/assist", async (request, response) => {
         message: "CEO Hermes response ready.",
         response: providerResult.responseText || "CEO Hermes response ready.",
         creditsUsed: checks.credits.cost,
+        ledger: {
+          reservationId: assistReservation?.id || null,
+          resolution: assistReservation ? "capture" : "none",
+          transactionId: ledgerResolution.transaction?.id || null,
+          wallet: ledgerResolution.wallet
+        },
         result: providerResult,
         createdAt: new Date().toISOString()
       };
-      state.subscription.credits = checks.credits.remaining;
       saveHistory(entry);
       response.json({ ok: true, auth, historyItem: entry, success: "CEO Hermes response ready." });
     } catch (error) {
+      let ledgerResolution = null;
+      if (assistReservation?.id) {
+        ledgerResolution = resolveReservation({
+          reservationId: assistReservation.id,
+          outcome: "release",
+          idempotencyKey: `release:${assistReservation.id}`,
+          reason: error.code || "assist_failed"
+        });
+      }
       const readableError = readableProviderError(error, "OpenRouter Hermes");
       const failedEntry = buildFailedEntry({
         kind: "assist",
@@ -4174,6 +4638,14 @@ app.post("/api/assist", async (request, response) => {
         message: readableError,
         code: "ceo_mode_error"
       });
+      failedEntry.ledger = ledgerResolution
+        ? {
+            reservationId: assistReservation.id,
+            resolution: "release",
+            transactionId: ledgerResolution.transaction?.id || null,
+            wallet: ledgerResolution.wallet
+          }
+        : null;
       saveHistory(failedEntry);
       response.status(502).json({
         ok: false,
@@ -4188,7 +4660,21 @@ app.post("/api/assist", async (request, response) => {
     return;
   }
 
+  let assistReservation = null;
   try {
+    const reservationResult = reserveCredits({
+      amount: checks.credits.cost,
+      kind: "assist",
+      auth,
+      request,
+      idempotencyKey: generationIdempotencyKey(request, "assist", "reserve"),
+      metadata: {
+        title,
+        provider: checks.provider.name,
+        promptHash: crypto.createHash("sha256").update(prompt).digest("hex")
+      }
+    });
+    assistReservation = reservationResult.reservation;
     const providerRun = await runProviderGateway({
       kind: "assist",
       providerStatus: checks.provider,
@@ -4196,6 +4682,14 @@ app.post("/api/assist", async (request, response) => {
       title,
       payload: request.body || {}
     });
+    const ledgerResolution = assistReservation
+      ? resolveReservation({
+          reservationId: assistReservation.id,
+          outcome: "capture",
+          idempotencyKey: `capture:${assistReservation.id}`,
+          reason: "assist_completed"
+        })
+      : { reservation: null, transaction: null, wallet: ledgerSnapshot(), skipped: true };
     const entry = {
       id: requestId("assist"),
       kind: "assist",
@@ -4206,6 +4700,12 @@ app.post("/api/assist", async (request, response) => {
       message: "Assistant response ready.",
       response: providerRun.providerResult.responseText || "I can help you plan, improve or control Image, Video, Sound FX, Music, Fashion and Engineering projects.",
       creditsUsed: checks.credits.cost,
+      ledger: {
+        reservationId: assistReservation?.id || null,
+        resolution: assistReservation ? "capture" : "none",
+        transactionId: ledgerResolution.transaction?.id || null,
+        wallet: ledgerResolution.wallet
+      },
       result: {
         ...providerRun.providerResult,
         fallback: providerRun.fallback,
@@ -4213,7 +4713,6 @@ app.post("/api/assist", async (request, response) => {
       },
       createdAt: new Date().toISOString()
     };
-    state.subscription.credits = checks.credits.remaining;
     saveHistory(entry);
     response.json({
       ok: true,
@@ -4228,6 +4727,15 @@ app.post("/api/assist", async (request, response) => {
       success: "Assistant response ready."
     });
   } catch (error) {
+    let ledgerResolution = null;
+    if (assistReservation?.id) {
+      ledgerResolution = resolveReservation({
+        reservationId: assistReservation.id,
+        outcome: "release",
+        idempotencyKey: `release:${assistReservation.id}`,
+        reason: error.code || "assist_failed"
+      });
+    }
     const code = error.code || "provider_error";
     const readableError = code === "provider_not_connected" ? providerFallbackMessage : readableProviderError(error, checks.provider.name);
     const failedEntry = buildFailedEntry({
@@ -4238,6 +4746,14 @@ app.post("/api/assist", async (request, response) => {
       message: readableError,
       code
     });
+    failedEntry.ledger = ledgerResolution
+      ? {
+          reservationId: assistReservation.id,
+          resolution: "release",
+          transactionId: ledgerResolution.transaction?.id || null,
+          wallet: ledgerResolution.wallet
+        }
+      : null;
     saveHistory(failedEntry);
     response.status(code === "provider_not_connected" ? 400 : 502).json({
       ok: false,
@@ -4621,6 +5137,16 @@ app.post("/api/billing", (request, response) => {
   response.json({ ok: true, auth: getAuth(request), billing: state.billing, message: "Payment method saved." });
 });
 
+app.get("/api/ledger", (request, response) => {
+  response.json({
+    ok: true,
+    auth: getAuth(request),
+    wallet: ledgerSnapshot(),
+    reservations: state.creditReservations.slice(0, 20),
+    transactions: state.creditTransactions.slice(0, 50)
+  });
+});
+
 app.get("/api/subscription", (request, response) => {
   response.json({ ok: true, auth: getAuth(request), subscription: state.subscription });
 });
@@ -4631,9 +5157,13 @@ app.post("/api/subscription", (request, response) => {
   if (["upgrade", "downgrade", "reactivate"].includes(action)) {
     state.subscription.plan = nextPlan;
     state.subscription.status = "active";
-    state.subscription.credits = creditsForPlan(nextPlan);
     state.user.plan = nextPlan;
-    state.user.credits = state.subscription.credits;
+    adjustAvailableCredits({
+      targetAmount: creditsForPlan(nextPlan),
+      idempotencyKey: `manual_subscription:${action}:${nextPlan}:${Date.now()}`,
+      reason: "manual_subscription_plan_credit_reset",
+      metadata: { action, plan: nextPlan }
+    });
   }
   if (action === "cancel") {
     state.subscription.status = "cancelled";

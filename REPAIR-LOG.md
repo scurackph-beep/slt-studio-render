@@ -372,3 +372,248 @@ OK - Vite build completo en 536ms. Se regenero `dist/` como salida esperada del 
 ```txt
 feat: implement async job queue and secure webhooks
 ```
+
+---
+
+Fecha: 2026-07-12  
+Proyecto: Sweet Little Trauma Studio  
+Modulo ejecutado: Modulo 3 - Ledger Transaccional y Reserva de Creditos
+
+## Diagnostico inicial breve
+
+El repo no contiene Prisma, Drizzle ni otra base de datos persistente activa. Los saldos internos estaban en memoria dentro de `state.subscription.credits` y se mutaban directamente en endpoints de generacion, Stripe/subscription y assistant.
+
+Como no hay tabla real `User`, `Wallet` o `Credits`, esta fase adapta la arquitectura existente agregando un ledger in-memory compatible con la futura migracion a base de datos:
+
+- `state.wallet`
+- `state.creditTransactions`
+- `state.creditReservations`
+
+## Problema encontrado
+
+### Saldo simple con mutacion directa
+
+- Archivo: `server/api-proxy.js`
+- Estado previo:
+  - `validateCredits` calculaba `remaining`.
+  - Al completar una generacion se ejecutaba `state.subscription.credits = checks.credits.remaining`.
+  - Si un job async fallaba despues de haberse descontado, no habia una reserva formal ni compensacion transaccional.
+
+Impacto:
+
+- Una generacion fallida podia dejar al usuario con percepcion de creditos perdidos.
+- No habia idempotencia para cobros/reintentos.
+- No habia historial auditable de movimientos de credito.
+
+## Cambios aplicados
+
+### 1. Ledger inmutable de transacciones
+
+Archivo modificado:
+
+- `server/api-proxy.js`
+
+Se agrego `CreditTransaction` in-memory con:
+
+- `id`
+- `idempotencyKey`
+- `idempotency_key`
+- `type`
+- `status`
+- `amount`
+- `reservationId`
+- `jobId`
+- `entries`
+- `balanceDeltas`
+- `metadata`
+- `createdAt`
+
+Cada movimiento se agrega como registro nuevo. No se modifican transacciones ya creadas.
+
+### 2. Wallet con cuentas de doble entrada
+
+Archivo modificado:
+
+- `server/api-proxy.js`
+
+Se agregaron cuentas logicas:
+
+- `Tenant.Available`
+- `Tenant.HeldByReservation`
+- `SLT.CapturedRevenue`
+- `SLT.CreditIssuer`
+- `SLT.CreditExpiry`
+
+Los saldos visibles se sincronizan desde `state.wallet` hacia:
+
+- `state.subscription.credits`
+- `state.subscription.heldCredits`
+- `state.subscription.capturedCredits`
+- `state.user.credits`
+
+### 3. Servicio de ledger
+
+Archivo modificado:
+
+- `server/api-proxy.js`
+
+Se agregaron metodos:
+
+- `reserveCredits`
+- `resolveReservation`
+- `grantCredits`
+- `adjustAvailableCredits`
+- `appendCreditTransaction`
+- `ledgerSnapshot`
+
+`reserveCredits` mueve creditos desde `Tenant.Available` hacia `Tenant.HeldByReservation`.
+
+`resolveReservation` ejecuta:
+
+- `capture`: mueve desde `Tenant.HeldByReservation` hacia `SLT.CapturedRevenue`;
+- `release`: mueve desde `Tenant.HeldByReservation` hacia `Tenant.Available`.
+
+### 4. Generaciones conectadas al ledger
+
+Archivo modificado:
+
+- `server/api-proxy.js`
+
+El flujo de generacion ahora hace:
+
+1. Pre-flight con `validateCredits`.
+2. Reserva con `reserveCredits`.
+3. Creacion del job async.
+4. Capture cuando el job termina en `COMPLETED`.
+5. Release cuando el job termina en `FAILED` o error.
+
+Los endpoints sync tambien usan reserva/capture/release para evitar cobros de fallos inmediatos.
+
+### 5. Webhooks conectados al ledger
+
+Archivo modificado:
+
+- `server/api-proxy.js`
+
+Cuando un webhook firmado marca un job como:
+
+- `completed`: se ejecuta `capture`.
+- `failed/cancelled`: se ejecuta `release`.
+
+Los webhooks duplicados siguen siendo idempotentes y no vuelven a capturar/liberar.
+
+### 6. Grants y ajustes de Stripe/subscription
+
+Archivo modificado:
+
+- `server/api-proxy.js`
+
+Se reemplazaron mutaciones directas de credito por:
+
+- `grantCredits` para packs de creditos.
+- `adjustAvailableCredits` para cambios de plan/subscription.
+
+### 7. Endpoint de inspeccion de ledger
+
+Archivo modificado:
+
+- `server/api-proxy.js`
+
+Se agrego:
+
+```txt
+GET /api/ledger
+```
+
+Devuelve:
+
+- wallet snapshot;
+- ultimas reservas;
+- ultimas transacciones.
+
+No expone API keys ni secretos.
+
+## Validacion funcional ejecutada
+
+Se levanto servidor local con:
+
+```txt
+WEBHOOK_SECRET=test_secret PORT=3217 npm start
+```
+
+Prueba:
+
+1. `POST /api/subscription` con plan `Pro` para tener saldo disponible.
+2. `GET /api/ledger` antes de generar.
+3. `POST /api/generate/music` con:
+   - provider `SLT Composer`
+   - `webhookOnly: true`
+   - `idempotencyKey: ledger-m3-webhook-failure-test`
+4. `GET /api/ledger` despues de reservar.
+5. `POST /api/webhooks/replicate` con webhook firmado HMAC y status `failed`.
+6. `GET /api/ledger` despues del release.
+
+Resultado observado:
+
+```txt
+Antes:
+availableCredits: 1500
+heldCredits: 0
+
+Reservado:
+availableCredits: 1350
+heldCredits: 150
+
+Webhook FAILED / Release:
+availableCredits: 1500
+heldCredits: 0
+
+exactRelease: true
+```
+
+Transacciones observadas:
+
+```txt
+release 150 released
+reserve 150 reserved
+manual_subscription_plan_credit_reset 1470 posted
+opening_balance 30 posted
+```
+
+## Pruebas ejecutadas durante este modulo
+
+```txt
+node --check server/api-proxy.js
+```
+
+Resultado:
+
+```txt
+OK - sin errores de sintaxis.
+```
+
+```txt
+npm run lint
+```
+
+Resultado:
+
+```txt
+OK - exit 0. Oxlint reporto warnings existentes/no fatales sobre Fast Refresh, variables sin uso y catch params.
+```
+
+```txt
+npm run build
+```
+
+Resultado:
+
+```txt
+OK - Vite build completo en 868ms. Se regenero `dist/` como salida esperada del build.
+```
+
+## Commit sugerido
+
+```txt
+feat: implement double-entry credit ledger and reservations
+```
