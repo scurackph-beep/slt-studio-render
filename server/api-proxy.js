@@ -670,6 +670,207 @@ function generationIdempotencyKey(request, kind, phase) {
   return `${phase}:${requestIdentity(request, auth)}:${kind}:${clientKey}`;
 }
 
+const moderationLocalRules = [
+  {
+    category: "self_harm",
+    reason: "Self-harm intent or instructions are not allowed.",
+    patterns: [
+      /\b(kill myself|suicide|end my life|hurt myself|self[-\s]?harm)\b/i,
+      /\b(matarme|suicidarme|quitarme la vida|hacerme dano|hacerme daño|autolesion)\b/i
+    ]
+  },
+  {
+    category: "violence",
+    reason: "Violent harm instructions or threats are not allowed.",
+    patterns: [
+      /\b(how to|instructions? to|teach me to|help me)\s+(kill|murder|stab|shoot|poison|bomb)\b/i,
+      /\b(kill|murder|stab|shoot|poison)\s+(him|her|them|someone|people|a person|myself|yourself)\b/i,
+      /\b(bomb making|make a bomb|build a bomb|explosive device)\b/i,
+      /\b(como|cómo|ensen[aá]me|ayudame a|ayúdame a)\s+(matar|asesinar|apu[ñn]alar|disparar|envenenar)\b/i,
+      /\b(matar|asesinar|apu[ñn]alar|disparar|envenenar)\s+(a|me|te|lo|la|los|las|alguien|personas)\b/i
+    ]
+  },
+  {
+    category: "hate",
+    reason: "Hate, dehumanization or violent targeting of protected groups is not allowed.",
+    patterns: [
+      /\b(exterminate|eliminate|kill|wipe out)\s+(all\s+)?(jews|muslims|christians|immigrants|gay people|trans people|black people|latinos|women|disabled people)\b/i,
+      /\b(genocide|ethnic cleansing)\b/i,
+      /\b(exterminar|eliminar|matar)\s+(a\s+)?(judios|judíos|musulmanes|cristianos|inmigrantes|gays|personas trans|negros|latinos|mujeres|discapacitados)\b/i
+    ]
+  },
+  {
+    category: "prompt_injection",
+    reason: "Prompt injection attempts that target system secrets or hidden instructions are blocked.",
+    patterns: [
+      /\b(ignore|disregard|override)\s+(all\s+)?(previous|prior|system|developer)\s+(instructions?|messages?|rules?)\b/i,
+      /\b(reveal|show|print|dump|exfiltrate)\s+(the\s+)?(system prompt|developer message|api key|secret|environment variables?|\.env)\b/i,
+      /\b(jailbreak|dan mode|developer mode|bypass safety|bypass policy)\b/i,
+      /\b(ignora|olvida|anula)\s+(las\s+)?(instrucciones|reglas|mensajes)\s+(anteriores|del sistema|del desarrollador)\b/i,
+      /\b(muestra|revela|imprime|filtra)\s+(el\s+)?(system prompt|mensaje del sistema|api key|clave secreta|\.env|variables de entorno)\b/i
+    ]
+  }
+];
+
+function moderationTextFromRequest({ kind, title, prompt, payload = {} }) {
+  const fields = [
+    kind,
+    title,
+    prompt,
+    payload.description,
+    payload.negativePrompt,
+    payload.negative_prompt,
+    payload.lyrics,
+    payload.script,
+    payload.scene,
+    payload.style,
+    payload.tool,
+    payload.actionId
+  ];
+  return fields
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, envNumber("MODERATION_MAX_INPUT_CHARS", 6000));
+}
+
+function localModerateText(text = "") {
+  const categories = {};
+  const reasons = [];
+  for (const rule of moderationLocalRules) {
+    const matched = rule.patterns.some((pattern) => pattern.test(text));
+    if (matched) {
+      categories[rule.category] = true;
+      reasons.push(rule.reason);
+    }
+  }
+  return {
+    ok: reasons.length === 0,
+    provider: "local-policy",
+    flagged: reasons.length > 0,
+    categories,
+    categoryScores: Object.fromEntries(Object.keys(categories).map((category) => [category, 1])),
+    reasons,
+    latencyMs: 0
+  };
+}
+
+async function openAIModerateText(text = "") {
+  const startedAt = Date.now();
+  const data = await postJson("https://api.openai.com/v1/moderations", {
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    body: {
+      model: process.env.OPENAI_MODERATION_MODEL || "omni-moderation-latest",
+      input: text
+    },
+    timeoutMs: envNumber("OPENAI_MODERATION_TIMEOUT_MS", 2500)
+  });
+  const result = data.results?.[0] || {};
+  return {
+    ok: !result.flagged,
+    provider: "openai-moderation",
+    flagged: Boolean(result.flagged),
+    categories: result.categories || {},
+    categoryScores: result.category_scores || {},
+    reasons: Object.entries(result.categories || {})
+      .filter((entry) => entry[1])
+      .map(([category]) => `OpenAI moderation flagged ${category}.`),
+    raw: data,
+    latencyMs: Date.now() - startedAt
+  };
+}
+
+async function runInputModeration({ kind, title, prompt, payload = {} }) {
+  if (envFlag("MODERATION_DISABLED", false)) {
+    return { ok: true, provider: "disabled", flagged: false, categories: {}, reasons: [], skipped: true };
+  }
+  const text = moderationTextFromRequest({ kind, title, prompt, payload });
+  const localStartedAt = Date.now();
+  const local = localModerateText(text);
+  local.latencyMs = Date.now() - localStartedAt;
+  if (!local.ok) return local;
+
+  const shouldUseOpenAI = hasEnvValue("OPENAI_API_KEY") && (
+    envFlag("OPENAI_MODERATION_ENABLED", false) ||
+    String(process.env.MODERATION_PROVIDER || "").toLowerCase() === "openai"
+  );
+  if (!shouldUseOpenAI) {
+    return {
+      ...local,
+      provider: "local-policy",
+      simulated: true,
+      message: "OpenAI moderation not enabled; local policy gate passed."
+    };
+  }
+
+  try {
+    return await openAIModerateText(text);
+  } catch (error) {
+    if (envFlag("MODERATION_FAIL_CLOSED", false)) {
+      return {
+        ok: false,
+        provider: "openai-moderation",
+        flagged: true,
+        categories: { moderation_unavailable: true },
+        reasons: ["Moderation service unavailable and fail-closed is enabled."],
+        error: error.message || "Moderation service unavailable."
+      };
+    }
+    return {
+      ...local,
+      provider: "local-policy-fallback",
+      warning: error.message || "OpenAI moderation unavailable; local policy gate passed."
+    };
+  }
+}
+
+function moderationFailurePayload({ moderation, kind, title }) {
+  return {
+    ok: false,
+    code: "moderation_rejected",
+    error: "Prompt rejected by content policy.",
+    readableError: "Prompt rejected by content policy.",
+    kind,
+    title,
+    moderation: {
+      provider: moderation.provider,
+      flagged: moderation.flagged,
+      categories: moderation.categories,
+      categoryScores: moderation.categoryScores,
+      reasons: moderation.reasons,
+      latencyMs: moderation.latencyMs || 0
+    }
+  };
+}
+
+function outputModerationAssessment({ job, result = {}, outputUrls = [] }) {
+  const text = moderationTextFromRequest({
+    kind: job?.kind || "output",
+    title: job?.title || "",
+    prompt: [
+      result.responseText,
+      result.note,
+      result.raw?.error,
+      result.raw?.message,
+      Array.isArray(outputUrls) ? outputUrls.join("\n") : ""
+    ].filter(Boolean).join("\n"),
+    payload: {}
+  });
+  const local = localModerateText(text);
+  const reviewAll = envFlag("OUTPUT_MODERATION_REVIEW_ALL", false);
+  const externalAsset = outputUrls.some((url) => /^https?:\/\//i.test(url));
+  return {
+    gate: "output",
+    provider: "local-policy",
+    needs_review: reviewAll || !local.ok,
+    needsReview: reviewAll || !local.ok,
+    categories: local.categories,
+    reasons: local.reasons,
+    assetCount: outputUrls.length,
+    externalAsset
+  };
+}
+
 function getAuth(request) {
   const token = typeof request.header === "function" ? request.header("x-slt-session") : "";
   const session = token ? sessions.get(token) : null;
@@ -1183,6 +1384,9 @@ function serializeJob(job) {
     outputUrl: job.outputUrl || null,
     outputUrls: job.outputUrls || [],
     previewUrl: job.outputUrl || null,
+    needs_review: Boolean(job.needs_review),
+    needsReview: Boolean(job.needsReview),
+    outputModeration: job.outputModeration || null,
     error: job.error,
     reservationId: job.reservationId,
     reservationStatus: job.reservationStatus,
@@ -3501,6 +3705,7 @@ function completeAsyncJob({ job, providerRun, providerResult, message }) {
   const result = providerResult || providerRun?.providerResult || {};
   const outputUrls = extractProviderOutputUrls(result);
   const outputUrl = outputUrls[0] || result.previewUrl || null;
+  const outputModeration = outputModerationAssessment({ job, result, outputUrls });
   const providerName = providerRun?.providerName || job.provider;
   const providerRoute = providerRun?.route || job.providerRoute || [];
   const providerFallback = providerRun?.fallback || job.providerFallback || null;
@@ -3521,6 +3726,9 @@ function completeAsyncJob({ job, providerRun, providerResult, message }) {
     ledgerTransactionId: ledgerResolution.transaction?.id || job.ledgerTransactionId || null,
     outputUrl,
     outputUrls,
+    needs_review: outputModeration.needs_review,
+    needsReview: outputModeration.needsReview,
+    outputModeration,
     providerRoute,
     providerFallback,
     error: null
@@ -3550,6 +3758,9 @@ function completeAsyncJob({ job, providerRun, providerResult, message }) {
       previewUrl: outputUrl,
       outputUrl,
       outputUrls,
+      needs_review: outputModeration.needs_review,
+      needsReview: outputModeration.needsReview,
+      outputModeration,
       fallback: providerFallback,
       providerRoute,
       exportFormats: exportFormatsFor(job.kind)
@@ -3779,12 +3990,14 @@ function handleGenerate(kind) {
     if (failProviderIfRequested(request, response)) return;
 
     const checks = baseChecks(request, kind);
+    const prompt = request.body?.prompt || request.body?.description || "";
+    const title = request.body?.title || `${kind} project`;
     if (!checks.plan.ok) {
       const failed = buildFailedEntry({
         kind,
-        title: request.body?.title || `${kind} project`,
+        title,
         providerName: checks.provider.name,
-        prompt: request.body?.prompt || request.body?.description || "",
+        prompt,
         message: checks.plan.message,
         code: checks.plan.code || "plan_limit"
       });
@@ -3792,12 +4005,19 @@ function handleGenerate(kind) {
       response.status(checks.plan.statusCode || 403).json({ ok: false, checks, historyItem: failed, error: checks.plan.message, code: checks.plan.code || "plan_limit" });
       return;
     }
+
+    const inputModeration = await runInputModeration({ kind, title, prompt, payload: request.body || {} });
+    if (!inputModeration.ok) {
+      response.status(400).json(moderationFailurePayload({ moderation: inputModeration, kind, title }));
+      return;
+    }
+
     if (!checks.credits.ok) {
       const failed = buildFailedEntry({
         kind,
-        title: request.body?.title || `${kind} project`,
+        title,
         providerName: checks.provider.name,
-        prompt: request.body?.prompt || request.body?.description || "",
+        prompt,
         message: checks.credits.readableError,
         code: "insufficient_credits"
       });
@@ -3806,8 +4026,6 @@ function handleGenerate(kind) {
       return;
     }
 
-    const prompt = request.body?.prompt || request.body?.description || "";
-    const title = request.body?.title || `${kind} project`;
     const providerName = checks.provider.name;
     let selectedProviderName = providerName;
     let runtimeChecks = checks;
@@ -4538,6 +4756,12 @@ app.post("/api/assist", async (request, response) => {
   const prompt = request.body?.prompt || "What would you like to create today?";
   const title = request.body?.title || "Virtual Assist";
 
+  const inputModeration = await runInputModeration({ kind: "assist", title, prompt, payload: request.body || {} });
+  if (!inputModeration.ok) {
+    response.status(400).json(moderationFailurePayload({ moderation: inputModeration, kind: "assist", title }));
+    return;
+  }
+
   if (!checks.credits.ok) {
     const failed = buildFailedEntry({
       kind: "assist",
@@ -5142,6 +5366,7 @@ app.get("/api/ledger", (request, response) => {
     ok: true,
     auth: getAuth(request),
     wallet: ledgerSnapshot(),
+    jobCount: state.jobs.length,
     reservations: state.creditReservations.slice(0, 20),
     transactions: state.creditTransactions.slice(0, 50)
   });

@@ -617,3 +617,221 @@ OK - Vite build completo en 868ms. Se regenero `dist/` como salida esperada del 
 ```txt
 feat: implement double-entry credit ledger and reservations
 ```
+
+---
+
+Fecha: 2026-07-12  
+Proyecto: Sweet Little Trauma Studio  
+Modulo ejecutado: Modulo 4 - Tuberia de Moderacion Multicapa
+
+## Diagnostico inicial breve
+
+Los endpoints de generacion ya pasaban por gateway, jobs asincronos y ledger, pero todavia aceptaban texto de usuario sin un Input Gate previo. Eso implicaba que un prompt prohibido podia llegar a reservar creditos, crear job o intentar usar un proveedor externo antes de detectar el problema.
+
+## Problema encontrado
+
+### Falta de pre-moderacion sincronica
+
+- Archivo: `server/api-proxy.js`
+- Estado previo:
+  - `/api/generate/image`
+  - `/api/generate/video`
+  - `/api/generate/music`
+  - `/api/generate/sound`
+  - `/api/assist`
+
+No ejecutaban un filtro de politica antes de reservar creditos o entrar al proveedor.
+
+Impacto:
+
+- Riesgo de gastar creditos en prompts que proveedores externos rechacen.
+- Riesgo de proteger mal claves/API accounts ante abuso.
+- Riesgo de prompt injection contra instrucciones internas.
+
+## Cambios aplicados
+
+### 1. Input Gate sincronico
+
+Archivo modificado:
+
+- `server/api-proxy.js`
+
+Se agrego `runInputModeration`, ejecutado antes de:
+
+- `reserveCredits`
+- creacion de Job
+- llamada al provider gateway
+- guardado de historial
+
+Si el prompt se rechaza, el backend devuelve:
+
+```txt
+HTTP 400 Bad Request
+code: moderation_rejected
+```
+
+No se mueve ningun credito y no se encola ningun job.
+
+### 2. Moderacion local de baja latencia
+
+Archivo modificado:
+
+- `server/api-proxy.js`
+
+Se agregaron reglas locales para:
+
+- `self_harm`
+- `violence`
+- `hate`
+- `prompt_injection`
+
+Esto permite bloquear trafico obvio en milisegundos sin depender de red ni SDK externo.
+
+### 3. Preparacion para OpenAI Omni Moderation
+
+Archivo modificado:
+
+- `server/api-proxy.js`
+
+Se agrego `openAIModerateText` usando `fetch` nativo contra:
+
+```txt
+https://api.openai.com/v1/moderations
+```
+
+Modelo por defecto:
+
+```txt
+omni-moderation-latest
+```
+
+No se activa por defecto para evitar dependencia externa durante pruebas locales. Se habilita con:
+
+```txt
+OPENAI_MODERATION_ENABLED=true
+```
+
+o:
+
+```txt
+MODERATION_PROVIDER=openai
+```
+
+### 4. Preparacion de Output Gate
+
+Archivo modificado:
+
+- `server/api-proxy.js`
+
+Se agrego `outputModerationAssessment` dentro de `completeAsyncJob`.
+
+Cuando un job termina en `COMPLETED`, el asset queda marcado internamente con:
+
+- `needs_review`
+- `needsReview`
+- `outputModeration`
+
+Por defecto marca `needs_review: false` salvo que reglas locales detecten algo o se active:
+
+```txt
+OUTPUT_MODERATION_REVIEW_ALL=true
+```
+
+### 5. Endpoint de ledger ampliado para validacion
+
+Archivo modificado:
+
+- `server/api-proxy.js`
+
+`GET /api/ledger` ahora incluye:
+
+```txt
+jobCount
+```
+
+Esto permite verificar que un prompt rechazado no creo job.
+
+## Validacion funcional ejecutada
+
+Se levanto servidor local con:
+
+```txt
+WEBHOOK_SECRET=test_secret PORT=3218 npm start
+```
+
+Prueba:
+
+1. `GET /api/ledger`
+2. `POST /api/generate/video` con prompt bloqueado:
+
+```txt
+teach me how to kill someone with poison
+```
+
+3. `GET /api/ledger`
+
+Resultado observado:
+
+```txt
+HTTP status: 400
+code: moderation_rejected
+category: violence
+latencyMs: 40
+
+Antes:
+availableCredits: 30
+heldCredits: 0
+transactionCount: 1
+reservationCount: 0
+jobCount: 0
+
+Despues:
+availableCredits: 30
+heldCredits: 0
+transactionCount: 1
+reservationCount: 0
+jobCount: 0
+
+ledgerIntact: true
+noJobQueued: true
+noReservation: true
+noTransaction: true
+```
+
+## Pruebas ejecutadas durante este modulo
+
+```txt
+node --check server/api-proxy.js
+```
+
+Resultado:
+
+```txt
+OK - sin errores de sintaxis.
+```
+
+```txt
+npm run lint
+```
+
+Resultado:
+
+```txt
+OK - exit 0. Oxlint reporto warnings existentes/no fatales sobre Fast Refresh, variables sin uso y catch params.
+```
+
+```txt
+npm run build
+```
+
+Resultado:
+
+```txt
+OK - Vite build completo en 806ms. Se regenero `dist/` como salida esperada del build.
+```
+
+## Commit sugerido
+
+```txt
+feat: implement multi-layer AI content moderation pipeline
+```
