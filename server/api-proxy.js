@@ -238,6 +238,14 @@ const defaultProvider = {
   subscription: "Stripe"
 };
 
+const providerFallbackChains = {
+  image: ["OpenAI Images", "Gemini Image", "Grok Image", "Stability", "Replicate"],
+  video: ["Seedance", "Runway", "Luma", "Kling", "Wan", "Hailuo"],
+  music: ["MiniMax Music", "SLT Composer", "AudioCraft local", "Riffusion", "Stable Audio"],
+  sound: ["ElevenLabs", "OpenAI Audio", "MiniMax Speech", "Stability Audio", "Moises"],
+  assist: ["OpenAI", "Gemini", "Meta Llama", "Hermes local", "Local model"]
+};
+
 const planCreditAllowance = {
   Free: 30,
   Pro: 1500,
@@ -410,9 +418,9 @@ function getAuth(request) {
 }
 
 function isOwnerAuth(auth = {}) {
-  const ownerUserId = process.env.LOCAL_OWNER_USER_ID || "demo-user";
+  const ownerUserId = process.env.LOCAL_OWNER_USER_ID || "";
   const ownerEmail = process.env.CEO_EMAIL || "";
-  return auth.role === "CEO" || auth.userId === ownerUserId || (ownerEmail && auth.email === ownerEmail);
+  return auth.role === "CEO" || (ownerUserId && auth.userId === ownerUserId) || (ownerEmail && auth.email === ownerEmail);
 }
 
 function normalizeProviderName(name = "") {
@@ -529,6 +537,68 @@ function providerList(kind = "") {
     .filter((provider) => !kind || provider.kind === kind);
 }
 
+function uniqueProviders(names = []) {
+  const seen = new Set();
+  return names
+    .map((name) => normalizeProviderName(String(name || "")))
+    .filter((name) => {
+      if (!name || seen.has(name)) return false;
+      seen.add(name);
+      return true;
+    });
+}
+
+function providerFallbackChain(kind, requestedProvider = "") {
+  return uniqueProviders([
+    requestedProvider,
+    ...(providerFallbackChains[kind] || []),
+    defaultProvider[kind]
+  ]).filter((name) => providerCatalog[name]?.kind === kind);
+}
+
+function providerFallbacksEnabled(payload = {}) {
+  if (payload.allowFallback === false || payload.fallback === false) return false;
+  if (String(payload.providerFallback || "").toLowerCase() === "off") return false;
+  return envFlag("PROVIDER_FALLBACKS_ENABLED", true);
+}
+
+function providerRoutingError(status) {
+  const error = new Error(status.message || providerFallbackMessage);
+  error.code = status.status || "provider_not_connected";
+  error.statusCode = status.connected ? 502 : 400;
+  return error;
+}
+
+function shouldForceProviderFailure(payload = {}, status, attemptIndex = 0) {
+  const forced = payload.forceProviderFailure;
+  if (!forced) return false;
+  if (forced === true) return attemptIndex === 0;
+  const forcedProviders = String(forced)
+    .split(",")
+    .map((item) => normalizeProviderName(item.trim()))
+    .filter(Boolean);
+  return forcedProviders.includes(status.name);
+}
+
+function simulatedProviderFailure(status) {
+  const error = new Error(`${status.name} simulated HTTP 503 for fallback verification.`);
+  error.code = "provider_simulated_503";
+  error.statusCode = 503;
+  return error;
+}
+
+function isProviderFallbackError(error) {
+  const code = String(error?.code || "");
+  if (["insufficient_credits", "plan_limit", "daily_video_limit_reached", "video_duration_limit", "ceo_video_duration_limit"].includes(code)) {
+    return false;
+  }
+  if (["missing_key", "missing_config", "needs_config", "prepared", "disabled", "internal", "provider_not_connected", "provider_simulated_503"].includes(code)) {
+    return true;
+  }
+  const message = String(error?.message || "").toLowerCase();
+  return /429|rate|quota|billing|timeout|abort|offline|unavailable|temporar|5\d\d|500|502|503|504/.test(message);
+}
+
 function providerConnected(kind) {
   return (providerKeys[kind] || []).some((key) => Boolean(process.env[key]));
 }
@@ -585,8 +655,18 @@ function validatePlan(kind, request, auth) {
   return { ok: true, mode: "mock", message: "Plan validation passed." };
 }
 
-function validateCredits(kind) {
+function validateCredits(kind, auth = {}) {
   const cost = creditCostFor(kind);
+  if (isOwnerAuth(auth)) {
+    return {
+      ok: true,
+      cost: 0,
+      originalCost: cost,
+      remaining: state.subscription.credits,
+      mode: "ceo-unmetered",
+      message: "CEO mode: internal SLT credits are not charged."
+    };
+  }
   if (state.subscription.credits < cost) {
     return {
       ok: false,
@@ -667,6 +747,10 @@ function videoClipDuration(payload = {}, providerName = "Seedance", fallback = 5
   return plan.clipDurationSeconds || fallback;
 }
 
+function videoAspectRatio(payload = {}, fallback = "16:9") {
+  return String(payload.aspectRatio || payload.aspect_ratio || payload.ratio || payload.videoRatio || fallback);
+}
+
 function baseChecks(request, kind) {
   const requestedProvider = request.body?.provider || defaultProvider[kind] || "Mock Provider";
   const status = providerStatus(requestedProvider);
@@ -674,13 +758,13 @@ function baseChecks(request, kind) {
   return {
     auth,
     plan: validatePlan(kind, request, auth),
-    credits: validateCredits(kind),
+    credits: validateCredits(kind, auth),
     provider: status
   };
 }
 
 function failProviderIfRequested(request, response) {
-  if (request.body?.forceProviderFailure) {
+  if (request.body?.forceProviderFailure && request.body?.allowFallback === false) {
     response.status(503).json({
       ok: false,
       error: "Provider Offline",
@@ -804,6 +888,235 @@ async function getJson(url, { headers = {}, timeoutMs = 60000 } = {}) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function providerCreditFetch(name, url, { headers = {}, timeoutMs = 12000 } = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers,
+      signal: controller.signal
+    });
+    const text = await response.text();
+    let data = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch (_error) {
+      data = { raw: text };
+    }
+    return { name, ok: response.ok, status: response.status, data };
+  } catch (error) {
+    return { name, ok: false, status: "error", error: error.name || error.message };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function creditUnavailable(name, status, message = "Credit balance is not exposed by the tested API endpoint.") {
+  return {
+    name,
+    kind: providerStatus(name).kind || "unknown",
+    connected: providerStatus(name).connected,
+    ok: false,
+    status: status || providerStatus(name).status,
+    balance: null,
+    unit: "",
+    detail: message
+  };
+}
+
+function creditConnectedNoApi(name, detail = "Connected. This provider does not expose account credit balance through the normal API key endpoint.") {
+  const status = providerStatus(name);
+  return {
+    name,
+    kind: status.kind,
+    connected: status.connected,
+    ok: status.connected,
+    status: status.status,
+    balance: null,
+    unit: "",
+    detail
+  };
+}
+
+async function readProviderCredit(name) {
+  const status = providerStatus(name);
+  if (!status.connected) {
+    return {
+      name,
+      kind: status.kind,
+      connected: false,
+      ok: false,
+      status: status.status,
+      balance: null,
+      unit: "",
+      detail: status.message
+    };
+  }
+
+  try {
+    if (name === "Stability") {
+      const result = await providerCreditFetch(name, `${(process.env.STABILITY_API_URL || "https://api.stability.ai").replace(/\/$/, "")}/v1/user/balance`, {
+        headers: { Authorization: `Bearer ${process.env.STABILITY_API_KEY}` }
+      });
+      return result.ok
+        ? { name, kind: status.kind, connected: true, ok: true, status: "ok", balance: result.data.credits ?? null, unit: "credits", detail: "Stability account balance." }
+        : creditUnavailable(name, result.status, result.data?.message || result.error);
+    }
+
+    if (name === "ElevenLabs") {
+      const result = await providerCreditFetch(name, "https://api.elevenlabs.io/v1/user/subscription", {
+        headers: { "xi-api-key": process.env.ELEVENLABS_API_KEY }
+      });
+      if (!result.ok) return creditUnavailable(name, result.status, result.data?.detail || result.error);
+      const used = Number(result.data.character_count || 0);
+      const limit = Number(result.data.character_limit || 0);
+      return {
+        name,
+        kind: status.kind,
+        connected: true,
+        ok: true,
+        status: "ok",
+        balance: Math.max(limit - used, 0),
+        unit: "characters",
+        detail: `${used} used of ${limit}. Tier: ${result.data.tier || "unknown"}.`
+      };
+    }
+
+    if (name === "HeyGen") {
+      const result = await providerCreditFetch(name, `${(process.env.HEYGEN_API_URL || "https://api.heygen.com").replace(/\/$/, "")}/v2/user/remaining_quota`, {
+        headers: { "x-api-key": process.env.HEYGEN_API_KEY }
+      });
+      return result.ok
+        ? { name, kind: status.kind, connected: true, ok: true, status: "ok", balance: result.data.data?.remaining_quota ?? null, unit: "quota", detail: `API quota: ${result.data.data?.details?.api ?? result.data.data?.remaining_quota ?? "unknown"}.` }
+        : creditUnavailable(name, result.status, result.data?.message || result.error);
+    }
+
+    if (name === "D-ID") {
+      const result = await providerCreditFetch(name, `${(process.env.DID_API_URL || "https://api.d-id.com").replace(/\/$/, "")}/credits`, {
+        headers: { Authorization: `Basic ${process.env.DID_API_KEY}` }
+      });
+      return result.ok
+        ? { name, kind: status.kind, connected: true, ok: true, status: "ok", balance: result.data.remaining ?? 0, unit: "credits", detail: `Total: ${result.data.total ?? 0}.` }
+        : creditUnavailable(name, result.status, result.data?.message || result.error);
+    }
+
+    if (name === "Leonardo") {
+      const result = await providerCreditFetch(name, `${(process.env.LEONARDO_API_URL || "https://cloud.leonardo.ai/api/rest/v1").replace(/\/$/, "")}/me`, {
+        headers: { authorization: `Bearer ${process.env.LEONARDO_API_KEY}` }
+      });
+      if (!result.ok) return creditUnavailable(name, result.status, result.data?.error || result.error);
+      const details = result.data.user_details?.[0] || {};
+      return {
+        name,
+        kind: status.kind,
+        connected: true,
+        ok: true,
+        status: "ok",
+        balance: details.apiPaidTokens ?? details.subscriptionTokens ?? null,
+        unit: "tokens",
+        detail: `API paid: ${details.apiPaidTokens ?? "—"} / subscription: ${details.subscriptionTokens ?? "—"} / GPT: ${details.subscriptionGptTokens ?? "—"}.`
+      };
+    }
+
+    if (name === "Recraft") {
+      const result = await providerCreditFetch(name, `${(process.env.RECRAFT_API_URL || "https://external.api.recraft.ai/v1").replace(/\/$/, "")}/users/me`, {
+        headers: { Authorization: `Bearer ${process.env.RECRAFT_API_KEY}` }
+      });
+      return result.ok
+        ? { name, kind: status.kind, connected: true, ok: true, status: "ok", balance: result.data.credits ?? null, unit: "credits", detail: "Recraft account credits." }
+        : creditUnavailable(name, result.status, result.data?.message || result.error);
+    }
+
+    if (name === "Runway") {
+      const result = await providerCreditFetch(name, `${(process.env.RUNWAY_API_URL || "https://api.dev.runwayml.com/v1").replace(/\/$/, "")}/organization`, {
+        headers: {
+          Authorization: `Bearer ${process.env.RUNWAY_API_KEY}`,
+          "X-Runway-Version": process.env.RUNWAY_API_VERSION || "2024-11-06"
+        }
+      });
+      return result.ok
+        ? { name, kind: status.kind, connected: true, ok: true, status: "ok", balance: result.data.creditBalance ?? null, unit: "credits", detail: `Monthly max spend: ${result.data.tier?.maxMonthlyCreditSpend ?? "unknown"}.` }
+        : creditUnavailable(name, result.status, result.data?.message || result.error);
+    }
+
+    if (name === "Meta Llama") {
+      const result = await providerCreditFetch("OpenRouter", "https://openrouter.ai/api/v1/credits", {
+        headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` }
+      });
+      return result.ok
+        ? { name, kind: status.kind, connected: true, ok: true, status: "ok", balance: result.data.data?.total_credits ?? null, unit: "credits", detail: `OpenRouter usage: ${result.data.data?.total_usage ?? 0}.` }
+        : creditUnavailable(name, result.status, result.data?.error?.message || result.error);
+    }
+
+    if (name === "Stripe") {
+      const result = await providerCreditFetch(name, "https://api.stripe.com/v1/balance", {
+        headers: { Authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}` }
+      });
+      const usd = result.data.available?.find((item) => item.currency === "usd")?.amount ?? 0;
+      return result.ok
+        ? { name, kind: status.kind, connected: true, ok: true, status: "ok", balance: usd / 100, unit: "USD available", detail: `Mode: ${result.data.livemode ? "live" : "test"}. Pending USD: ${(result.data.pending?.find((item) => item.currency === "usd")?.amount ?? 0) / 100}.` }
+        : creditUnavailable(name, result.status, result.data?.error?.message || result.error);
+    }
+  } catch (error) {
+    return creditUnavailable(name, "error", error.message);
+  }
+
+  if (["OpenAI", "OpenAI Images", "OpenAI Audio", "GPT voz + texto", "GPT texto", "GPT-4.1", "GPT-4o", "Grok Image", "Gemini", "Gemini Image", "Veo", "Replicate", "Flux", "FLUX", "Stable Diffusion", "Wan", "AudioCraft local", "Riffusion"].includes(name)) {
+    return creditConnectedNoApi(name);
+  }
+
+  if (["Seedance", "OmniHuman"].includes(name)) {
+    return creditConnectedNoApi(name, "Connected through BytePlus. Balance must be checked in BytePlus Console billing.");
+  }
+
+  if (["Kling", "Hailuo", "MiniMax Music", "MiniMax Speech", "Luma", "PixVerse", "Moises"].includes(name)) {
+    return creditConnectedNoApi(name, "Connected. I do not have a confirmed public balance endpoint for this provider yet.");
+  }
+
+  if (["Hermes local", "Local model", "ComfyUI local", "SLT Composer", "FFmpeg"].includes(name)) {
+    return { name, kind: status.kind, connected: status.connected, ok: true, status: status.status, balance: null, unit: "local", detail: "Local/internal provider. No external provider credits." };
+  }
+
+  return creditUnavailable(name, status.status, status.message);
+}
+
+async function providerCreditSummary() {
+  const names = [
+    "Stability",
+    "ElevenLabs",
+    "HeyGen",
+    "D-ID",
+    "Leonardo",
+    "Recraft",
+    "Runway",
+    "Meta Llama",
+    "Stripe",
+    "Seedance",
+    "OmniHuman",
+    "OpenAI",
+    "Grok Image",
+    "Gemini",
+    "Veo",
+    "Replicate",
+    "Wan",
+    "Kling",
+    "Hailuo",
+    "MiniMax Music",
+    "MiniMax Speech",
+    "Luma",
+    "PixVerse",
+    "Moises",
+    "Hermes local",
+    "ComfyUI local"
+  ];
+  const balances = await Promise.all(names.map(readProviderCredit));
+  return balances.map((item) => ({
+    ...item,
+    checkedAt: new Date().toISOString()
+  }));
 }
 
 function appendStripeParam(params, key, value) {
@@ -1303,7 +1616,7 @@ async function callReplicateWanVideo({ prompt, title, payload = {} }) {
     model: process.env.WAN_REPLICATE_MODEL || "wavespeedai/wan-2.1-t2v-480p",
     input: {
       prompt: prompt || title || "Sweet Little Trauma Studio cinematic video.",
-      aspect_ratio: process.env.WAN_ASPECT_RATIO || "16:9",
+      aspect_ratio: videoAspectRatio(payload, process.env.WAN_ASPECT_RATIO || "16:9"),
       duration: videoClipDuration(payload, "Wan", 5),
       fast_mode: process.env.WAN_FAST_MODE || "Balanced",
       sample_steps: Number(process.env.WAN_SAMPLE_STEPS || 30),
@@ -1851,7 +2164,7 @@ async function callSeedanceVideo({ prompt, title, payload = {} }) {
           text: prompt || title || "Create a cinematic black neon studio video shot."
         }
       ],
-      ratio: process.env.SEEDANCE_RATIO || "16:9",
+      ratio: videoAspectRatio(payload, process.env.SEEDANCE_RATIO || "16:9"),
       duration: videoClipDuration(payload, "Seedance", Number(process.env.SEEDANCE_DURATION || 5)),
       resolution: process.env.SEEDANCE_RESOLUTION || "720p"
     },
@@ -1926,7 +2239,7 @@ async function callVeoVideo({ prompt, title, payload = {} }) {
         }
       ],
       parameters: {
-        aspectRatio: process.env.VEO_ASPECT_RATIO || "16:9",
+        aspectRatio: videoAspectRatio(payload, process.env.VEO_ASPECT_RATIO || "16:9"),
         durationSeconds: videoClipDuration(payload, "Veo", Number(process.env.VEO_DURATION || 8))
       }
     },
@@ -1957,7 +2270,7 @@ async function callRunwayVideo({ prompt, title, payload = {} }) {
     body: {
       model: process.env.RUNWAY_MODEL_ID || "gen4.5",
       promptText: prompt || title || "Create a cinematic futuristic garage studio video shot.",
-      ratio: process.env.RUNWAY_RATIO || "1280:720",
+      ratio: videoAspectRatio(payload, process.env.RUNWAY_RATIO || "1280:720").replace("16:9", "1280:720").replace("9:16", "720:1280"),
       duration: videoClipDuration(payload, "Runway", Number(process.env.RUNWAY_DURATION || 5))
     },
     timeoutMs: 90000
@@ -1984,7 +2297,7 @@ async function callLumaVideo({ prompt, title, payload = {} }) {
     body: {
       model: process.env.LUMA_MODEL_ID || "ray-2",
       prompt: prompt || title || "Create a cinematic futuristic garage studio video shot.",
-      aspect_ratio: process.env.LUMA_ASPECT_RATIO || "16:9",
+      aspect_ratio: videoAspectRatio(payload, process.env.LUMA_ASPECT_RATIO || "16:9"),
       duration: `${videoClipDuration(payload, "Luma", Number.parseInt(process.env.LUMA_DURATION || "5", 10) || 5)}s`,
       resolution: process.env.LUMA_RESOLUTION || "720p"
     },
@@ -2036,7 +2349,7 @@ async function callKlingVideo({ prompt, title, payload = {} }) {
       negative_prompt: process.env.KLING_NEGATIVE_PROMPT || "",
       cfg_scale: Number(process.env.KLING_CFG_SCALE || 0.5),
       mode: process.env.KLING_MODE || "std",
-      aspect_ratio: process.env.KLING_ASPECT_RATIO || "16:9",
+      aspect_ratio: videoAspectRatio(payload, process.env.KLING_ASPECT_RATIO || "16:9"),
       duration: String(videoClipDuration(payload, "Kling", Number(process.env.KLING_DURATION || 5)))
     },
     timeoutMs: 90000
@@ -2065,7 +2378,7 @@ async function callPixVerseVideo({ prompt, title, payload = {} }) {
       "Ai-trace-id": requestId("pixverse")
     },
     body: {
-      aspect_ratio: process.env.PIXVERSE_ASPECT_RATIO || "16:9",
+      aspect_ratio: videoAspectRatio(payload, process.env.PIXVERSE_ASPECT_RATIO || "16:9"),
       duration: videoClipDuration(payload, "PixVerse", Number(process.env.PIXVERSE_DURATION || 5)),
       model: process.env.PIXVERSE_MODEL || "v4.5",
       motion_mode: process.env.PIXVERSE_MOTION_MODE || "normal",
@@ -2462,6 +2775,26 @@ async function callGenericEndpoint({ providerStatus: status, prompt, title, kind
   });
 }
 
+class ProviderAdapter {
+  constructor(status) {
+    this.name = status.name;
+    this.kind = status.kind;
+    this.adapter = status.adapter;
+    this.status = status;
+  }
+
+  async generate({ kind, prompt, title, payload = {} }) {
+    return attemptProviderCall({
+      kind,
+      providerStatus: this.status,
+      prompt,
+      title,
+      providerName: this.name,
+      payload
+    });
+  }
+}
+
 async function attemptProviderCall({ kind, providerStatus: status, prompt, title, providerName, payload = {} }) {
   if (!status.connected) {
     const error = new Error(status.message || providerFallbackMessage);
@@ -2508,6 +2841,82 @@ async function attemptProviderCall({ kind, providerStatus: status, prompt, title
     previewUrl: `local-placeholder://${kind}/${Date.now()}`,
     note: "Local placeholder provider completed."
   };
+}
+
+async function runProviderGateway({ kind, providerStatus: requestedStatus, prompt, title, payload = {} }) {
+  const requestedProvider = requestedStatus.name;
+  const fallbackEnabled = providerFallbacksEnabled(payload);
+  const candidates = providerFallbackChain(kind, requestedProvider);
+  const route = [];
+  let lastError = null;
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidateName = candidates[index];
+    const status = providerStatus(candidateName);
+    const routeItem = {
+      provider: status.name,
+      adapter: status.adapter,
+      status: status.status,
+      attempted: false,
+      ok: false
+    };
+
+    if (!status.connected) {
+      const error = providerRoutingError(status);
+      lastError = error;
+      route.push({
+        ...routeItem,
+        skipped: true,
+        code: error.code,
+        message: status.message || providerFallbackMessage
+      });
+      if (!fallbackEnabled) break;
+      continue;
+    }
+
+    routeItem.attempted = true;
+
+    try {
+      if (shouldForceProviderFailure(payload, status, index)) {
+        throw simulatedProviderFailure(status);
+      }
+
+      const adapter = new ProviderAdapter(status);
+      const result = await adapter.generate({ kind, prompt, title, payload });
+      const fallback = status.name === requestedProvider
+        ? null
+        : {
+            from: requestedProvider,
+            to: status.name,
+            reason: lastError ? readableProviderError(lastError, requestedProvider) : "Primary provider unavailable."
+          };
+
+      route.push({ ...routeItem, ok: true });
+      return {
+        providerName: status.name,
+        providerStatus: status,
+        providerResult: result,
+        fallback,
+        route
+      };
+    } catch (error) {
+      lastError = error;
+      route.push({
+        ...routeItem,
+        code: error.code || "provider_error",
+        message: readableProviderError(error, status.name)
+      });
+
+      if (!fallbackEnabled || !isProviderFallbackError(error)) {
+        break;
+      }
+    }
+  }
+
+  const error = lastError || new Error(providerFallbackMessage);
+  error.code = error.code || "provider_gateway_failed";
+  error.route = route;
+  throw error;
 }
 
 function buildFailedEntry({ kind, title, providerName, prompt, message, code }) {
@@ -2576,6 +2985,8 @@ function handleGenerate(kind) {
     const prompt = request.body?.prompt || request.body?.description || "";
     const title = request.body?.title || `${kind} project`;
     const providerName = checks.provider.name;
+    let selectedProviderName = providerName;
+    let runtimeChecks = checks;
     try {
       let payload = request.body || {};
       let videoPlan = null;
@@ -2583,27 +2994,42 @@ function handleGenerate(kind) {
         videoPlan = resolveVideoPlan({ payload, auth: checks.auth, providerName });
         payload = { ...payload, videoPlan };
       }
-      const providerResult = kind === "video" && videoPlan?.mode === "timeline"
-        ? buildLongVideoTimeline({ prompt, title, providerName, plan: videoPlan })
-        : await attemptProviderCall({
-          kind,
-          providerStatus: checks.provider,
-          prompt,
-          title,
-          providerName,
-          payload
-        });
+      const providerRun = kind === "video" && videoPlan?.mode === "timeline"
+        ? {
+            providerName,
+            providerStatus: checks.provider,
+            providerResult: buildLongVideoTimeline({ prompt, title, providerName, plan: videoPlan }),
+            fallback: null,
+            route: [{ provider: providerName, adapter: checks.provider.adapter, status: "timeline_planned", attempted: true, ok: true }]
+          }
+        : await runProviderGateway({
+            kind,
+            providerStatus: checks.provider,
+            prompt,
+            title,
+            payload
+          });
+      selectedProviderName = providerRun.providerName;
+      runtimeChecks = {
+        ...checks,
+        requestedProvider: checks.provider,
+        provider: providerRun.providerStatus,
+        providerFallback: providerRun.fallback,
+        providerRoute: providerRun.route
+      };
       const entry = {
         id: requestId(kind),
         kind,
         title,
-        provider: providerName,
+        provider: selectedProviderName,
         prompt,
         status: "completed",
-        message: `${kind} generation completed with ${providerName}.`,
+        message: `${kind} generation completed with ${selectedProviderName}.`,
         creditsUsed: checks.credits.cost,
         result: {
-          ...providerResult,
+          ...providerRun.providerResult,
+          fallback: providerRun.fallback,
+          providerRoute: providerRun.route,
           exportFormats: exportFormatsFor(kind)
         },
         createdAt: new Date().toISOString()
@@ -2615,7 +3041,7 @@ function handleGenerate(kind) {
 
       response.json({
         ok: true,
-        checks,
+        checks: runtimeChecks,
         project,
         historyItem: entry,
         emptyState: emptyStateFor(kind),
@@ -2624,11 +3050,11 @@ function handleGenerate(kind) {
       });
     } catch (error) {
       const code = error.code || "provider_error";
-      const readableError = code === "provider_not_connected" ? providerFallbackMessage : readableProviderError(error, providerName);
+      const readableError = code === "provider_not_connected" ? providerFallbackMessage : readableProviderError(error, selectedProviderName);
       const failedEntry = buildFailedEntry({
         kind,
         title,
-        providerName,
+        providerName: selectedProviderName,
         prompt,
         message: readableError,
         code
@@ -2641,13 +3067,14 @@ function handleGenerate(kind) {
         : 502;
       response.status(statusCode).json({
         ok: false,
-        checks,
+        checks: runtimeChecks,
         historyItem: failedEntry,
         code,
         warning: readableError,
         error: readableError,
         readableError,
         providerError: error.message || "",
+        providerRoute: error.route || runtimeChecks.providerRoute || [],
         emptyState: emptyStateFor(kind),
         errorFallback: errorFallbackFor(kind)
       });
@@ -3019,29 +3446,44 @@ app.post("/api/assist", async (request, response) => {
   }
 
   try {
-    const providerResult = await attemptProviderCall({
+    const providerRun = await runProviderGateway({
       kind: "assist",
       providerStatus: checks.provider,
       prompt,
       title,
-      providerName: checks.provider.name
+      payload: request.body || {}
     });
     const entry = {
       id: requestId("assist"),
       kind: "assist",
       title,
-      provider: checks.provider.name,
+      provider: providerRun.providerName,
       prompt,
       status: "completed",
       message: "Assistant response ready.",
-      response: providerResult.responseText || "I can help you plan, improve or control Image, Video, Sound FX, Music, Fashion and Engineering projects.",
+      response: providerRun.providerResult.responseText || "I can help you plan, improve or control Image, Video, Sound FX, Music, Fashion and Engineering projects.",
       creditsUsed: checks.credits.cost,
-      result: providerResult,
+      result: {
+        ...providerRun.providerResult,
+        fallback: providerRun.fallback,
+        providerRoute: providerRun.route
+      },
       createdAt: new Date().toISOString()
     };
     state.subscription.credits = checks.credits.remaining;
     saveHistory(entry);
-    response.json({ ok: true, checks, historyItem: entry, success: "Assistant response ready." });
+    response.json({
+      ok: true,
+      checks: {
+        ...checks,
+        requestedProvider: checks.provider,
+        provider: providerRun.providerStatus,
+        providerFallback: providerRun.fallback,
+        providerRoute: providerRun.route
+      },
+      historyItem: entry,
+      success: "Assistant response ready."
+    });
   } catch (error) {
     const code = error.code || "provider_error";
     const readableError = code === "provider_not_connected" ? providerFallbackMessage : readableProviderError(error, checks.provider.name);
@@ -3063,7 +3505,41 @@ app.post("/api/assist", async (request, response) => {
       error: readableError,
       readableError,
       providerError: error.message || "",
+      providerRoute: error.route || [],
       errorFallback: errorFallbackFor("assist")
+    });
+  }
+});
+
+app.get("/api/ceo/provider-credits", async (request, response) => {
+  const auth = getAuth(request);
+  if (!isOwnerAuth(auth)) {
+    response.status(403).json({
+      ok: false,
+      auth,
+      code: "ceo_required",
+      error: "CEO mode required.",
+      readableError: "Enter CEO mode to view provider credit balances."
+    });
+    return;
+  }
+
+  try {
+    const providers = await providerCreditSummary();
+    response.json({
+      ok: true,
+      auth,
+      providers,
+      checkedAt: new Date().toISOString(),
+      message: "Provider credit summary ready."
+    });
+  } catch (error) {
+    response.status(502).json({
+      ok: false,
+      auth,
+      code: "provider_credit_summary_failed",
+      error: error.message,
+      readableError: "Could not refresh provider credits right now."
     });
   }
 });
