@@ -12,6 +12,7 @@ import express from "express";
 import cors from "cors";
 import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,6 +20,7 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 const projectDir = dirname(fileURLToPath(import.meta.url));
 const staticDir = process.env.SLT_STATIC_DIR || resolve(projectDir, "../dist");
+const assetStorageDir = process.env.SLT_STORAGE_DIR || resolve(projectDir, "../storage/assets");
 
 function loadEnvFile(filename) {
   const filePath = typeof filename === "string" && filename.includes("/")
@@ -372,6 +374,7 @@ const state = {
   projects: [],
   history: [],
   jobs: [],
+  assets: [],
   webhookEvents: [],
   wallet: {
     tenantId: "demo-user",
@@ -1326,6 +1329,9 @@ function createJob({ kind, title, providerName, prompt, payload, checks, request
     reservationStatus: checks.credits?.reservation?.status || null,
     outputUrl: null,
     outputUrls: [],
+    providerOutputUrls: [],
+    assets: [],
+    storage: null,
     error: null,
     payload: {
       provider: payload.provider,
@@ -1383,7 +1389,10 @@ function serializeJob(job) {
     updatedAt: job.updatedAt,
     outputUrl: job.outputUrl || null,
     outputUrls: job.outputUrls || [],
+    providerOutputUrls: job.providerOutputUrls || [],
     previewUrl: job.outputUrl || null,
+    assets: job.assets || [],
+    storage: job.storage || null,
     needs_review: Boolean(job.needs_review),
     needsReview: Boolean(job.needsReview),
     outputModeration: job.outputModeration || null,
@@ -1416,6 +1425,183 @@ function webhookProviderForStatus(status = {}) {
 function webhookUrlFor(request, status = {}) {
   return `${publicApiBaseUrl(request)}/api/webhooks/${webhookProviderForStatus(status)}`;
 }
+
+function storagePublicBaseUrl(request = null) {
+  const configured = process.env.SLT_CDN_BASE_URL || process.env.PUBLIC_CDN_BASE_URL || process.env.ASSET_CDN_BASE_URL || "";
+  if (configured) return configured.replace(/\/$/, "");
+  return request ? `${publicApiBaseUrl(request)}/cdn/assets` : "/cdn/assets";
+}
+
+function isPlatformAssetUrl(url = "") {
+  const value = String(url || "");
+  const configured = process.env.SLT_CDN_BASE_URL || process.env.PUBLIC_CDN_BASE_URL || process.env.ASSET_CDN_BASE_URL || "";
+  if (value.startsWith("/cdn/assets/")) return true;
+  if (value.includes("/cdn/assets/")) return true;
+  return Boolean(configured && value.startsWith(configured.replace(/\/$/, "")));
+}
+
+function extensionFromContentType(contentType = "", sourceUrl = "") {
+  const normalized = String(contentType || "").split(";")[0].trim().toLowerCase();
+  const byType = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/ogg": "ogg",
+    "application/json": "json"
+  };
+  if (byType[normalized]) return byType[normalized];
+
+  try {
+    const parsed = new URL(sourceUrl);
+    const cleanPath = parsed.pathname.split("?")[0];
+    const match = cleanPath.match(/\.([a-z0-9]{2,5})$/i);
+    if (match) return match[1].toLowerCase();
+  } catch {
+    const match = String(sourceUrl || "").split("?")[0].match(/\.([a-z0-9]{2,5})$/i);
+    if (match) return match[1].toLowerCase();
+  }
+  return "bin";
+}
+
+function parseDataUrl(dataUrl = "") {
+  const match = String(dataUrl).match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
+  if (!match) {
+    const error = new Error("Invalid data URL returned by provider.");
+    error.code = "asset_download_failed";
+    throw error;
+  }
+  const contentType = match[1] || "application/octet-stream";
+  const isBase64 = Boolean(match[2]);
+  const body = match[3] || "";
+  return {
+    contentType,
+    bytes: Buffer.from(isBase64 ? body : decodeURIComponent(body), isBase64 ? "base64" : "utf8")
+  };
+}
+
+async function downloadProviderAsset(url) {
+  const sourceUrl = String(url || "");
+  if (!sourceUrl) {
+    const error = new Error("Provider completed without an asset URL.");
+    error.code = "asset_missing";
+    throw error;
+  }
+
+  if (isPlatformAssetUrl(sourceUrl)) {
+    return { alreadyStored: true, sourceUrl, publicUrl: sourceUrl, bytes: null, contentType: "" };
+  }
+
+  if (sourceUrl.startsWith("local-placeholder://")) {
+    return {
+      bytes: Buffer.from(JSON.stringify({ sourceUrl, storedAt: new Date().toISOString() }, null, 2)),
+      contentType: "application/json",
+      placeholder: true
+    };
+  }
+
+  if (sourceUrl.startsWith("data:")) return parseDataUrl(sourceUrl);
+
+  if (!/^https?:\/\//i.test(sourceUrl)) {
+    const error = new Error(`Unsupported provider asset URL: ${sourceUrl.slice(0, 80)}`);
+    error.code = "asset_download_failed";
+    throw error;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), envNumber("ASSET_DOWNLOAD_TIMEOUT_MS", 30000));
+  try {
+    const response = await fetch(sourceUrl, { signal: controller.signal });
+    if (!response.ok) {
+      const error = new Error(`Provider asset download failed with HTTP ${response.status}.`);
+      error.code = "asset_download_failed";
+      throw error;
+    }
+    const contentType = response.headers.get("content-type") || "application/octet-stream";
+    const bytes = Buffer.from(await response.arrayBuffer());
+    return { bytes, contentType };
+  } catch (error) {
+    if (!error.code) error.code = "asset_download_failed";
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function storeProviderAsset({ job, sourceUrl, cdnBaseUrl }) {
+  const downloaded = await downloadProviderAsset(sourceUrl);
+  if (downloaded.alreadyStored) {
+    return {
+      id: requestId("asset"),
+      jobId: job.id,
+      kind: job.kind,
+      provider: job.provider,
+      originalUrl: sourceUrl,
+      publicUrl: downloaded.publicUrl,
+      contentType: downloaded.contentType || "",
+      bytes: 0,
+      status: "already_stored",
+      createdAt: new Date().toISOString()
+    };
+  }
+
+  const contentType = downloaded.contentType || "application/octet-stream";
+  const extension = extensionFromContentType(contentType, sourceUrl);
+  const digest = crypto.createHash("sha256").update(String(sourceUrl)).update(downloaded.bytes).digest("hex").slice(0, 12);
+  const fileName = `${job.kind}_${job.id}_${digest}.${extension}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
+  await mkdir(assetStorageDir, { recursive: true });
+  await writeFile(resolve(assetStorageDir, fileName), downloaded.bytes);
+
+  const asset = {
+    id: requestId("asset"),
+    jobId: job.id,
+    kind: job.kind,
+    provider: job.provider,
+    originalUrl: sourceUrl.startsWith("data:") ? "data-url" : sourceUrl,
+    publicUrl: `${cdnBaseUrl.replace(/\/$/, "")}/${fileName}`,
+    storagePath: resolve(assetStorageDir, fileName),
+    contentType,
+    bytes: downloaded.bytes.length,
+    status: downloaded.placeholder ? "placeholder_stored" : "stored",
+    createdAt: new Date().toISOString()
+  };
+  state.assets.unshift(asset);
+  state.assets = state.assets.slice(0, 200);
+  return asset;
+}
+
+async function persistProviderAssets({ job, outputUrls = [], cdnBaseUrl }) {
+  const urls = [...new Set((outputUrls || []).filter(Boolean))];
+  if (!urls.length) {
+    return { assets: [], outputUrls: [], outputUrl: null, storage: { status: "skipped", reason: "no_provider_asset" } };
+  }
+
+  const assets = [];
+  for (const sourceUrl of urls) {
+    assets.push(await storeProviderAsset({ job, sourceUrl, cdnBaseUrl }));
+  }
+
+  const storedUrls = assets.map((asset) => asset.publicUrl).filter(Boolean);
+  return {
+    assets,
+    outputUrls: storedUrls,
+    outputUrl: storedUrls[0] || null,
+    storage: {
+      status: "stored",
+      providerUrlCount: urls.length,
+      storedAssetCount: assets.length,
+      cdnBaseUrl
+    }
+  };
+}
+
 
 function buildQueuedHistoryEntry({ job, checks }) {
   return {
@@ -3700,24 +3886,42 @@ function applyUsageForJob(job) {
   usageBuckets.set(job.usageKey, (usageBuckets.get(job.usageKey) || 0) + 1);
 }
 
-function completeAsyncJob({ job, providerRun, providerResult, message }) {
+async function completeAsyncJob({ job, providerRun, providerResult, message, request = null }) {
   if (!job) return { job: null, historyItem: null, project: null };
   const result = providerResult || providerRun?.providerResult || {};
-  const outputUrls = extractProviderOutputUrls(result);
-  const outputUrl = outputUrls[0] || result.previewUrl || null;
-  const outputModeration = outputModerationAssessment({ job, result, outputUrls });
+  const providerOutputUrls = extractProviderOutputUrls(result);
   const providerName = providerRun?.providerName || job.provider;
   const providerRoute = providerRun?.route || job.providerRoute || [];
   const providerFallback = providerRun?.fallback || job.providerFallback || null;
+  const cdnBaseUrl = result.cdnBaseUrl || job.cdnBaseUrl || storagePublicBaseUrl(request);
+
+  let storageResult;
+  try {
+    storageResult = await persistProviderAssets({
+      job: { ...job, provider: providerName },
+      outputUrls: providerOutputUrls,
+      cdnBaseUrl
+    });
+  } catch (error) {
+    error.code = error.code || "asset_storage_failed";
+    appendJobEvent(job, { type: "asset_storage_failed", error: error.message });
+    return failAsyncJob({ job, error, providerRun });
+  }
+
+  const outputUrls = storageResult.outputUrls.length ? storageResult.outputUrls : providerOutputUrls;
+  const outputUrl = storageResult.outputUrl || outputUrls[0] || result.previewUrl || null;
+  const outputModeration = outputModerationAssessment({ job, result, outputUrls });
+
   const ledgerResolution = job.reservationId
     ? resolveReservation({
         reservationId: job.reservationId,
         outcome: "capture",
         jobId: job.id,
         idempotencyKey: `capture:${job.reservationId}`,
-        reason: "provider_completed"
+        reason: "provider_completed_asset_stored"
       })
     : { reservation: null, transaction: null, wallet: ledgerSnapshot(), skipped: true };
+
   updateJob(job.id, {
     status: jobStates.completed,
     provider: providerName,
@@ -3726,6 +3930,9 @@ function completeAsyncJob({ job, providerRun, providerResult, message }) {
     ledgerTransactionId: ledgerResolution.transaction?.id || job.ledgerTransactionId || null,
     outputUrl,
     outputUrls,
+    providerOutputUrls,
+    assets: storageResult.assets,
+    storage: storageResult.storage,
     needs_review: outputModeration.needs_review,
     needsReview: outputModeration.needsReview,
     outputModeration,
@@ -3758,6 +3965,9 @@ function completeAsyncJob({ job, providerRun, providerResult, message }) {
       previewUrl: outputUrl,
       outputUrl,
       outputUrls,
+      providerOutputUrls,
+      assets: storageResult.assets,
+      storage: storageResult.storage,
       needs_review: outputModeration.needs_review,
       needsReview: outputModeration.needsReview,
       outputModeration,
@@ -3902,7 +4112,7 @@ async function processAsyncGenerationJob({ jobId, kind, prompt, title, payload, 
       return;
     }
 
-    completeAsyncJob({
+    await completeAsyncJob({
       job: findJob(job.id),
       providerRun,
       providerResult,
@@ -3929,7 +4139,7 @@ async function refreshLocalJobFromProvider(job) {
   if (job.provider === "OmniHuman") {
     const { data, outputUrls, jobStatus } = await getOmniHumanJob(job.providerJobId);
     if (jobStatus === "completed" && outputUrls.length) {
-      return completeAsyncJob({
+      return await completeAsyncJob({
         job,
         providerResult: {
           providerJobId: job.providerJobId,
@@ -3937,6 +4147,7 @@ async function refreshLocalJobFromProvider(job) {
           previewUrl: outputUrls[0],
           outputUrl: outputUrls[0],
           outputUrls,
+          cdnBaseUrl: storagePublicBaseUrl(),
           raw: data
         },
         message: "OmniHuman video completed."
@@ -3958,7 +4169,7 @@ async function refreshLocalJobFromProvider(job) {
     const outputUrls = extractSeedanceOutputUrls(data);
     const jobStatus = normalizeSeedanceStatus(data);
     if (jobStatus === "completed" && outputUrls.length) {
-      return completeAsyncJob({
+      return await completeAsyncJob({
         job,
         providerResult: {
           providerJobId: job.providerJobId,
@@ -3966,6 +4177,7 @@ async function refreshLocalJobFromProvider(job) {
           previewUrl: outputUrls[0],
           outputUrl: outputUrls[0],
           outputUrls,
+          cdnBaseUrl: storagePublicBaseUrl(),
           raw: data
         },
         message: "Seedance video completed."
@@ -4438,7 +4650,7 @@ function normalizeProviderWebhookPayload(provider, body = {}) {
 }
 
 function handleProviderWebhook(provider) {
-  return (request, response) => {
+  return async (request, response) => {
     try {
       verifyProviderWebhookSignature(request, provider);
       const event = normalizeProviderWebhookPayload(provider, request.body || {});
@@ -4473,7 +4685,7 @@ function handleProviderWebhook(provider) {
       }
 
       if (event.status === "completed") {
-        const completed = completeAsyncJob({
+        const completed = await completeAsyncJob({
           job,
           providerResult: {
             providerJobId: event.providerJobId,
@@ -4481,6 +4693,7 @@ function handleProviderWebhook(provider) {
             previewUrl: event.outputUrl,
             outputUrl: event.outputUrl,
             outputUrls: event.outputUrls,
+            cdnBaseUrl: storagePublicBaseUrl(request),
             note: `${provider} webhook completed.`,
             raw: event.raw
           },
@@ -5368,7 +5581,18 @@ app.get("/api/ledger", (request, response) => {
     wallet: ledgerSnapshot(),
     jobCount: state.jobs.length,
     reservations: state.creditReservations.slice(0, 20),
-    transactions: state.creditTransactions.slice(0, 50)
+    transactions: state.creditTransactions.slice(0, 50),
+    assetCount: state.assets.length
+  });
+});
+
+app.get("/api/assets", (request, response) => {
+  response.json({
+    ok: true,
+    auth: getAuth(request),
+    cdnBaseUrl: storagePublicBaseUrl(request),
+    storageDir: assetStorageDir,
+    assets: state.assets.slice(0, 100)
   });
 });
 
@@ -5444,6 +5668,15 @@ app.post("/api/studio/run", (request, response) => {
   saveHistory(entry);
   response.status(canRun ? 200 : 400).json({ ok: canRun, checks, historyItem: entry, error: canRun ? null : checks.provider.message, ...entry });
 });
+
+app.use("/cdn/assets", express.static(assetStorageDir, {
+  dotfiles: "deny",
+  immutable: true,
+  maxAge: "365d",
+  setHeaders: (response) => {
+    response.setHeader("X-SLT-Asset-Storage", "local-cdn");
+  }
+}));
 
 app.use(express.static(staticDir, { index: "index.html", dotfiles: "deny" }));
 

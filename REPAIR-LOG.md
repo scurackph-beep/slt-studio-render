@@ -835,3 +835,77 @@ OK - Vite build completo en 806ms. Se regenero `dist/` como salida esperada del 
 ```txt
 feat: implement multi-layer AI content moderation pipeline
 ```
+
+---
+
+Fecha: 2026-07-12  
+Proyecto: Sweet Little Trauma Studio  
+Modulo ejecutado: Modulo 5 - Almacenamiento Efimero y CDN
+
+## Diagnostico inicial breve
+
+Los webhooks de `fal` y `replicate` ya cerraban jobs asincronos, pero el resultado final guardaba directamente `outputUrl` / `outputUrls` devueltos por el proveedor. Eso dejaba el historial y proyectos atados a URLs temporales que pueden vencer o romperse.
+
+## Cambios aplicados
+
+- Se agrego almacenamiento local tipo CDN en `server/api-proxy.js` usando `SLT_STORAGE_DIR` o `storage/assets` por defecto, servido desde `/cdn/assets`.
+- Se agrego un servicio interno de descarga y persistencia de assets que soporta URLs `https`, `data:` y placeholders locales de prueba.
+- `completeAsyncJob` ahora es asincrono y guarda primero el asset antes de capturar creditos del ledger.
+- Si la descarga o escritura del asset falla, el job pasa a `failed` y se llama al flujo existente de release para devolver creditos.
+- Los registros de job, historial y proyecto guardan `providerOutputUrls`, `assets` y `storage`, pero exponen `outputUrl` / `outputUrls` ya reemplazados por URLs propias de `/cdn/assets`.
+- Se agrego `GET /api/assets` para auditar assets persistidos.
+- Se actualizo `src/hooks/useVideoChat.js` para mostrar solo URLs internas de CDN y evitar presentar URLs temporales externas en la UI de video.
+
+## Estrategia de almacenamiento
+
+En esta fase no se agregaron SDKs de S3/R2 porque el proyecto no tenia uno configurado. La implementacion queda compatible con una migracion posterior: basta con reemplazar la funcion de escritura local por subida a Cloudflare R2, S3 o Vercel Blob y mantener el contrato `publicUrl`.
+
+## Regla de ledger preservada
+
+La captura de creditos ocurre despues de persistir el archivo. Si el asset no queda guardado, no se captura saldo y la reserva se libera mediante `failAsyncJob`.
+
+## Pruebas ejecutadas durante este modulo
+
+```txt
+node --check server/api-proxy.js
+```
+
+Resultado: OK, sin errores de sintaxis.
+
+```txt
+npm run lint
+```
+
+Resultado: OK, exit 0. Oxlint reporto warnings existentes de mantenimiento, sin errores fatales.
+
+```txt
+npm run build
+```
+
+Resultado: OK. Vite build completo en 768ms y regenero `dist/` como salida esperada.
+
+## Validacion funcional de almacenamiento y ledger
+
+Se levanto un servidor temporal en `http://127.0.0.1:3219` con `WEBHOOK_SECRET=test_secret` y `SLT_STORAGE_DIR=/private/tmp/slt-m5-assets`.
+
+Caso exitoso:
+
+- Se creo un job asincrono webhook-only con estado inicial `queued` y reserva `reserved`.
+- Se envio un webhook firmado de Replicate con status `completed` y un PNG inline `data:image/png;base64,...`.
+- El backend guardo el archivo en `/cdn/assets/music_job_1783849795023_0dcf14_e900b9cdbbc8.png`.
+- `GET /api/jobs/:id` devolvio `job.status=completed`, `assets=1` y `outputUrl` propio de `http://127.0.0.1:3219/cdn/assets/...`.
+- `GET /api/assets` devolvio 1 asset persistido con `contentType=image/png`, `bytes=68` y `status=stored`.
+- La descarga del asset propio devolvio HTTP 200, `content-type=image/png` y header `X-SLT-Asset-Storage=local-cdn`.
+- El ledger capturo creditos solo despues del guardado exitoso: `heldCredits=0`, `capturedCredits=150`.
+
+Caso fallido:
+
+- Se creo otro job webhook-only y se envio webhook `completed` con una URL temporal inaccesible.
+- El backend marco el job como `failed`, con error `asset_download_failed`.
+- La reserva paso a `released` y el saldo disponible volvio exactamente al valor anterior: `availableCredits=1350`, `heldCredits=0`.
+
+## Commit sugerido
+
+```txt
+feat: implement persistent storage upload and CDN delivery for AI assets
+```
