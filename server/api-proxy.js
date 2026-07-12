@@ -78,7 +78,7 @@ function rateLimitForPath(path = "") {
 }
 
 function rateLimitMiddleware(request, response, next) {
-  if (!request.path.startsWith("/api/") || request.path === "/api/stripe/webhook") {
+  if (!request.path.startsWith("/api/") || request.path === "/api/stripe/webhook" || request.path.startsWith("/api/webhooks/")) {
     next();
     return;
   }
@@ -133,7 +133,12 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), (requ
   }
 });
 
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({
+  limit: "50mb",
+  verify: (request, _response, buffer) => {
+    request.rawBody = Buffer.from(buffer || "");
+  }
+}));
 app.use(rateLimitMiddleware);
 
 const providerFallbackMessage = "Provider not connected. Add API key.";
@@ -363,10 +368,13 @@ const state = {
     }
   },
   projects: [],
-  history: []
+  history: [],
+  jobs: [],
+  webhookEvents: []
 };
 
 const sessions = new Map();
+const processedWebhookEvents = new Set();
 
 function hasEnvValue(key) {
   return Boolean(process.env[key] && process.env[key].trim());
@@ -794,6 +802,167 @@ function saveProjectFromEntry(entry) {
   state.projects.unshift(project);
   state.projects = state.projects.slice(0, 30);
   return project;
+}
+
+const jobStates = {
+  queued: "IN_QUEUE",
+  processing: "IN_PROGRESS",
+  completed: "COMPLETED",
+  failed: "FAILED"
+};
+
+function clientJobStatus(stateValue = jobStates.processing) {
+  if (stateValue === jobStates.completed) return "completed";
+  if (stateValue === jobStates.failed) return "failed";
+  if (stateValue === jobStates.queued) return "queued";
+  return "processing";
+}
+
+function isAsyncGenerationKind(kind = "") {
+  return ["video", "music"].includes(kind);
+}
+
+function createJob({ kind, title, providerName, prompt, payload, checks, request }) {
+  const now = new Date().toISOString();
+  const job = {
+    id: requestId("job"),
+    requestId: null,
+    kind,
+    title,
+    provider: providerName,
+    requestedProvider: checks.provider?.name || providerName,
+    prompt,
+    status: jobStates.queued,
+    createdAt: now,
+    updatedAt: now,
+    providerJobId: null,
+    historyItemId: null,
+    projectId: null,
+    outputUrl: null,
+    outputUrls: [],
+    error: null,
+    payload: {
+      provider: payload.provider,
+      providerLabel: payload.providerLabel,
+      tool: payload.tool,
+      actionId: payload.actionId,
+      duration: payload.duration,
+      videoPlan: payload.videoPlan || null
+    },
+    checks: {
+      auth: checks.auth,
+      plan: checks.plan,
+      credits: checks.credits,
+      provider: checks.provider
+    },
+    providerRoute: [],
+    providerFallback: null,
+    creditCost: checks.credits?.cost || 0,
+    creditsRemaining: checks.credits?.remaining ?? state.subscription.credits,
+    usageKey: usageBucketKey({ kind, request, auth: checks.auth })
+  };
+  job.requestId = job.id;
+  state.jobs.unshift(job);
+  state.jobs = state.jobs.slice(0, 100);
+  return job;
+}
+
+function findJob(jobId = "") {
+  const id = String(jobId || "");
+  return state.jobs.find((job) => job.id === id || job.requestId === id || job.providerJobId === id) || null;
+}
+
+function updateJob(jobId, patch = {}) {
+  const job = findJob(jobId);
+  if (!job) return null;
+  Object.assign(job, patch, { updatedAt: new Date().toISOString() });
+  return job;
+}
+
+function serializeJob(job) {
+  if (!job) return null;
+  return {
+    id: job.id,
+    request_id: job.requestId || job.id,
+    jobId: job.id,
+    providerJobId: job.providerJobId,
+    providerRequestId: job.providerJobId,
+    kind: job.kind,
+    mediaType: job.kind,
+    provider: job.provider,
+    requestedProvider: job.requestedProvider,
+    status: clientJobStatus(job.status),
+    state: job.status,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    outputUrl: job.outputUrl || null,
+    outputUrls: job.outputUrls || [],
+    previewUrl: job.outputUrl || null,
+    error: job.error,
+    providerRoute: job.providerRoute || [],
+    providerFallback: job.providerFallback || null
+  };
+}
+
+function publicApiBaseUrl(request) {
+  const configured = process.env.PUBLIC_API_BASE_URL || process.env.WEBHOOK_BASE_URL || process.env.APP_URL || "";
+  if (configured) return configured.replace(/\/$/, "");
+  const protocol = request.header("x-forwarded-proto") || request.protocol || "http";
+  const host = request.header("x-forwarded-host") || request.header("host") || `127.0.0.1:${port}`;
+  return `${protocol}://${host}`.replace(/\/$/, "");
+}
+
+function webhookProviderForStatus(status = {}) {
+  const adapter = String(status.adapter || "").toLowerCase();
+  const name = String(status.name || "").toLowerCase();
+  if (adapter.includes("replicate") || name.includes("replicate") || name.includes("wan") || name.includes("riffusion") || name.includes("audiocraft")) {
+    return "replicate";
+  }
+  if (adapter.includes("fal") || name.includes("fal")) return "fal";
+  return "replicate";
+}
+
+function webhookUrlFor(request, status = {}) {
+  return `${publicApiBaseUrl(request)}/api/webhooks/${webhookProviderForStatus(status)}`;
+}
+
+function buildQueuedHistoryEntry({ job, checks }) {
+  return {
+    id: requestId(job.kind),
+    kind: job.kind,
+    title: job.title,
+    provider: job.provider,
+    prompt: job.prompt,
+    status: "processing",
+    message: `${job.kind} generation queued with ${job.provider}.`,
+    creditsUsed: 0,
+    result: {
+      providerJobId: job.id,
+      jobId: job.id,
+      request_id: job.id,
+      status: "processing",
+      state: job.status,
+      note: `Poll /api/jobs/${job.id} for status.`,
+      providerRoute: [],
+      fallback: null,
+      exportFormats: exportFormatsFor(job.kind)
+    },
+    checks,
+    createdAt: job.createdAt
+  };
+}
+
+function updateHistoryItem(entryId, patcher) {
+  const entry = state.history.find((item) => item.id === entryId);
+  if (!entry) return null;
+  const patch = typeof patcher === "function" ? patcher(entry) : patcher;
+  Object.assign(entry, patch);
+  return entry;
+}
+
+function appendJobEvent(job, event) {
+  const events = Array.isArray(job.events) ? job.events : [];
+  job.events = [...events, { ...event, at: new Date().toISOString() }].slice(-20);
 }
 
 function mockProviderResult(kind, providerName, reason = providerFallbackMessage) {
@@ -1600,13 +1769,16 @@ function replicateModelEndpoint(model) {
   return `${replicateBaseUrl()}/models/${model}/predictions`;
 }
 
-async function callReplicateModel({ model, input, timeoutMs = 120000 }) {
+async function callReplicateModel({ model, input, timeoutMs = 120000, webhookUrl = "" }) {
   return postJson(replicateModelEndpoint(model), {
     headers: {
       Authorization: `Bearer ${process.env.REPLICATE_API_TOKEN}`,
       Prefer: "wait=60"
     },
-    body: { input },
+    body: {
+      input,
+      ...(webhookUrl ? { webhook: webhookUrl, webhook_events_filter: ["completed"] } : {})
+    },
     timeoutMs
   });
 }
@@ -1623,7 +1795,8 @@ async function callReplicateWanVideo({ prompt, title, payload = {} }) {
       sample_guide_scale: Number(process.env.WAN_GUIDANCE_SCALE || 5),
       negative_prompt: process.env.WAN_NEGATIVE_PROMPT || ""
     },
-    timeoutMs: 180000
+    timeoutMs: 180000,
+    webhookUrl: payload.webhookUrl || payload.webhook_url || payload.callbackUrl || payload.callback_url || ""
   });
   return {
     providerJobId: data.id || null,
@@ -1634,7 +1807,7 @@ async function callReplicateWanVideo({ prompt, title, payload = {} }) {
   };
 }
 
-async function callReplicateMusicGen({ prompt, title }) {
+async function callReplicateMusicGen({ prompt, title, payload = {} }) {
   const data = await callReplicateModel({
     model: process.env.AUDIOCRAFT_REPLICATE_MODEL || "meta/musicgen",
     input: {
@@ -1645,7 +1818,8 @@ async function callReplicateMusicGen({ prompt, title }) {
       temperature: Number(process.env.AUDIOCRAFT_TEMPERATURE || 1),
       classifier_free_guidance: Number(process.env.AUDIOCRAFT_GUIDANCE || 3)
     },
-    timeoutMs: 180000
+    timeoutMs: 180000,
+    webhookUrl: payload.webhookUrl || payload.webhook_url || payload.callbackUrl || payload.callback_url || ""
   });
   return {
     providerJobId: data.id || null,
@@ -1656,7 +1830,7 @@ async function callReplicateMusicGen({ prompt, title }) {
   };
 }
 
-async function callReplicateRiffusion({ prompt, title }) {
+async function callReplicateRiffusion({ prompt, title, payload = {} }) {
   const data = await callReplicateModel({
     model: process.env.RIFFUSION_REPLICATE_MODEL || "riffusion/riffusion",
     input: {
@@ -1667,7 +1841,8 @@ async function callReplicateRiffusion({ prompt, title }) {
       seed_image_id: process.env.RIFFUSION_SEED_IMAGE_ID || "vibes",
       num_inference_steps: Number(process.env.RIFFUSION_STEPS || 50)
     },
-    timeoutMs: 180000
+    timeoutMs: 180000,
+    webhookUrl: payload.webhookUrl || payload.webhook_url || payload.callbackUrl || payload.callback_url || ""
   });
   return {
     providerJobId: data.id || null,
@@ -2757,7 +2932,7 @@ async function callOllamaChat({ prompt, title, providerName }) {
   };
 }
 
-async function callGenericEndpoint({ providerStatus: status, prompt, title, kind, providerName }) {
+async function callGenericEndpoint({ providerStatus: status, prompt, title, kind, providerName, payload = {} }) {
   const config = providerCatalog[status.name];
   const endpoint = providerEndpoint(config);
   if (!endpoint) {
@@ -2770,7 +2945,11 @@ async function callGenericEndpoint({ providerStatus: status, prompt, title, kind
       prompt,
       title,
       kind,
-      provider: providerName
+      provider: providerName,
+      request_id: payload.request_id || payload.jobId || undefined,
+      jobId: payload.jobId || payload.request_id || undefined,
+      webhookUrl: payload.webhookUrl || payload.webhook_url || undefined,
+      callback_url: payload.callback_url || payload.webhookUrl || undefined
     }
   });
 }
@@ -2828,14 +3007,14 @@ async function attemptProviderCall({ kind, providerStatus: status, prompt, title
   if (status.adapter === "did-talk") return callDIDTalk({ prompt, title });
   if (status.adapter === "minimax-video") return callMiniMaxVideo({ prompt, title, payload });
   if (status.adapter === "minimax-music") return callMiniMaxMusic({ prompt, title });
-  if (status.adapter === "replicate-musicgen") return callReplicateMusicGen({ prompt, title });
-  if (status.adapter === "replicate-riffusion") return callReplicateRiffusion({ prompt, title });
+  if (status.adapter === "replicate-musicgen") return callReplicateMusicGen({ prompt, title, payload });
+  if (status.adapter === "replicate-riffusion") return callReplicateRiffusion({ prompt, title, payload });
   if (status.adapter === "minimax-speech") return callMiniMaxSpeech({ prompt, title });
   if (status.adapter === "slt-composer") return callSLTComposer({ prompt, title, payload });
   if (status.adapter === "moises-audio") return callMoisesAudio({ prompt, title, payload });
   if (status.adapter === "stability-audio") return callStabilityAudio({ prompt, title });
   if (status.adapter === "generic-endpoint") {
-    return callGenericEndpoint({ providerStatus: status, prompt, title, kind, providerName });
+    return callGenericEndpoint({ providerStatus: status, prompt, title, kind, providerName, payload });
   }
   return {
     previewUrl: `local-placeholder://${kind}/${Date.now()}`,
@@ -2950,6 +3129,292 @@ function readableProviderError(error, providerName) {
   return message || errorFallbackFor("studio");
 }
 
+function collectUrlCandidates(value, urls = []) {
+  if (!value) return urls;
+  if (typeof value === "string") {
+    if (/^https?:\/\//i.test(value) || value.startsWith("data:") || value.startsWith("local-placeholder://")) urls.push(value);
+    return urls;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectUrlCandidates(item, urls));
+    return urls;
+  }
+  if (typeof value === "object") {
+    [
+      value.url,
+      value.uri,
+      value.video_url,
+      value.videoUrl,
+      value.audio_url,
+      value.audioUrl,
+      value.image_url,
+      value.imageUrl,
+      value.output_url,
+      value.outputUrl,
+      value.result_url,
+      value.resultUrl,
+      value.previewUrl,
+      value.output,
+      value.outputs,
+      value.images,
+      value.videos,
+      value.audio,
+      value.data,
+      value.result
+    ].forEach((item) => collectUrlCandidates(item, urls));
+  }
+  return urls;
+}
+
+function extractProviderOutputUrls(result = {}) {
+  const urls = collectUrlCandidates([
+    result.previewUrl,
+    result.outputUrl,
+    result.outputUrls,
+    result.videoUrl,
+    result.audioUrl,
+    result.raw
+  ]);
+  const replicateUrl = firstUrlFromReplicateOutput(result.raw?.output || result.output);
+  return [...new Set([replicateUrl, ...urls].filter(Boolean))];
+}
+
+function providerResultIsFailed(result = {}) {
+  const status = String(result.status || result.raw?.status || "").toLowerCase();
+  return ["failed", "error", "errored", "cancelled", "canceled"].includes(status);
+}
+
+function providerResultIsPending(result = {}) {
+  const status = String(result.status || result.raw?.status || "").toLowerCase();
+  const outputUrls = extractProviderOutputUrls(result);
+  if (providerResultIsFailed(result)) return false;
+  if (["succeeded", "success", "completed", "complete", "done"].includes(status)) return false;
+  if (["timeline_planned", "ready"].includes(status)) return false;
+  if (["processing", "queued", "submitted", "starting", "in_queue", "in_progress"].includes(status)) return true;
+  return Boolean(result.providerJobId && outputUrls.length === 0);
+}
+
+function applyUsageForJob(job) {
+  if (!job.usageKey) return;
+  usageBuckets.set(job.usageKey, (usageBuckets.get(job.usageKey) || 0) + 1);
+}
+
+function completeAsyncJob({ job, providerRun, providerResult, message }) {
+  const result = providerResult || providerRun?.providerResult || {};
+  const outputUrls = extractProviderOutputUrls(result);
+  const outputUrl = outputUrls[0] || result.previewUrl || null;
+  const providerName = providerRun?.providerName || job.provider;
+  const providerRoute = providerRun?.route || job.providerRoute || [];
+  const providerFallback = providerRun?.fallback || job.providerFallback || null;
+  updateJob(job.id, {
+    status: jobStates.completed,
+    provider: providerName,
+    providerJobId: result.providerJobId || job.providerJobId,
+    outputUrl,
+    outputUrls,
+    providerRoute,
+    providerFallback,
+    error: null
+  });
+  state.subscription.credits = job.creditsRemaining;
+  applyUsageForJob(job);
+  const entry = updateHistoryItem(job.historyItemId, {
+    provider: providerName,
+    status: "completed",
+    message: message || `${job.kind} generation completed with ${providerName}.`,
+    creditsUsed: job.creditCost,
+    result: {
+      ...result,
+      providerJobId: job.id,
+      providerRequestId: result.providerJobId || job.providerJobId || null,
+      jobId: job.id,
+      request_id: job.id,
+      status: "completed",
+      state: jobStates.completed,
+      previewUrl: outputUrl,
+      outputUrl,
+      outputUrls,
+      fallback: providerFallback,
+      providerRoute,
+      exportFormats: exportFormatsFor(job.kind)
+    }
+  });
+  const project = entry ? saveProjectFromEntry(entry) : null;
+  if (project) updateJob(job.id, { projectId: project.id });
+  return { job: findJob(job.id), historyItem: entry, project };
+}
+
+function failAsyncJob({ job, error, providerRun = null }) {
+  const code = error?.code || "provider_error";
+  const message = readableProviderError(error, providerRun?.providerName || job.provider);
+  const providerRoute = error?.route || providerRun?.route || job.providerRoute || [];
+  updateJob(job.id, {
+    status: jobStates.failed,
+    error: { code, message },
+    providerRoute
+  });
+  const entry = updateHistoryItem(job.historyItemId, {
+    status: "error",
+    code,
+    message,
+    creditsUsed: 0,
+    result: {
+      providerJobId: job.id,
+      jobId: job.id,
+      request_id: job.id,
+      status: "failed",
+      state: jobStates.failed,
+      error: message,
+      providerRoute,
+      exportFormats: exportFormatsFor(job.kind)
+    }
+  });
+  return { job: findJob(job.id), historyItem: entry };
+}
+
+async function processAsyncGenerationJob({ jobId, kind, prompt, title, payload, checks }) {
+  const job = updateJob(jobId, { status: jobStates.processing });
+  if (!job) return;
+  appendJobEvent(job, { type: "started" });
+  try {
+    const providerRun = kind === "video" && payload.videoPlan?.mode === "timeline"
+      ? {
+          providerName: job.provider,
+          providerStatus: checks.provider,
+          providerResult: buildLongVideoTimeline({ prompt, title, providerName: job.provider, plan: payload.videoPlan }),
+          fallback: null,
+          route: [{ provider: job.provider, adapter: checks.provider.adapter, status: "timeline_planned", attempted: true, ok: true }]
+        }
+      : await runProviderGateway({
+          kind,
+          providerStatus: checks.provider,
+          prompt,
+          title,
+          payload
+        });
+
+    const providerResult = providerRun.providerResult || {};
+    updateJob(job.id, {
+      provider: providerRun.providerName,
+      providerJobId: providerResult.providerJobId || job.providerJobId,
+      providerRoute: providerRun.route || [],
+      providerFallback: providerRun.fallback || null,
+      providerResult
+    });
+
+    updateHistoryItem(job.historyItemId, (entry) => ({
+      provider: providerRun.providerName,
+      message: `${kind} generation processing with ${providerRun.providerName}.`,
+      result: {
+        ...entry.result,
+        ...providerResult,
+        providerJobId: job.id,
+        providerRequestId: providerResult.providerJobId || null,
+        jobId: job.id,
+        request_id: job.id,
+        status: providerResultIsPending(providerResult) ? "processing" : clientJobStatus(job.status),
+        state: findJob(job.id)?.status || jobStates.processing,
+        fallback: providerRun.fallback,
+        providerRoute: providerRun.route,
+        exportFormats: exportFormatsFor(kind)
+      }
+    }));
+
+    if (providerResultIsFailed(providerResult)) {
+      const error = new Error(providerResult.note || "Provider returned a failed job.");
+      error.code = "provider_job_failed";
+      failAsyncJob({ job: findJob(job.id), error, providerRun });
+      return;
+    }
+
+    if (providerResultIsPending(providerResult)) {
+      appendJobEvent(findJob(job.id), { type: "provider_submitted", providerJobId: providerResult.providerJobId || null });
+      return;
+    }
+
+    completeAsyncJob({
+      job: findJob(job.id),
+      providerRun,
+      providerResult,
+      message: `${kind} generation completed with ${providerRun.providerName}.`
+    });
+  } catch (error) {
+    failAsyncJob({ job: findJob(job.id), error });
+  }
+}
+
+function enqueueAsyncGeneration({ job, kind, prompt, title, payload, checks }) {
+  setTimeout(() => {
+    processAsyncGenerationJob({ jobId: job.id, kind, prompt, title, payload, checks }).catch((error) => {
+      failAsyncJob({ job: findJob(job.id), error });
+    });
+  }, 0);
+}
+
+async function refreshLocalJobFromProvider(job) {
+  if (!job || [jobStates.completed, jobStates.failed].includes(job.status) || !job.providerJobId) {
+    return { job, historyItem: state.history.find((item) => item.id === job?.historyItemId) || null, project: null };
+  }
+
+  if (job.provider === "OmniHuman") {
+    const { data, outputUrls, jobStatus } = await getOmniHumanJob(job.providerJobId);
+    if (jobStatus === "completed" && outputUrls.length) {
+      return completeAsyncJob({
+        job,
+        providerResult: {
+          providerJobId: job.providerJobId,
+          status: "completed",
+          previewUrl: outputUrls[0],
+          outputUrl: outputUrls[0],
+          outputUrls,
+          raw: data
+        },
+        message: "OmniHuman video completed."
+      });
+    }
+    if (jobStatus === "failed") {
+      const error = new Error("OmniHuman video failed.");
+      error.code = "provider_job_failed";
+      return failAsyncJob({ job, error });
+    }
+  }
+
+  if (job.provider === "Seedance") {
+    const apiKey = providerApiKey(providerCatalog.Seedance);
+    const data = await getJson(`${seedanceBaseUrl()}/contents/generations/tasks/${encodeURIComponent(job.providerJobId)}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      timeoutMs: 60000
+    });
+    const outputUrls = extractSeedanceOutputUrls(data);
+    const jobStatus = normalizeSeedanceStatus(data);
+    if (jobStatus === "completed" && outputUrls.length) {
+      return completeAsyncJob({
+        job,
+        providerResult: {
+          providerJobId: job.providerJobId,
+          status: "completed",
+          previewUrl: outputUrls[0],
+          outputUrl: outputUrls[0],
+          outputUrls,
+          raw: data
+        },
+        message: "Seedance video completed."
+      });
+    }
+    if (jobStatus === "failed") {
+      const error = new Error("Seedance video failed.");
+      error.code = "provider_job_failed";
+      return failAsyncJob({ job, error });
+    }
+  }
+
+  return {
+    job: findJob(job.id),
+    historyItem: state.history.find((item) => item.id === job.historyItemId) || null,
+    project: job.projectId ? state.projects.find((item) => item.id === job.projectId) || null : null
+  };
+}
+
 function handleGenerate(kind) {
   return async (request, response) => {
     if (failProviderIfRequested(request, response)) return;
@@ -2994,6 +3459,48 @@ function handleGenerate(kind) {
         videoPlan = resolveVideoPlan({ payload, auth: checks.auth, providerName });
         payload = { ...payload, videoPlan };
       }
+
+      if (isAsyncGenerationKind(kind) && payload.sync !== true) {
+        const job = createJob({ kind, title, providerName, prompt, payload, checks, request });
+        const webhookUrl = webhookUrlFor(request, checks.provider);
+        const asyncPayload = {
+          ...payload,
+          jobId: job.id,
+          request_id: job.id,
+          webhookUrl,
+          webhook_url: webhookUrl,
+          callbackUrl: webhookUrl,
+          callback_url: webhookUrl
+        };
+        const queuedChecks = {
+          ...checks,
+          requestedProvider: checks.provider,
+          providerWebhook: {
+            provider: webhookProviderForStatus(checks.provider),
+            url: webhookUrl,
+            signatureRequired: true
+          }
+        };
+        const queuedEntry = buildQueuedHistoryEntry({ job, checks: queuedChecks });
+        saveHistory(queuedEntry);
+        updateJob(job.id, { historyItemId: queuedEntry.id });
+        enqueueAsyncGeneration({ job, kind, prompt, title, payload: asyncPayload, checks });
+        response.status(202).json({
+          ok: true,
+          accepted: true,
+          async: true,
+          jobId: job.id,
+          request_id: job.id,
+          checks: queuedChecks,
+          job: serializeJob(findJob(job.id)),
+          historyItem: queuedEntry,
+          emptyState: emptyStateFor(kind),
+          success: successFor(kind),
+          message: `${kind} generation queued. Poll /api/jobs/${job.id} for status.`
+        });
+        return;
+      }
+
       const providerRun = kind === "video" && videoPlan?.mode === "timeline"
         ? {
             providerName,
@@ -3150,12 +3657,248 @@ app.get("/api/providers", (request, response) => {
   });
 });
 
+function webhookSecretFor(provider) {
+  if (provider === "fal") return firstEnvValue(["FAL_WEBHOOK_SECRET", "FAL_AI_WEBHOOK_SECRET", "WEBHOOK_SECRET"]);
+  if (provider === "replicate") return firstEnvValue(["REPLICATE_WEBHOOK_SECRET", "WEBHOOK_SECRET"]);
+  return firstEnvValue(["WEBHOOK_SECRET"]);
+}
+
+function webhookTimestampMs(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) {
+    const numeric = Number(raw);
+    return numeric > 10_000_000_000 ? numeric : numeric * 1000;
+  }
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function timingSafeStringEqual(left = "", right = "") {
+  const leftBuffer = Buffer.from(String(left));
+  const rightBuffer = Buffer.from(String(right));
+  if (leftBuffer.length !== rightBuffer.length) return false;
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function normalizeSignatureParts(signature = "") {
+  return String(signature || "")
+    .split(/[,\s]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => part.replace(/^v\d+=/i, "").replace(/^sha256=/i, ""));
+}
+
+function verifyProviderWebhookSignature(request, provider) {
+  const secret = webhookSecretFor(provider);
+  if (!secret) {
+    const error = new Error(`${provider} webhook secret is missing.`);
+    error.statusCode = 503;
+    error.code = "webhook_secret_missing";
+    throw error;
+  }
+
+  const timestamp =
+    request.header("webhook-timestamp") ||
+    request.header("x-webhook-timestamp") ||
+    request.header("x-fal-webhook-timestamp") ||
+    request.header("svix-timestamp") ||
+    request.header("x-replicate-timestamp") ||
+    "";
+  const signature =
+    request.header("webhook-signature") ||
+    request.header("x-webhook-signature") ||
+    request.header("x-fal-webhook-signature") ||
+    request.header("svix-signature") ||
+    request.header("x-replicate-signature") ||
+    "";
+  const timestampMs = webhookTimestampMs(timestamp);
+  const toleranceMs = envNumber("WEBHOOK_REPLAY_TOLERANCE_SECONDS", 300) * 1000;
+  if (!timestampMs || Math.abs(Date.now() - timestampMs) > toleranceMs) {
+    const error = new Error("Webhook timestamp is missing or outside the replay tolerance.");
+    error.statusCode = 401;
+    error.code = "webhook_replay_rejected";
+    throw error;
+  }
+  const signatures = normalizeSignatureParts(signature);
+  if (!signatures.length) {
+    const error = new Error("Webhook signature is missing.");
+    error.statusCode = 401;
+    error.code = "webhook_signature_missing";
+    throw error;
+  }
+
+  const rawBody = Buffer.isBuffer(request.rawBody)
+    ? request.rawBody
+    : Buffer.from(JSON.stringify(request.body || {}));
+  const signedPayloads = [`${timestamp}.${rawBody.toString("utf8")}`, rawBody.toString("utf8")];
+  const expected = signedPayloads.flatMap((payload) => {
+    const hmac = crypto.createHmac("sha256", secret).update(payload).digest();
+    return [
+      hmac.toString("hex"),
+      hmac.toString("base64"),
+      hmac.toString("base64url")
+    ];
+  });
+  const ok = signatures.some((received) => expected.some((candidate) => timingSafeStringEqual(received, candidate)));
+  if (!ok) {
+    const error = new Error("Webhook signature verification failed.");
+    error.statusCode = 401;
+    error.code = "webhook_signature_invalid";
+    throw error;
+  }
+  return true;
+}
+
+function normalizeWebhookStatus(value = "") {
+  const status = String(value || "").toLowerCase();
+  if (["succeeded", "success", "completed", "complete", "done"].includes(status)) return "completed";
+  if (["failed", "error", "errored", "cancelled", "canceled"].includes(status)) return "failed";
+  if (["queued", "pending", "starting"].includes(status)) return "queued";
+  return "processing";
+}
+
+function normalizeProviderWebhookPayload(provider, body = {}) {
+  const data = body.data || body.prediction || body;
+  const requestId =
+    body.request_id ||
+    body.requestId ||
+    body.jobId ||
+    body.job_id ||
+    body.metadata?.jobId ||
+    body.metadata?.request_id ||
+    data.request_id ||
+    data.requestId ||
+    data.jobId ||
+    data.job_id ||
+    data.id ||
+    body.id ||
+    "";
+  const providerJobId = data.id || body.id || data.prediction_id || body.prediction_id || requestId;
+  const status = normalizeWebhookStatus(body.status || data.status || body.event || body.type);
+  const outputUrls = [...new Set(collectUrlCandidates([data.output, data.outputs, data.urls, data.result, data.url, body.output, body.result]).filter(Boolean))];
+  const errorMessage = data.error?.message || data.error || body.error?.message || body.error || "";
+  return {
+    provider,
+    eventId: body.event_id || body.eventId || body.id || providerJobId || requestId,
+    requestId,
+    providerJobId,
+    status,
+    outputUrls,
+    outputUrl: outputUrls[0] || null,
+    errorMessage: typeof errorMessage === "string" ? errorMessage : JSON.stringify(errorMessage),
+    raw: body
+  };
+}
+
+function handleProviderWebhook(provider) {
+  return (request, response) => {
+    try {
+      verifyProviderWebhookSignature(request, provider);
+      const event = normalizeProviderWebhookPayload(provider, request.body || {});
+      const job = findJob(event.requestId) || findJob(event.providerJobId);
+      const eventKey = `${provider}:${event.eventId || event.requestId}:${event.status}`;
+      if (processedWebhookEvents.has(eventKey)) {
+        response.json({ ok: true, duplicate: true, ignored: true });
+        return;
+      }
+      if (!job) {
+        processedWebhookEvents.add(eventKey);
+        state.webhookEvents.unshift({ provider, event, status: "orphan", receivedAt: new Date().toISOString() });
+        state.webhookEvents = state.webhookEvents.slice(0, 50);
+        response.status(202).json({ ok: true, accepted: true, orphan: true });
+        return;
+      }
+      if ([jobStates.completed, jobStates.failed].includes(job.status)) {
+        processedWebhookEvents.add(eventKey);
+        response.json({ ok: true, duplicate: true, terminal: true, job: serializeJob(job) });
+        return;
+      }
+
+      processedWebhookEvents.add(eventKey);
+      appendJobEvent(job, { type: "webhook", provider, status: event.status, providerJobId: event.providerJobId });
+
+      if (event.status === "failed") {
+        const error = new Error(event.errorMessage || `${provider} webhook reported failure.`);
+        error.code = "provider_webhook_failed";
+        const failed = failAsyncJob({ job, error });
+        response.json({ ok: true, job: serializeJob(failed.job), historyItem: failed.historyItem });
+        return;
+      }
+
+      if (event.status === "completed") {
+        const completed = completeAsyncJob({
+          job,
+          providerResult: {
+            providerJobId: event.providerJobId,
+            status: "completed",
+            previewUrl: event.outputUrl,
+            outputUrl: event.outputUrl,
+            outputUrls: event.outputUrls,
+            note: `${provider} webhook completed.`,
+            raw: event.raw
+          },
+          message: `${job.kind} generation completed from ${provider} webhook.`
+        });
+        response.json({ ok: true, job: serializeJob(completed.job), historyItem: completed.historyItem, project: completed.project });
+        return;
+      }
+
+      updateJob(job.id, {
+        status: event.status === "queued" ? jobStates.queued : jobStates.processing,
+        providerJobId: event.providerJobId || job.providerJobId
+      });
+      response.json({ ok: true, job: serializeJob(findJob(job.id)) });
+    } catch (error) {
+      response.status(error.statusCode || 400).json({
+        ok: false,
+        code: error.code || "webhook_rejected",
+        error: error.message || "Webhook rejected."
+      });
+    }
+  };
+}
+
 app.post("/api/generate/image", handleGenerate("image"));
 app.post("/api/generate/video", handleGenerate("video"));
 app.post("/api/generate/music", handleGenerate("music"));
 app.post("/api/generate/sound", handleGenerate("sound"));
 
+app.post("/api/webhooks/fal", handleProviderWebhook("fal"));
+app.post("/api/webhooks/replicate", handleProviderWebhook("replicate"));
+
 app.get("/api/jobs/:jobId", async (request, response) => {
+  const localJob = findJob(request.params.jobId);
+  if (localJob) {
+    let refreshed;
+    try {
+      refreshed = await refreshLocalJobFromProvider(localJob);
+    } catch (error) {
+      response.status(502).json({
+        ok: false,
+        job: serializeJob(localJob),
+        error: readableProviderError(error, localJob.provider),
+        readableError: readableProviderError(error, localJob.provider)
+      });
+      return;
+    }
+    const currentJob = refreshed.job || findJob(localJob.id);
+    const historyItem = refreshed.historyItem || state.history.find((item) => item.id === currentJob?.historyItemId) || null;
+    const project = refreshed.project || (currentJob?.projectId ? state.projects.find((item) => item.id === currentJob.projectId) || null : null);
+    response.json({
+      ok: true,
+      job: serializeJob(currentJob),
+      historyItem,
+      project,
+      message: currentJob?.status === jobStates.completed
+        ? `${currentJob.kind} generation completed.`
+        : currentJob?.status === jobStates.failed
+        ? currentJob.error?.message || `${currentJob.kind} generation failed.`
+        : `${currentJob?.kind || "Job"} generation is still processing.`
+    });
+    return;
+  }
+
   const providerName = normalizeProviderName(String(request.query.provider || "Seedance"));
   if (!["Seedance", "OmniHuman"].includes(providerName)) {
     response.status(400).json({
