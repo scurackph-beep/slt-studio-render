@@ -1309,6 +1309,12 @@ function isAsyncGenerationKind(kind = "") {
   return ["video", "music"].includes(kind);
 }
 
+function shouldQueueGeneration(kind = "", providerStatus = {}, payload = {}) {
+  if (payload.sync === true) return false;
+  if (isAsyncGenerationKind(kind)) return true;
+  return kind === "image" && providerStatus?.adapter === "replicate-image";
+}
+
 function createJob({ kind, title, providerName, prompt, payload, checks, request }) {
   const now = new Date().toISOString();
   const job = {
@@ -1426,6 +1432,12 @@ function webhookUrlFor(request, status = {}) {
   return `${publicApiBaseUrl(request)}/api/webhooks/${webhookProviderForStatus(status)}`;
 }
 
+function webhookUrlForJob(request, status = {}, jobId = "") {
+  const url = new URL(webhookUrlFor(request, status));
+  if (jobId) url.searchParams.set("jobId", jobId);
+  return url.toString();
+}
+
 function storagePublicBaseUrl(request = null) {
   const configured = process.env.SLT_CDN_BASE_URL || process.env.PUBLIC_CDN_BASE_URL || process.env.ASSET_CDN_BASE_URL || "";
   if (configured) return configured.replace(/\/$/, "");
@@ -1487,7 +1499,7 @@ function parseDataUrl(dataUrl = "") {
   };
 }
 
-async function downloadProviderAsset(url) {
+async function downloadProviderAsset(url, { headers = {} } = {}) {
   const sourceUrl = String(url || "");
   if (!sourceUrl) {
     const error = new Error("Provider completed without an asset URL.");
@@ -1518,7 +1530,7 @@ async function downloadProviderAsset(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), envNumber("ASSET_DOWNLOAD_TIMEOUT_MS", 30000));
   try {
-    const response = await fetch(sourceUrl, { signal: controller.signal });
+    const response = await fetch(sourceUrl, { headers, signal: controller.signal });
     if (!response.ok) {
       const error = new Error(`Provider asset download failed with HTTP ${response.status}.`);
       error.code = "asset_download_failed";
@@ -1535,8 +1547,8 @@ async function downloadProviderAsset(url) {
   }
 }
 
-async function storeProviderAsset({ job, sourceUrl, cdnBaseUrl }) {
-  const downloaded = await downloadProviderAsset(sourceUrl);
+async function storeProviderAsset({ job, sourceUrl, cdnBaseUrl, sourceHeaders = {} }) {
+  const downloaded = await downloadProviderAsset(sourceUrl, { headers: sourceHeaders });
   if (downloaded.alreadyStored) {
     return {
       id: requestId("asset"),
@@ -1577,7 +1589,7 @@ async function storeProviderAsset({ job, sourceUrl, cdnBaseUrl }) {
   return asset;
 }
 
-async function persistProviderAssets({ job, outputUrls = [], cdnBaseUrl }) {
+async function persistProviderAssets({ job, outputUrls = [], cdnBaseUrl, sourceHeaders = {} }) {
   const urls = [...new Set((outputUrls || []).filter(Boolean))];
   if (!urls.length) {
     return { assets: [], outputUrls: [], outputUrl: null, storage: { status: "skipped", reason: "no_provider_asset" } };
@@ -1585,7 +1597,7 @@ async function persistProviderAssets({ job, outputUrls = [], cdnBaseUrl }) {
 
   const assets = [];
   for (const sourceUrl of urls) {
-    assets.push(await storeProviderAsset({ job, sourceUrl, cdnBaseUrl }));
+    assets.push(await storeProviderAsset({ job, sourceUrl, cdnBaseUrl, sourceHeaders }));
   }
 
   const storedUrls = assets.map((asset) => asset.publicUrl).filter(Boolean);
@@ -2429,25 +2441,63 @@ function firstUrlFromReplicateOutput(output) {
   return null;
 }
 
-async function callReplicateImage({ prompt, title, providerName }) {
+function replicateImageInput({ prompt, title, payload = {} }) {
+  const input = {
+    prompt: prompt || title || "Create a cinematic futuristic garage studio image for Sweet Little Trauma."
+  };
+  const aspectRatio = payload.aspectRatio || payload.aspect_ratio || process.env.REPLICATE_IMAGE_ASPECT_RATIO || "1:1";
+  const outputFormat = payload.outputFormat || payload.output_format || process.env.REPLICATE_IMAGE_OUTPUT_FORMAT || "png";
+  const outputQuality = Number(payload.outputQuality || payload.output_quality || process.env.REPLICATE_IMAGE_OUTPUT_QUALITY || 90);
+  if (aspectRatio) input.aspect_ratio = aspectRatio;
+  if (outputFormat) input.output_format = outputFormat;
+  if (Number.isFinite(outputQuality)) input.output_quality = outputQuality;
+  return input;
+}
+
+function assertPublicWebhookUrl(webhookUrl = "") {
+  if (!webhookUrl) return;
+  let parsed;
+  try {
+    parsed = new URL(webhookUrl);
+  } catch {
+    const error = new Error("Replicate webhook URL is invalid.");
+    error.code = "replicate_webhook_url_invalid";
+    throw error;
+  }
+  const allowLocal = envFlag("ALLOW_LOCAL_WEBHOOK_URLS", false) || envFlag("ALLOW_INSECURE_WEBHOOK_URLS", false);
+  const isLocal = ["localhost", "127.0.0.1", "0.0.0.0"].includes(parsed.hostname);
+  if (!allowLocal && (parsed.protocol !== "https:" || isLocal)) {
+    const error = new Error("Replicate requires a public HTTPS webhook URL. Set PUBLIC_API_BASE_URL or WEBHOOK_BASE_URL to a public HTTPS domain/tunnel.");
+    error.code = "replicate_webhook_url_not_public";
+    error.statusCode = 503;
+    throw error;
+  }
+}
+
+async function callReplicateImage({ prompt, title, providerName, payload = {} }) {
+  const webhookUrl = payload.webhookUrl || payload.webhook_url || payload.callbackUrl || payload.callback_url || "";
+  if (webhookUrl) assertPublicWebhookUrl(webhookUrl);
   const data = await postJson(`${replicateBaseUrl()}/predictions`, {
     headers: {
       Authorization: `Bearer ${process.env.REPLICATE_API_TOKEN}`,
-      Prefer: "wait=60"
+      ...(webhookUrl ? {} : { Prefer: "wait=60" })
     },
     body: {
       version: replicateModelForProvider(providerName),
-      input: {
-        prompt: prompt || title || "Create a cinematic futuristic garage studio image for Sweet Little Trauma."
-      }
+      input: replicateImageInput({ prompt, title, payload }),
+      ...(webhookUrl ? { webhook: webhookUrl, webhook_events_filter: ["completed"] } : {})
     },
     timeoutMs: 90000
   });
+  const outputUrl = firstUrlFromReplicateOutput(data.output);
   return {
     providerJobId: data.id || null,
     status: data.status || "processing",
-    previewUrl: firstUrlFromReplicateOutput(data.output),
-    note: data.status === "succeeded" ? "Replicate image completed." : "Replicate image submitted. Poll the provider prediction URL if it is still processing.",
+    previewUrl: outputUrl,
+    outputUrl,
+    outputUrls: outputUrl ? [outputUrl] : [],
+    webhookUrl,
+    note: data.status === "succeeded" ? "Replicate image completed." : "Replicate image submitted; waiting for provider webhook.",
     raw: data
   };
 }
@@ -2456,11 +2506,11 @@ function replicateModelEndpoint(model) {
   return `${replicateBaseUrl()}/models/${model}/predictions`;
 }
 
-async function callReplicateModel({ model, input, timeoutMs = 120000, webhookUrl = "" }) {
+async function callReplicateModel({ model, input, timeoutMs = 120000, webhookUrl = "", prefer = "wait=60" }) {
   return postJson(replicateModelEndpoint(model), {
     headers: {
       Authorization: `Bearer ${process.env.REPLICATE_API_TOKEN}`,
-      Prefer: "wait=60"
+      ...(prefer ? { Prefer: prefer } : {})
     },
     body: {
       input,
@@ -3670,7 +3720,7 @@ async function attemptProviderCall({ kind, providerStatus: status, prompt, title
   if (status.adapter === "openai-image") return callOpenAIImage({ prompt, title });
   if (status.adapter === "xai-image") return callXAIImage({ prompt, title });
   if (status.adapter === "gemini-image") return callGeminiImage({ prompt, title });
-  if (status.adapter === "replicate-image") return callReplicateImage({ prompt, title, providerName });
+  if (status.adapter === "replicate-image") return callReplicateImage({ prompt, title, providerName, payload });
   if (status.adapter === "stability-image") return callStabilityImage({ prompt, title });
   if (status.adapter === "ideogram-image") return callIdeogramImage({ prompt, title });
   if (status.adapter === "recraft-image") return callRecraftImage({ prompt, title });
@@ -3886,6 +3936,14 @@ function applyUsageForJob(job) {
   usageBuckets.set(job.usageKey, (usageBuckets.get(job.usageKey) || 0) + 1);
 }
 
+function storageDownloadHeadersForProvider(providerName = "", result = {}) {
+  const provider = String(providerName || result.provider || result.raw?.model || "").toLowerCase();
+  if ((provider.includes("replicate") || provider.includes("flux") || provider.includes("stable")) && hasEnvValue("REPLICATE_API_TOKEN")) {
+    return { Authorization: `Bearer ${process.env.REPLICATE_API_TOKEN}` };
+  }
+  return {};
+}
+
 async function completeAsyncJob({ job, providerRun, providerResult, message, request = null }) {
   if (!job) return { job: null, historyItem: null, project: null };
   const result = providerResult || providerRun?.providerResult || {};
@@ -3894,13 +3952,15 @@ async function completeAsyncJob({ job, providerRun, providerResult, message, req
   const providerRoute = providerRun?.route || job.providerRoute || [];
   const providerFallback = providerRun?.fallback || job.providerFallback || null;
   const cdnBaseUrl = result.cdnBaseUrl || job.cdnBaseUrl || storagePublicBaseUrl(request);
+  const sourceHeaders = storageDownloadHeadersForProvider(providerName, result);
 
   let storageResult;
   try {
     storageResult = await persistProviderAssets({
       job: { ...job, provider: providerName },
       outputUrls: providerOutputUrls,
-      cdnBaseUrl
+      cdnBaseUrl,
+      sourceHeaders
     });
   } catch (error) {
     error.code = error.code || "asset_storage_failed";
@@ -4190,6 +4250,35 @@ async function refreshLocalJobFromProvider(job) {
     }
   }
 
+  if (job.kind === "image" && providerCatalog[job.provider]?.adapter === "replicate-image") {
+    const data = await getJson(`${replicateBaseUrl()}/predictions/${encodeURIComponent(job.providerJobId)}`, {
+      headers: { Authorization: `Bearer ${process.env.REPLICATE_API_TOKEN}` },
+      timeoutMs: 60000
+    });
+    const outputUrl = firstUrlFromReplicateOutput(data.output);
+    const jobStatus = normalizeWebhookStatus(data.status);
+    if (jobStatus === "completed" && outputUrl) {
+      return await completeAsyncJob({
+        job,
+        providerResult: {
+          providerJobId: job.providerJobId,
+          status: "completed",
+          previewUrl: outputUrl,
+          outputUrl,
+          outputUrls: [outputUrl],
+          cdnBaseUrl: storagePublicBaseUrl(),
+          raw: data
+        },
+        message: "Replicate image completed."
+      });
+    }
+    if (jobStatus === "failed") {
+      const error = new Error(data.error || "Replicate image failed.");
+      error.code = "provider_job_failed";
+      return failAsyncJob({ job, error });
+    }
+  }
+
   return {
     job: findJob(job.id),
     historyItem: state.history.find((item) => item.id === job.historyItemId) || null,
@@ -4284,9 +4373,9 @@ function handleGenerate(kind) {
       };
       runtimeChecks = ledgerChecks;
 
-      if (isAsyncGenerationKind(kind) && payload.sync !== true) {
+      if (shouldQueueGeneration(kind, checks.provider, payload)) {
         const job = createJob({ kind, title, providerName, prompt, payload, checks: ledgerChecks, request });
-        const webhookUrl = webhookUrlFor(request, checks.provider);
+        const webhookUrl = webhookUrlForJob(request, checks.provider, job.id);
         const asyncPayload = {
           ...payload,
           jobId: job.id,
@@ -4570,6 +4659,12 @@ function verifyProviderWebhookSignature(request, provider) {
     request.header("svix-signature") ||
     request.header("x-replicate-signature") ||
     "";
+  const webhookId =
+    request.header("webhook-id") ||
+    request.header("x-webhook-id") ||
+    request.header("svix-id") ||
+    request.header("x-replicate-webhook-id") ||
+    "";
   const timestampMs = webhookTimestampMs(timestamp);
   const toleranceMs = envNumber("WEBHOOK_REPLAY_TOLERANCE_SECONDS", 300) * 1000;
   if (!timestampMs || Math.abs(Date.now() - timestampMs) > toleranceMs) {
@@ -4589,7 +4684,12 @@ function verifyProviderWebhookSignature(request, provider) {
   const rawBody = Buffer.isBuffer(request.rawBody)
     ? request.rawBody
     : Buffer.from(JSON.stringify(request.body || {}));
-  const signedPayloads = [`${timestamp}.${rawBody.toString("utf8")}`, rawBody.toString("utf8")];
+  const rawPayload = rawBody.toString("utf8");
+  const signedPayloads = [
+    `${timestamp}.${rawPayload}`,
+    webhookId ? `${webhookId}.${timestamp}.${rawPayload}` : "",
+    rawPayload
+  ].filter(Boolean);
   const expected = signedPayloads.flatMap((payload) => {
     const hmac = crypto.createHmac("sha256", secret).update(payload).digest();
     return [
@@ -4654,8 +4754,9 @@ function handleProviderWebhook(provider) {
     try {
       verifyProviderWebhookSignature(request, provider);
       const event = normalizeProviderWebhookPayload(provider, request.body || {});
-      const job = findJob(event.requestId) || findJob(event.providerJobId);
-      const eventKey = `${provider}:${event.eventId || event.requestId}:${event.status}`;
+      const queryJobId = typeof request.query.jobId === "string" ? request.query.jobId : "";
+      const job = findJob(queryJobId) || findJob(event.requestId) || findJob(event.providerJobId);
+      const eventKey = `${provider}:${event.eventId || queryJobId || event.requestId}:${event.status}`;
       if (processedWebhookEvents.has(eventKey)) {
         response.json({ ok: true, duplicate: true, ignored: true });
         return;
@@ -4685,21 +4786,30 @@ function handleProviderWebhook(provider) {
       }
 
       if (event.status === "completed") {
-        const completed = await completeAsyncJob({
-          job,
-          providerResult: {
-            providerJobId: event.providerJobId,
-            status: "completed",
-            previewUrl: event.outputUrl,
-            outputUrl: event.outputUrl,
-            outputUrls: event.outputUrls,
-            cdnBaseUrl: storagePublicBaseUrl(request),
-            note: `${provider} webhook completed.`,
-            raw: event.raw
-          },
-          message: `${job.kind} generation completed from ${provider} webhook.`
+        updateJob(job.id, {
+          status: jobStates.processing,
+          providerJobId: event.providerJobId || job.providerJobId
         });
-        response.json({ ok: true, job: serializeJob(completed.job), historyItem: completed.historyItem, project: completed.project });
+        const cdnBaseUrl = storagePublicBaseUrl(request);
+        setTimeout(() => {
+          completeAsyncJob({
+            job: findJob(job.id),
+            providerResult: {
+              providerJobId: event.providerJobId,
+              status: "completed",
+              previewUrl: event.outputUrl,
+              outputUrl: event.outputUrl,
+              outputUrls: event.outputUrls,
+              cdnBaseUrl,
+              note: `${provider} webhook completed.`,
+              raw: event.raw
+            },
+            message: `${job.kind} generation completed from ${provider} webhook.`
+          }).catch((error) => {
+            failAsyncJob({ job: findJob(job.id), error });
+          });
+        }, 0);
+        response.status(202).json({ ok: true, accepted: true, job: serializeJob(findJob(job.id)), message: "Webhook accepted for async asset persistence." });
         return;
       }
 

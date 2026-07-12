@@ -909,3 +909,81 @@ Caso fallido:
 ```txt
 feat: implement persistent storage upload and CDN delivery for AI assets
 ```
+
+
+---
+
+Fecha: 2026-07-12  
+Proyecto: Sweet Little Trauma Studio  
+Modulo ejecutado: Modulo 6 - Primer Proveedor Completo de Punta a Punta
+
+## Proveedor piloto seleccionado
+
+Se selecciono Replicate/Flux para imagen porque el entorno historico del proyecto contiene `REPLICATE_API_TOKEN`, `REPLICATE_API_URL`, `REPLICATE_IMAGE_API_URL`, `REPLICATE_IMAGE_MODEL` y `REPLICATE_FLUX_MODEL` configurados.
+
+## Cambios aplicados
+
+- `image` con adaptador `replicate-image` ahora entra al flujo asincrono de Jobs cuando `sync` no es `true`.
+- La solicitud a Replicate inyecta dinamicamente un webhook de Sweet Little Trauma Studio con `jobId` en query string y `webhook_events_filter: ["completed"]`.
+- El webhook real puede mapear el evento por `jobId` de query, por `request_id` o por `providerJobId`.
+- El parser de firma soporta headers estilo `webhook-*`, `x-replicate-*` y `svix-*`, incluyendo payload firmado como `timestamp.body` y `webhookId.timestamp.body`.
+- El webhook responde HTTP 202 rapidamente y deja la descarga/storage/capture en el background para evitar reintentos innecesarios del proveedor.
+- El storage usa `Authorization: Bearer REPLICATE_API_TOKEN` al descargar assets de Replicate, porque sus outputs API pueden requerir token.
+- `/api/jobs/:id` tambien puede refrescar un job de imagen Replicate contra `GET /v1/predictions/:id` y cerrar el flujo si el webhook externo se retrasa.
+
+## Condiciones necesarias para prueba real externa
+
+Para que Replicate pueda llamar el webhook real, el backend debe correr con una URL publica HTTPS sin redirects en `PUBLIC_API_BASE_URL` o `WEBHOOK_BASE_URL`. Tambien debe existir `REPLICATE_WEBHOOK_SECRET` o `WEBHOOK_SECRET` con el secreto de firma del webhook de Replicate.
+
+## Pruebas ejecutadas durante este modulo
+
+```txt
+node --check server/api-proxy.js
+```
+
+Resultado: OK, sin errores de sintaxis.
+
+```txt
+Replicate account check + default webhook secret endpoint check
+```
+
+Resultado: OK contra la API oficial de Replicate. El token respondio HTTP 200 en `/v1/account` y el endpoint `/v1/webhooks/default/secret` respondio HTTP 200 indicando que existe secreto de firma disponible. No se imprimio ningun secreto.
+
+```txt
+Mock local de Replicate + backend SLT temporal
+```
+
+Resultado: OK. Se levanto un mock local en `http://127.0.0.1:3220` y el backend SLT en `http://127.0.0.1:3221` con `WEBHOOK_SECRET=test_secret`, `ALLOW_LOCAL_WEBHOOK_URLS=true` y `SLT_STORAGE_DIR=/private/tmp/slt-m6-assets`.
+
+Validacion E2E local firmada:
+
+- `POST /api/generate/image` con provider `Flux` devolvio HTTP 202 y creo `job_1783851077686_c8b4ed`.
+- El webhook configurado fue `http://127.0.0.1:3221/api/webhooks/replicate?jobId=job_1783851077686_c8b4ed`.
+- El mock envio webhook firmado con status `succeeded` y output PNG inline.
+- El backend acepto el webhook con HTTP 202 y proceso el asset en background.
+- `GET /api/jobs/:id` devolvio `job.status=completed`, provider `Flux`, `assets=1` y URL final propia: `http://127.0.0.1:3221/cdn/assets/image_job_1783851077686_c8b4ed_e900b9cdbbc8.png`.
+- `GET /api/assets` devolvio 1 asset persistido con `contentType=image/png`, `bytes=68`, `status=stored`.
+- La descarga de la URL propia devolvio HTTP 200, `content-type=image/png` y header `X-SLT-Asset-Storage=local-cdn`.
+- El ledger paso de reserva a captura: `availableCredits=20`, `heldCredits=0`, `capturedCredits=10`.
+
+## Bloqueo de prueba externa real
+
+No se ejecuto una generacion real externa contra Replicate porque esta Mac no tiene `cloudflared` ni `ngrok`, y el `.env` historico no contiene `PUBLIC_API_BASE_URL`, `WEBHOOK_BASE_URL`, `REPLICATE_WEBHOOK_SECRET` ni `WEBHOOK_SECRET`. Replicate necesita una URL publica HTTPS sin redirects para llamar el webhook real. El codigo ya valida esa condicion y devuelve error claro si se intenta usar localhost sin `ALLOW_LOCAL_WEBHOOK_URLS=true`.
+
+```txt
+npm run lint
+```
+
+Resultado: OK, exit 0. Oxlint reporto warnings existentes de mantenimiento, sin errores fatales.
+
+```txt
+npm run build
+```
+
+Resultado: OK. Vite build completo en 758ms y regenero `dist/` como salida esperada.
+
+## Commit sugerido
+
+```txt
+feat: end-to-end integration for primary image provider
+```
