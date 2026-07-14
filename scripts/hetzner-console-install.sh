@@ -26,8 +26,9 @@ else
   cd "$APP_DIR"
 fi
 
-npm ci --omit=dev
+npm ci
 npm run build
+npm prune --omit=dev
 
 if [[ ! -f "$APP_DIR/.env" ]]; then
   echo "WARN: $APP_DIR/.env missing — copy your PROYECTO_COMPLETO .env to the server first."

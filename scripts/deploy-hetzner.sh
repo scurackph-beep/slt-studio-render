@@ -39,7 +39,6 @@ cd ${REMOTE_DIR}
 chmod +x deploy/hetzner/patch-production-env.sh
 PUBLIC_DOMAIN=${DOMAIN} ./deploy/hetzner/patch-production-env.sh ${REMOTE_DIR}/.env
 npm ci --omit=dev
-npm run build
 chown -R www-data:www-data ${REMOTE_DIR}
 cp deploy/hetzner/nginx-studiosweetlittletrauma.conf /etc/nginx/sites-available/studiosweetlittletrauma.com
 ln -sf /etc/nginx/sites-available/studiosweetlittletrauma.com /etc/nginx/sites-enabled/studiosweetlittletrauma.com
