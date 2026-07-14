@@ -1,25 +1,42 @@
 @import url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.css');
 
-/* ─── Design System (applied last: caps Navbar + global tokens) ─── */
+/* ─── Sweet Little Trauma Studio — Light Atelier Theme ─── */
 :root {
-  --bg: #000000;
-  --ink: #ffffff;
-  --ink-muted: rgba(255, 255, 255, 0.45);
-  --ink-subtle: rgba(255, 255, 255, 0.25);
-  --line: #1a1a1a;
+  --bg: #f6f1ea;
+  --bg-elevated: #fdfbf7;
+  --surface: rgba(255, 255, 255, 0.78);
+  --surface-strong: #ffffff;
+  --ink: #1f1728;
+  --ink-muted: #5f566c;
+  --ink-subtle: #8d8498;
+  --line: rgba(31, 23, 40, 0.1);
+  --line-strong: rgba(31, 23, 40, 0.18);
+
+  --rainbow-red: #ff5d6e;
+  --rainbow-yellow: #ffd84a;
+  --rainbow-green: #62e06f;
+  --rainbow-cyan: #35d5ff;
+  --rainbow-blue: #4d7dff;
+  --rainbow-violet: #b06cff;
+
+  --accent: #6b4eff;
+  --accent-soft: rgba(107, 78, 255, 0.12);
+  --shadow-soft: 0 22px 60px rgba(31, 23, 40, 0.08);
+  --shadow-lift: 0 10px 30px rgba(31, 23, 40, 0.06);
 
   --font: 'Geist', 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   --weight-thin: 100;
   --weight-light: 300;
   --weight-regular: 400;
+  --weight-medium: 500;
 
-  --tracking-logo-top: 0.3em;
-  --tracking-logo-sub: 0.5em;
-  --tracking-nav: 0.2em;
-  --tracking-label: 0.15em;
+  --tracking-logo-top: 0.18em;
+  --tracking-logo-sub: 0.42em;
+  --tracking-nav: 0.14em;
+  --tracking-label: 0.16em;
 
-  --fade: 200ms ease;
-  --navbar-height: 88px;
+  --fade: 280ms cubic-bezier(0.22, 1, 0.36, 1);
+  --navbar-height: 96px;
 }
 
 *,
@@ -43,6 +60,15 @@ body,
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow-x: hidden;
+}
+
+body {
+  position: relative;
+  background:
+    radial-gradient(circle at 12% 18%, rgba(255, 93, 110, 0.09), transparent 28%),
+    radial-gradient(circle at 86% 12%, rgba(53, 213, 255, 0.1), transparent 24%),
+    radial-gradient(circle at 72% 82%, rgba(176, 108, 255, 0.08), transparent 30%),
+    var(--bg);
 }
 
 button,
@@ -71,9 +97,9 @@ h4,
 h5,
 h6 {
   font-weight: var(--weight-light);
+  color: var(--ink);
 }
 
-/* Typography scale */
 .text-display {
   font-weight: var(--weight-light);
   letter-spacing: 0.02em;
@@ -81,18 +107,22 @@ h6 {
 
 .text-label {
   font-size: 11px;
-  font-weight: var(--weight-light);
+  font-weight: var(--weight-medium);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
+  color: var(--ink-muted);
 }
 
 .text-muted {
   color: var(--ink-muted);
 }
 
-/* Fade-only transitions */
 .fade-in {
-  animation: fadeIn var(--fade) forwards;
+  animation: fadeIn 600ms var(--fade) forwards;
+}
+
+.page-rise {
+  animation: pageRise 700ms var(--fade) forwards;
 }
 
 @keyframes fadeIn {
@@ -100,8 +130,19 @@ h6 {
   to { opacity: 1; }
 }
 
+@keyframes pageRise {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 ::-webkit-scrollbar {
-  width: 4px;
+  width: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -109,5 +150,6 @@ h6 {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--ink-subtle);
+  background: rgba(31, 23, 40, 0.18);
+  border-radius: 999px;
 }

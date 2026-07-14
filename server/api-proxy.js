@@ -12,15 +12,21 @@ import express from "express";
 import cors from "cors";
 import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertProductionInfrastructureReady, getProductionReadinessReport } from "./production-infrastructure.js";
+import { createRuntimeStore } from "./postgres-store.js";
+import { createSupabaseAdminClient, createSupabaseStorageService, createSupabaseUserClient, verifySupabaseJwt } from "./supabase-service.js";
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const projectDir = dirname(fileURLToPath(import.meta.url));
 const staticDir = process.env.SLT_STATIC_DIR || resolve(projectDir, "../dist");
 const assetStorageDir = process.env.SLT_STORAGE_DIR || resolve(projectDir, "../storage/assets");
+const supabaseStorage = createSupabaseStorageService(process.env);
+const supabaseAdmin = createSupabaseAdminClient(process.env);
+const supabaseAuth = createSupabaseUserClient(process.env);
 
 function loadEnvFile(filename) {
   const filePath = typeof filename === "string" && filename.includes("/")
@@ -47,6 +53,8 @@ const loadedEnvFiles = [".env", ".env.local"].filter(loadEnvFile);
   process.env.SLT_ENV_DIR ? resolve(process.env.SLT_ENV_DIR, ".env") : null
 ].filter(Boolean).forEach((filePath) => loadEnvFile(filePath));
 
+const startupInfrastructureReadiness = assertProductionInfrastructureReady(process.env);
+
 function envList(key) {
   return String(process.env[key] || "")
     .split(",")
@@ -70,13 +78,137 @@ app.use((request, response, next) => {
 
 app.use(cors({ origin: "*" }));
 
+const SITE_GATE_KEY = String(process.env.SLT_SITE_GATE_KEY || "Dientito2032").trim();
+
+function siteGateExempt(path = "") {
+  return [
+    "/health",
+    "/api/stripe/webhook",
+    "/api/webhooks/"
+  ].some((prefix) => path === prefix || path.startsWith(prefix));
+}
+
+function siteGateMiddleware(request, response, next) {
+  if (!SITE_GATE_KEY) {
+    next();
+    return;
+  }
+  if (siteGateExempt(request.path)) {
+    next();
+    return;
+  }
+  const provided = String(
+    request.header?.("x-slt-site-gate") ||
+    request.query?.site_gate ||
+    ""
+  ).trim();
+  if (provided === SITE_GATE_KEY) {
+    next();
+    return;
+  }
+  if (request.path.startsWith("/api/")) {
+    response.status(403).json({
+      ok: false,
+      code: "site_gate_required",
+      error: "Private preview. Site gate required.",
+      readableError: "Acceso privado. Ingresá la clave del sitio."
+    });
+    return;
+  }
+  response.status(403).send("Private preview. Site gate required.");
+}
+
+app.use(siteGateMiddleware);
+
+function authTokenFromRequest(request) {
+  const bearer = String(request.header?.("authorization") || "").match(/^Bearer\s+(.+)$/i)?.[1] || "";
+  return String(request.header?.("x-slt-session") || bearer || "").trim();
+}
+
+function strictAuthForRequest(request) {
+  const token = authTokenFromRequest(request);
+  if (String(process.env.AUTH_PROVIDER || "").toLowerCase() === "supabase") {
+    return verifySupabaseJwt(token, process.env);
+  }
+  const session = token ? sessions.get(token) : null;
+  if (!session) return null;
+  return {
+    ok: true,
+    mode: session.role === "CEO" ? "CEO_FULL_CREATIVE_MODE" : "local-session",
+    userId: session.userId,
+    role: session.role,
+    email: session.email,
+    username: session.username,
+    token,
+    message: session.role === "CEO" ? "CEO session accepted." : "Local session accepted."
+  };
+}
+
 function requestIdentity(request, auth = null) {
-  return auth?.userId || request.header?.("x-slt-user-id") || request.ip || request.socket?.remoteAddress || "anonymous";
+  const sessionAuth = auth?.ok ? auth : strictAuthForRequest(request);
+  return sessionAuth?.tenantId || sessionAuth?.userId || request.ip || request.socket?.remoteAddress || "anonymous";
 }
 
 function rateLimitForPath(path = "") {
+  if (path === "/api/login" || path.startsWith("/api/auth/")) return envNumber("AUTH_RATE_LIMIT_PER_MINUTE", 8);
   if (path.startsWith("/api/generate/")) return envNumber("GENERATE_RATE_LIMIT_PER_MINUTE", 10);
+  if (path.includes("/checkout") || path.includes("/portal")) return envNumber("BILLING_RATE_LIMIT_PER_MINUTE", 20);
   return envNumber("API_RATE_LIMIT_PER_MINUTE", 90);
+}
+
+function authFailurePayload(code = "auth_required") {
+  return {
+    ok: false,
+    code,
+    error: code === "forbidden" ? "Forbidden." : "Authentication required.",
+    readableError: code === "forbidden" ? "This action needs a higher access level." : "Please log in before using this action."
+  };
+}
+
+function requiresServerAuth(path = "") {
+  return [
+    "/api/generate/",
+    "/api/assist",
+    "/api/jobs/",
+    "/api/ledger",
+    "/api/assets",
+    "/api/uploads",
+    "/api/projects",
+    "/api/history",
+    "/api/billing",
+    "/api/subscription",
+    "/api/user",
+    "/api/studio/run",
+    "/api/stripe/checkout",
+    "/api/stripe/credits/checkout",
+    "/api/stripe/portal",
+    "/api/db/status",
+    "/api/ceo/provider-credits"
+  ].some((prefix) => path === prefix || path.startsWith(prefix));
+}
+
+function requiresOwnerAuth(path = "") {
+  return path.startsWith("/api/ceo/") || path === "/api/db/status";
+}
+
+function authProtectionMiddleware(request, response, next) {
+  if (!requiresServerAuth(request.path)) {
+    next();
+    return;
+  }
+
+  const auth = strictAuthForRequest(request);
+  if (!auth) {
+    response.status(401).json(authFailurePayload("auth_required"));
+    return;
+  }
+  if (requiresOwnerAuth(request.path) && !isOwnerAuth(auth)) {
+    response.status(403).json({ ...authFailurePayload("forbidden"), auth: { ok: true, role: auth.role } });
+    return;
+  }
+
+  request.sltAuth = auth;
+  next();
 }
 
 function rateLimitMiddleware(request, response, next) {
@@ -109,31 +241,7 @@ function rateLimitMiddleware(request, response, next) {
   next();
 }
 
-app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), (request, response) => {
-  if (!hasEnvValue("STRIPE_WEBHOOK_SECRET")) {
-    response.status(503).json({
-      ok: false,
-      code: "stripe_webhook_not_configured",
-      error: "Stripe webhook secret is missing."
-    });
-    return;
-  }
-
-  try {
-    const signature = request.header("Stripe-Signature") || "";
-    const rawBody = Buffer.isBuffer(request.body) ? request.body : Buffer.from("");
-    verifyStripeWebhookSignature(rawBody, signature, process.env.STRIPE_WEBHOOK_SECRET);
-    const event = JSON.parse(rawBody.toString("utf8"));
-    applyStripeWebhookEvent(event);
-    response.json({ ok: true, received: true });
-  } catch (error) {
-    response.status(400).json({
-      ok: false,
-      code: "stripe_webhook_verification_failed",
-      error: "Stripe webhook verification failed."
-    });
-  }
-});
+app.post(["/api/stripe/webhook", "/api/webhooks/stripe"], express.raw({ type: "application/json" }), handleStripeWebhook);
 
 app.use(express.json({
   limit: "50mb",
@@ -142,6 +250,18 @@ app.use(express.json({
   }
 }));
 app.use(rateLimitMiddleware);
+app.use(authProtectionMiddleware);
+app.use((request, response, next) => {
+  const mutates = ["POST", "PUT", "PATCH", "DELETE"].includes(request.method);
+  if (mutates && request.path.startsWith("/api/")) {
+    response.on("finish", () => {
+      if (response.statusCode < 500) {
+        void persistRuntimeState(`${request.method} ${request.path}`);
+      }
+    });
+  }
+  next();
+});
 
 const providerFallbackMessage = "Provider not connected. Add API key.";
 const preparedProviderMessage = "Prepared but not connected yet.";
@@ -182,17 +302,72 @@ const providerCatalog = {
     adapter: "seedance-direct",
     endpointEnv: "SEEDANCE_API_URL",
     alternateEndpointEnvKeys: ["BYTEPLUS_BASE_URL"],
-    configEnvKeys: ["SEEDANCE_MODEL_ID"]
+    configEnvKeys: ["SEEDANCE_MODEL_ID"],
+    execution: "async",
+    supportsWebhook: true,
+    defaultModel: "dreamina-seedance-2-0-260128",
+    modelEnv: "SEEDANCE_MODEL_ID",
+    pricing: { chargeUnit: "second", creditsPerSecond: 12, minimumCredits: 60, source: "internal_estimate" }
   },
   Veo: { kind: "video", envKey: "GEMINI_API_KEY", adapter: "veo-direct" },
   OmniHuman: {
     kind: "video",
     envKey: "BYTEPLUS_VISION_AK",
     adapter: "byteplus-omnihuman",
-    configEnvKeys: ["BYTEPLUS_VISION_SK", "BYTEPLUS_VISION_REGION", "BYTEPLUS_VISION_SERVICE", "OMNIHUMAN_REQ_KEY"]
+    configEnvKeys: ["BYTEPLUS_VISION_SK", "BYTEPLUS_VISION_REGION", "BYTEPLUS_VISION_SERVICE", "OMNIHUMAN_REQ_KEY"],
+    execution: "async",
+    supportsWebhook: true,
+    defaultModel: "dreamina-omnihuman-1.0",
+    pricing: { chargeUnit: "second", creditsPerSecond: 18, minimumCredits: 90, source: "internal_estimate" }
   },
-  Runway: { kind: "video", envKey: "RUNWAY_API_KEY", adapter: "runway-video", endpointEnv: "RUNWAY_API_URL" },
-  Kling: { kind: "video", envKey: "KLING_ACCESS_KEY", alternateEnvKeys: ["KLING_API_KEY"], adapter: "kling-video", endpointEnv: "KLING_API_URL", configEnvKeys: ["KLING_SECRET_KEY"] },
+  Runway: {
+    kind: "video",
+    envKey: "RUNWAY_API_KEY",
+    adapter: "runway-video",
+    endpointEnv: "RUNWAY_API_URL",
+    execution: "async",
+    supportsWebhook: true,
+    defaultModel: "gen4_turbo",
+    modelEnv: "RUNWAY_MODEL_ID",
+    models: [
+      {
+        id: "gen4_turbo",
+        label: "Gen-4 Turbo",
+        pricing: { chargeUnit: "second", creditsPerSecond: 5, minimumCredits: 25, source: "runway_official_api_pricing" }
+      },
+      {
+        id: "gen4.5",
+        label: "Gen-4.5",
+        pricing: { chargeUnit: "second", creditsPerSecond: 12, minimumCredits: 60, source: "runway_official_api_pricing" }
+      }
+    ],
+    pricing: { chargeUnit: "second", creditsPerSecond: 5, minimumCredits: 25, source: "runway_official_api_pricing" }
+  },
+  Kling: {
+    kind: "video",
+    envKey: "KLING_ACCESS_KEY",
+    alternateEnvKeys: ["KLING_API_KEY"],
+    adapter: "kling-video",
+    endpointEnv: "KLING_API_URL",
+    configEnvKeys: ["KLING_SECRET_KEY"],
+    execution: "async",
+    supportsWebhook: true,
+    defaultModel: "kling-v3-standard",
+    modelEnv: "KLING_MODEL_ID",
+    models: [
+      {
+        id: "kling-v3-standard",
+        label: "Kling 3.0 Standard",
+        pricing: { chargeUnit: "second", creditsPerSecond: 8, minimumCredits: 40, source: "internal_estimate_pending_vendor_pricing" }
+      },
+      {
+        id: "kling-omni",
+        label: "Kling Omni",
+        pricing: { chargeUnit: "second", creditsPerSecond: 14, minimumCredits: 70, source: "internal_estimate_pending_vendor_pricing" }
+      }
+    ],
+    pricing: { chargeUnit: "second", creditsPerSecond: 8, minimumCredits: 40, source: "internal_estimate_pending_vendor_pricing" }
+  },
   Hailuo: { kind: "video", envKey: "HAILUO_API_KEY", alternateEnvKeys: ["MINIMAX_API_KEY"], adapter: "minimax-video", endpointEnv: "HAILUO_API_URL", alternateEndpointEnvKeys: ["MINIMAX_API_URL"] },
   Luma: { kind: "video", envKey: "LUMA_API_KEY", adapter: "luma-video", endpointEnv: "LUMA_API_URL" },
   PixVerse: { kind: "video", envKey: "PIXVERSE_API_KEY", adapter: "pixverse-video", endpointEnv: "PIXVERSE_API_URL" },
@@ -202,16 +377,66 @@ const providerCatalog = {
   HeyGen: { kind: "video", envKey: "HEYGEN_API_KEY", adapter: "heygen-video-agent", endpointEnv: "HEYGEN_API_URL" },
   "D-ID": { kind: "video", envKey: "DID_API_KEY", adapter: "did-talk", endpointEnv: "DID_API_URL" },
 
-  Suno: { kind: "music", envKey: "SUNO_API_KEY", adapter: "generic-endpoint", endpointEnv: "SUNO_API_URL", preparedOnly: true },
+  Suno: {
+    kind: "music",
+    envKey: "SUNO_API_KEY",
+    adapter: "generic-endpoint",
+    endpointEnv: "SUNO_API_URL",
+    preparedOnly: true,
+    execution: "async",
+    supportsWebhook: true,
+    defaultModel: "suno-v5.5",
+    modelEnv: "SUNO_MODEL_ID",
+    pricing: { chargeUnit: "track", creditsPerUnit: 180, minimumCredits: 180, source: "internal_estimate_public_product_reference" }
+  },
   Udio: { kind: "music", envKey: "UDIO_API_KEY", adapter: "generic-endpoint", endpointEnv: "UDIO_API_URL", preparedOnly: true },
   "MiniMax Music": { kind: "music", envKey: "MINIMAX_API_KEY", alternateEnvKeys: ["HAILUO_API_KEY"], adapter: "minimax-music", endpointEnv: "MINIMAX_API_URL", alternateEndpointEnvKeys: ["HAILUO_API_URL"] },
-  "SLT Composer": { kind: "music", envKey: "", adapter: "slt-composer", localProvider: true },
+  "SLT Composer": {
+    kind: "music",
+    envKey: "",
+    adapter: "slt-composer",
+    localProvider: true,
+    execution: "sync",
+    defaultModel: "slt-local-composer-plan",
+    pricing: { chargeUnit: "track", creditsPerUnit: 75, minimumCredits: 75, source: "internal_local_planning" }
+  },
   "Stable Audio": { kind: "music", envKey: "STABLE_AUDIO_API_KEY", adapter: "stability-audio", endpointEnv: "STABLE_AUDIO_API_URL" },
+  "ElevenLabs Music": {
+    kind: "music",
+    envKey: "ELEVENLABS_API_KEY",
+    adapter: "generic-endpoint",
+    endpointEnv: "ELEVENLABS_MUSIC_API_URL",
+    preparedOnly: true,
+    execution: "async",
+    supportsWebhook: true,
+    defaultModel: "music_v2",
+    pricing: { chargeUnit: "track", creditsPerUnit: 160, minimumCredits: 160, source: "internal_estimate" }
+  },
   Mubert: { kind: "music", envKey: "MUBERT_API_KEY", adapter: "generic-endpoint", endpointEnv: "MUBERT_API_URL", preparedOnly: true },
   "AudioCraft local": { kind: "music", envKey: "REPLICATE_API_TOKEN", adapter: "replicate-musicgen", configEnvKeys: ["AUDIOCRAFT_REPLICATE_MODEL"] },
   Riffusion: { kind: "music", envKey: "REPLICATE_API_TOKEN", adapter: "replicate-riffusion", configEnvKeys: ["RIFFUSION_REPLICATE_MODEL"] },
 
-  ElevenLabs: { kind: "sound", envKey: "ELEVENLABS_API_KEY", adapter: "elevenlabs-tts" },
+  ElevenLabs: {
+    kind: "sound",
+    envKey: "ELEVENLABS_API_KEY",
+    adapter: "elevenlabs-tts",
+    execution: "sync",
+    defaultModel: "eleven_flash_v2_5",
+    modelEnv: "ELEVENLABS_MODEL_ID",
+    models: [
+      {
+        id: "eleven_flash_v2_5",
+        label: "Flash v2.5",
+        pricing: { chargeUnit: "character", unitSize: 50, creditsPerUnit: 1, minimumCredits: 2, source: "runway_audio_pricing_reference" }
+      },
+      {
+        id: "eleven_multilingual_v2",
+        label: "Multilingual v2",
+        pricing: { chargeUnit: "character", unitSize: 50, creditsPerUnit: 1, minimumCredits: 2, source: "runway_audio_pricing_reference" }
+      }
+    ],
+    pricing: { chargeUnit: "character", unitSize: 50, creditsPerUnit: 1, minimumCredits: 2, source: "runway_audio_pricing_reference" }
+  },
   "OpenAI Audio": { kind: "sound", envKey: "OPENAI_API_KEY", adapter: "openai-speech" },
   "MiniMax Speech": { kind: "sound", envKey: "MINIMAX_API_KEY", alternateEnvKeys: ["HAILUO_API_KEY"], adapter: "minimax-speech", endpointEnv: "MINIMAX_API_URL", alternateEndpointEnvKeys: ["HAILUO_API_URL"] },
   "Stability Audio": { kind: "sound", envKey: "STABILITY_AUDIO_API_KEY", adapter: "stability-audio", endpointEnv: "STABILITY_AUDIO_API_URL" },
@@ -219,6 +444,29 @@ const providerCatalog = {
   "iZotope": { kind: "sound", envKey: "IZOTOPE_API_KEY", adapter: "generic-endpoint", endpointEnv: "IZOTOPE_API_URL", preparedOnly: true },
   Moises: { kind: "sound", envKey: "MOISES_API_KEY", adapter: "moises-audio", endpointEnv: "MOISES_API_URL" },
   FFmpeg: { kind: "sound", envKey: "", adapter: "local-placeholder", internalOnly: true },
+
+  Meshy: {
+    kind: "3d",
+    envKey: "MESHY_API_KEY",
+    adapter: "generic-endpoint",
+    endpointEnv: "MESHY_API_URL",
+    preparedOnly: true,
+    execution: "async",
+    supportsWebhook: true,
+    defaultModel: "meshy-text-to-3d",
+    pricing: { chargeUnit: "asset", creditsPerUnit: 120, minimumCredits: 120, source: "internal_estimate" }
+  },
+  Tripo3D: {
+    kind: "3d",
+    envKey: "TRIPO3D_API_KEY",
+    adapter: "generic-endpoint",
+    endpointEnv: "TRIPO3D_API_URL",
+    preparedOnly: true,
+    execution: "async",
+    supportsWebhook: true,
+    defaultModel: "tripo-text-to-3d",
+    pricing: { chargeUnit: "asset", creditsPerUnit: 120, minimumCredits: 120, source: "internal_estimate" }
+  },
 
   OpenAI: { kind: "assist", envKey: "OPENAI_API_KEY", adapter: "openai-responses" },
   "GPT voz + texto": { kind: "assist", envKey: "OPENAI_API_KEY", adapter: "openai-responses" },
@@ -321,7 +569,74 @@ function creditsForPlan(plan = "Free") {
   return planCreditAllowance[plan] ?? planCreditAllowance.Free;
 }
 
-function creditCostFor(kind = "assist") {
+function providerModelConfig(config = {}, payload = {}) {
+  const requestedModel = String(
+    payload.model ||
+    payload.modelId ||
+    payload.providerModel ||
+    payload.providerModelId ||
+    ""
+  ).trim();
+  const envModel = config.modelEnv ? String(process.env[config.modelEnv] || "").trim() : "";
+  const preferredModel = requestedModel || envModel || config.defaultModel || "";
+  const models = Array.isArray(config.models) ? config.models : [];
+  return (
+    models.find((model) => model.id === preferredModel || model.label === preferredModel) ||
+    models.find((model) => model.id === config.defaultModel) ||
+    (preferredModel ? { id: preferredModel, label: preferredModel, pricing: config.pricing || null } : null)
+  );
+}
+
+function providerPricingFor(config = {}, payload = {}) {
+  const model = providerModelConfig(config, payload);
+  return model?.pricing || config.pricing || null;
+}
+
+function meteredTextLength(payload = {}) {
+  const source = [
+    payload.prompt,
+    payload.text,
+    payload.input,
+    payload.script,
+    payload.lyrics,
+    payload.description,
+    payload.title
+  ].filter(Boolean).join("\n");
+  return Math.max(1, source.length || 1);
+}
+
+function billableVideoSeconds(payload = {}) {
+  const fromPlan = Number(payload.videoPlan?.requestedDurationSeconds || 0);
+  if (Number.isFinite(fromPlan) && fromPlan > 0) return fromPlan;
+  return requestedVideoDurationSeconds(payload);
+}
+
+function billableUnitCount(payload = {}, keys = ["count", "quantity"]) {
+  for (const key of keys) {
+    const parsed = Number.parseInt(String(payload[key] || ""), 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return 1;
+}
+
+function creditCostFor(kind = "assist", payload = {}) {
+  const requestedProvider = payload.provider || payload.providerLabel || defaultProvider[kind] || "";
+  const normalizedProvider = normalizeProviderName(String(requestedProvider));
+  const config = providerCatalog[normalizedProvider];
+  const pricing = providerPricingFor(config, payload);
+  if (pricing?.chargeUnit === "second") {
+    const seconds = billableVideoSeconds(payload);
+    return Math.max(pricing.minimumCredits || 0, Math.ceil(seconds * (pricing.creditsPerSecond || pricing.creditsPerUnit || 1)));
+  }
+  if (pricing?.chargeUnit === "character") {
+    const unitSize = pricing.unitSize || 1;
+    const units = Math.ceil(meteredTextLength(payload) / unitSize);
+    return Math.max(pricing.minimumCredits || 0, units * (pricing.creditsPerUnit || 1));
+  }
+  if (["track", "song", "asset"].includes(pricing?.chargeUnit)) {
+    const units = billableUnitCount(payload, ["trackCount", "songCount", "assetCount", "count", "quantity"]);
+    return Math.max(pricing.minimumCredits || 0, units * (pricing.creditsPerUnit || 1));
+  }
   const costByKind = { image: 10, video: 300, music: 150, sound: 25, assist: 5 };
   return costByKind[kind] || 5;
 }
@@ -375,7 +690,9 @@ const state = {
   history: [],
   jobs: [],
   assets: [],
+  forms: [],
   webhookEvents: [],
+  paymentEvents: [],
   wallet: {
     tenantId: "demo-user",
     availableCredits: creditsForPlan("Free"),
@@ -411,6 +728,72 @@ const state = {
 
 const sessions = new Map();
 const processedWebhookEvents = new Set();
+const runtimeStore = createRuntimeStore(process.env);
+let runtimeStoreInitialized = false;
+let runtimeStoreLastError = null;
+
+function hydrateRuntimeState(persisted = {}) {
+  for (const key of ["user", "subscription", "billing", "wallet"]) {
+    if (persisted[key] && typeof persisted[key] === "object") {
+      state[key] = { ...state[key], ...persisted[key] };
+    }
+  }
+  for (const key of [
+    "projects",
+    "history",
+    "jobs",
+    "assets",
+    "forms",
+    "webhookEvents",
+    "paymentEvents",
+    "creditReservations",
+    "creditTransactions"
+  ]) {
+    if (Array.isArray(persisted[key])) {
+      state[key] = persisted[key];
+    }
+  }
+  syncCreditViews();
+}
+
+async function initializeRuntimeStore() {
+  if (runtimeStoreInitialized) return runtimeStore.status();
+  try {
+    await runtimeStore.initialize({ seedState: state });
+    const persisted = await runtimeStore.loadState();
+    if (persisted) hydrateRuntimeState(persisted);
+    await runtimeStore.saveState({ state, sessions, reason: "startup_sync" });
+    runtimeStoreInitialized = true;
+    runtimeStoreLastError = null;
+  } catch (error) {
+    runtimeStoreLastError = error.message;
+    throw error;
+  }
+  return runtimeStore.status();
+}
+
+async function persistRuntimeState(reason = "mutation") {
+  if (!runtimeStore.durable || !runtimeStoreInitialized) {
+    return { ok: true, skipped: true, reason: "non_durable_runtime_store" };
+  }
+  try {
+    const result = await runtimeStore.saveState({ state, sessions, reason });
+    runtimeStoreLastError = null;
+    return result;
+  } catch (error) {
+    runtimeStoreLastError = error.message;
+    console.error("[SLT] Failed to persist runtime state:", error.message);
+    return { ok: false, error: error.message };
+  }
+}
+
+function runtimeStoreStatus() {
+  return {
+    ...runtimeStore.status(),
+    initialized: runtimeStoreInitialized,
+    lastError: runtimeStoreLastError || runtimeStore.status().lastError || null
+  };
+}
 
 function hasEnvValue(key) {
   return Boolean(process.env[key] && process.env[key].trim());
@@ -875,26 +1258,16 @@ function outputModerationAssessment({ job, result = {}, outputUrls = [] }) {
 }
 
 function getAuth(request) {
-  const token = typeof request.header === "function" ? request.header("x-slt-session") : "";
-  const session = token ? sessions.get(token) : null;
-  if (session) {
-    return {
-      ok: true,
-      mode: session.role === "CEO" ? "CEO_FULL_CREATIVE_MODE" : "local-session",
-      userId: session.userId,
-      role: session.role,
-      email: session.email,
-      username: session.username,
-      message: session.role === "CEO" ? "CEO session accepted." : "Local session accepted."
-    };
-  }
-  const userId = typeof request.header === "function" ? request.header("x-slt-user-id") || "demo-user" : "demo-user";
+  const session = strictAuthForRequest(request);
+  if (session) return session;
   return {
-    ok: true,
-    mode: "mock",
-    userId,
-    role: "standard",
-    message: "Mock auth accepted. Replace this with real session validation before launch."
+    ok: false,
+    mode: "unauthenticated",
+    userId: null,
+    role: "anonymous",
+    email: "",
+    username: "",
+    message: "No valid server-side session."
   };
 }
 
@@ -902,6 +1275,30 @@ function isOwnerAuth(auth = {}) {
   const ownerUserId = process.env.LOCAL_OWNER_USER_ID || "";
   const ownerEmail = process.env.CEO_EMAIL || "";
   return auth.role === "CEO" || (ownerUserId && auth.userId === ownerUserId) || (ownerEmail && auth.email === ownerEmail);
+}
+
+function recordTenantId(record = {}) {
+  return record.tenantId || record.userId || record.metadata?.userId || record.metadata?.tenantId || record.checks?.auth?.userId || "";
+}
+
+function canAccessRecord(record = {}, auth = {}) {
+  if (isOwnerAuth(auth)) return true;
+  const tenantId = recordTenantId(record);
+  const authTenants = [auth.tenantId, auth.userId].filter(Boolean);
+  if (!tenantId) return Boolean(auth.ok && authTenants.includes(state.wallet.tenantId));
+  return authTenants.includes(tenantId);
+}
+
+function filterRecordsForAuth(records = [], auth = {}) {
+  return records.filter((record) => canAccessRecord(record, auth));
+}
+
+function assertTenantAccess(record = {}, auth = {}) {
+  if (canAccessRecord(record, auth)) return true;
+  const error = new Error("Forbidden.");
+  error.code = "forbidden";
+  error.statusCode = 403;
+  throw error;
 }
 
 function normalizeProviderName(name = "") {
@@ -988,6 +1385,9 @@ function providerStatus(name) {
     connected = true;
   }
 
+  const selectedModel = providerModelConfig(config);
+  const pricing = providerPricingFor(config);
+
   return {
     name: normalized,
     kind: config.kind,
@@ -1007,6 +1407,15 @@ function providerStatus(name) {
     localProvider: Boolean(config.localProvider),
     needsConfirmation: Boolean(config.needsConfirmation),
     preparedOnly: Boolean(config.preparedOnly),
+    execution: config.execution || (config.kind === "video" || config.kind === "music" || config.kind === "3d" ? "async" : "sync"),
+    supportsWebhook: Boolean(config.supportsWebhook),
+    model: selectedModel ? { id: selectedModel.id, label: selectedModel.label || selectedModel.id } : null,
+    models: (config.models || []).map((model) => ({
+      id: model.id,
+      label: model.label || model.id,
+      pricing: model.pricing || null
+    })),
+    pricing,
     canGenerate: connected,
     message
   };
@@ -1136,8 +1545,8 @@ function validatePlan(kind, request, auth) {
   return { ok: true, mode: "mock", message: "Plan validation passed." };
 }
 
-function validateCredits(kind, auth = {}) {
-  const cost = creditCostFor(kind);
+function validateCredits(kind, auth = {}, payload = {}) {
+  const cost = creditCostFor(kind, payload);
   const wallet = ledgerSnapshot();
   if (isOwnerAuth(auth)) {
     return {
@@ -1253,7 +1662,7 @@ function baseChecks(request, kind) {
   return {
     auth,
     plan: validatePlan(kind, request, auth),
-    credits: validateCredits(kind, auth),
+    credits: validateCredits(kind, auth, request.body || {}),
     provider: status
   };
 }
@@ -1271,6 +1680,9 @@ function failProviderIfRequested(request, response) {
 }
 
 function saveHistory(entry) {
+  if (entry && !entry.tenantId) {
+    entry.tenantId = entry.checks?.auth?.userId || entry.ledger?.reservation?.tenantId || entry.result?.tenantId || "";
+  }
   state.history.unshift(entry);
   state.history = state.history.slice(0, 50);
 }
@@ -1278,6 +1690,7 @@ function saveHistory(entry) {
 function saveProjectFromEntry(entry) {
   const project = {
     id: requestId("project"),
+    tenantId: entry.tenantId || entry.checks?.auth?.userId || "",
     title: entry.title,
     kind: entry.kind,
     status: entry.status,
@@ -1311,6 +1724,7 @@ function isAsyncGenerationKind(kind = "") {
 
 function shouldQueueGeneration(kind = "", providerStatus = {}, payload = {}) {
   if (payload.sync === true) return false;
+  if (providerStatus?.execution === "async") return true;
   if (isAsyncGenerationKind(kind)) return true;
   return kind === "image" && providerStatus?.adapter === "replicate-image";
 }
@@ -1320,6 +1734,8 @@ function createJob({ kind, title, providerName, prompt, payload, checks, request
   const job = {
     id: requestId("job"),
     requestId: null,
+    tenantId: requestIdentity(request, checks.auth),
+    userId: checks.auth?.userId || null,
     kind,
     title,
     provider: providerName,
@@ -1439,6 +1855,9 @@ function webhookUrlForJob(request, status = {}, jobId = "") {
 }
 
 function storagePublicBaseUrl(request = null) {
+  if (supabaseStorage.configured && process.env.STORAGE_PUBLIC_BASE_URL) {
+    return process.env.STORAGE_PUBLIC_BASE_URL.replace(/\/$/, "");
+  }
   const configured = process.env.SLT_CDN_BASE_URL || process.env.PUBLIC_CDN_BASE_URL || process.env.ASSET_CDN_BASE_URL || "";
   if (configured) return configured.replace(/\/$/, "");
   return request ? `${publicApiBaseUrl(request)}/cdn/assets` : "/cdn/assets";
@@ -1481,6 +1900,29 @@ function extensionFromContentType(contentType = "", sourceUrl = "") {
     if (match) return match[1].toLowerCase();
   }
   return "bin";
+}
+
+function safeStorageSegment(value = "tenant") {
+  return String(value || "tenant").replace(/[^a-zA-Z0-9_.=-]/g, "_").replace(/_+/g, "_").slice(0, 96) || "tenant";
+}
+
+async function storeAssetBytes({ bytes, contentType, fileName, request = null, tenantId = "" }) {
+  if (supabaseStorage.configured) {
+    const tenantPrefix = safeStorageSegment(tenantId || "tenant");
+    const datePrefix = new Date().toISOString().slice(0, 10);
+    const storageKey = `${tenantPrefix}/${datePrefix}/${fileName}`;
+    return supabaseStorage.upload({ key: storageKey, bytes, contentType });
+  }
+
+  await mkdir(assetStorageDir, { recursive: true });
+  const storagePath = resolve(assetStorageDir, fileName);
+  await writeFile(storagePath, bytes);
+  return {
+    provider: "local",
+    storageKey: fileName,
+    storagePath,
+    publicUrl: `${storagePublicBaseUrl(request).replace(/\/$/, "")}/${fileName}`
+  };
 }
 
 function parseDataUrl(dataUrl = "") {
@@ -1568,17 +2010,20 @@ async function storeProviderAsset({ job, sourceUrl, cdnBaseUrl, sourceHeaders = 
   const extension = extensionFromContentType(contentType, sourceUrl);
   const digest = crypto.createHash("sha256").update(String(sourceUrl)).update(downloaded.bytes).digest("hex").slice(0, 12);
   const fileName = `${job.kind}_${job.id}_${digest}.${extension}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
-  await mkdir(assetStorageDir, { recursive: true });
-  await writeFile(resolve(assetStorageDir, fileName), downloaded.bytes);
+  const assetTenantId = job.tenantId || recordTenantId(job) || state.wallet.tenantId;
+  const stored = await storeAssetBytes({ bytes: downloaded.bytes, contentType, fileName, tenantId: assetTenantId });
 
   const asset = {
     id: requestId("asset"),
+    tenantId: assetTenantId,
     jobId: job.id,
     kind: job.kind,
     provider: job.provider,
     originalUrl: sourceUrl.startsWith("data:") ? "data-url" : sourceUrl,
-    publicUrl: `${cdnBaseUrl.replace(/\/$/, "")}/${fileName}`,
-    storagePath: resolve(assetStorageDir, fileName),
+    publicUrl: stored.publicUrl || `${cdnBaseUrl.replace(/\/$/, "")}/${fileName}`,
+    storageKey: stored.storageKey || fileName,
+    storageProvider: stored.provider || "local",
+    storagePath: stored.storagePath || null,
     contentType,
     bytes: downloaded.bytes.length,
     status: downloaded.placeholder ? "placeholder_stored" : "stored",
@@ -1612,6 +2057,161 @@ async function persistProviderAssets({ job, outputUrls = [], cdnBaseUrl, sourceH
       cdnBaseUrl
     }
   };
+}
+
+const uploadMimeGroups = {
+  image: ["image/png", "image/jpeg", "image/webp", "image/gif"],
+  video: ["video/mp4", "video/webm", "video/quicktime"],
+  music: ["audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/ogg", "audio/webm", "audio/mp4", "text/plain"],
+  sound: ["audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/ogg", "audio/webm", "audio/mp4", "video/mp4", "video/webm", "video/quicktime"],
+  fashion: ["image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf"],
+  reference: ["image/png", "image/jpeg", "image/webp", "image/gif", "video/mp4", "video/webm", "video/quicktime", "audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/ogg", "audio/webm", "audio/mp4", "text/plain", "application/pdf"]
+};
+
+function allowedUploadMimes(kind = "reference") {
+  return uploadMimeGroups[kind] || uploadMimeGroups.reference;
+}
+
+function normalizeUploadKind(kind = "") {
+  const value = String(kind || "").toLowerCase();
+  if (["image", "video", "music", "sound", "fashion"].includes(value)) return value;
+  return "reference";
+}
+
+function safeUploadName(name = "asset.bin") {
+  const clean = String(name || "asset.bin").split(/[\\/]/).pop().replace(/[^a-zA-Z0-9_. -]/g, "_").trim();
+  return clean || "asset.bin";
+}
+
+function parseUploadedBytes({ dataUrl = "", base64 = "" } = {}) {
+  if (dataUrl) return parseDataUrl(dataUrl);
+  if (!base64) {
+    const error = new Error("Upload body must include dataUrl or base64.");
+    error.code = "upload_missing_bytes";
+    throw error;
+  }
+  return {
+    contentType: "application/octet-stream",
+    bytes: Buffer.from(String(base64), "base64")
+  };
+}
+
+async function storeUploadedReferenceAsset({ request, auth, payload = {} }) {
+  const uploadKind = normalizeUploadKind(payload.kind || payload.module || payload.studio);
+  const parsed = parseUploadedBytes(payload);
+  const contentType = String(payload.contentType || parsed.contentType || "application/octet-stream").split(";")[0].trim().toLowerCase();
+  const accepted = allowedUploadMimes(uploadKind);
+  const maxBytes = envNumber("MAX_UPLOAD_BYTES", 25 * 1024 * 1024);
+  if (!accepted.includes(contentType)) {
+    const error = new Error(`Unsupported upload type ${contentType || "unknown"} for ${uploadKind}.`);
+    error.code = "upload_invalid_mime";
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!parsed.bytes?.length) {
+    const error = new Error("Upload file is empty.");
+    error.code = "upload_empty";
+    error.statusCode = 400;
+    throw error;
+  }
+  if (parsed.bytes.length > maxBytes) {
+    const error = new Error(`Upload exceeds ${Math.round(maxBytes / 1024 / 1024)}MB limit.`);
+    error.code = "upload_too_large";
+    error.statusCode = 413;
+    throw error;
+  }
+
+  const tenantId = requestIdentity(request, auth);
+  const extension = extensionFromContentType(contentType, payload.fileName || "");
+  const digest = crypto.createHash("sha256").update(parsed.bytes).digest("hex").slice(0, 12);
+  const fileName = `${uploadKind}_${tenantId}_${Date.now()}_${digest}.${extension}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
+  const stored = await storeAssetBytes({ bytes: parsed.bytes, contentType, fileName, request, tenantId });
+
+  const asset = {
+    id: requestId("asset"),
+    tenantId,
+    projectId: payload.projectId || null,
+    jobId: payload.jobId || null,
+    kind: uploadKind,
+    module: payload.module || uploadKind,
+    provider: "user-upload",
+    role: payload.role || "reference",
+    originalName: safeUploadName(payload.fileName),
+    originalUrl: "user-upload",
+    publicUrl: stored.publicUrl,
+    storageKey: stored.storageKey || fileName,
+    storageProvider: stored.provider || "local",
+    storagePath: stored.storagePath || null,
+    contentType,
+    bytes: parsed.bytes.length,
+    status: "stored",
+    metadata: {
+      promptRole: payload.promptRole || "",
+      note: payload.note || ""
+    },
+    createdAt: new Date().toISOString()
+  };
+  state.assets.unshift(asset);
+  state.assets = state.assets.slice(0, 300);
+  return asset;
+}
+
+function serializeAssetForClient(asset = {}) {
+  const { storagePath: _storagePath, ...safeAsset } = asset;
+  return safeAsset;
+}
+
+function findOwnedAsset(assetId, auth) {
+  const asset = state.assets.find((item) => item.id === assetId);
+  if (!asset) return null;
+  if (!canAccessRecord(asset, auth)) {
+    const error = new Error("Forbidden.");
+    error.code = "forbidden";
+    error.statusCode = 403;
+    throw error;
+  }
+  return asset;
+}
+
+function normalizeFormKind(kind = "") {
+  const value = String(kind || "contact").toLowerCase().replace(/[^a-z0-9_-]/g, "");
+  const allowed = new Set(["contact", "support", "help", "careers", "suggestion", "sales", "bug", "account-recovery", "subscription-cancel"]);
+  return allowed.has(value) ? value : "contact";
+}
+
+function validateFormPayload(payload = {}) {
+  const email = String(payload.email || "").trim();
+  const message = String(payload.message || payload.body || "").trim();
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return "Invalid email.";
+  if (message.length < 8) return "Message must have at least 8 characters.";
+  if (message.length > 5000) return "Message is too long.";
+  return null;
+}
+
+function savePlatformForm({ request, auth, kind, payload = {} }) {
+  const validationError = validateFormPayload(payload);
+  if (validationError) {
+    const error = new Error(validationError);
+    error.code = "form_validation_failed";
+    error.statusCode = 400;
+    throw error;
+  }
+  const form = {
+    id: requestId("form"),
+    tenantId: requestIdentity(request, auth),
+    kind: normalizeFormKind(kind),
+    name: String(payload.name || payload.fullName || "").trim(),
+    email: String(payload.email || auth.email || "").trim(),
+    subject: String(payload.subject || payload.topic || "").trim() || normalizeFormKind(kind),
+    message: String(payload.message || payload.body || "").trim(),
+    status: "received",
+    source: payload.source || "web",
+    metadata: payload.metadata || {},
+    createdAt: new Date().toISOString()
+  };
+  state.forms.unshift(form);
+  state.forms = state.forms.slice(0, 200);
+  return form;
 }
 
 
@@ -1715,8 +2315,18 @@ async function postJson(url, { headers = {}, body = {}, timeoutMs = 60000 }) {
       data = { raw: text };
     }
     if (!response.ok) {
-      const message = data.error?.message || data.message || data.raw || `${response.status} ${response.statusText}`;
-      throw new Error(message);
+      const message =
+        data.error?.message ||
+        data.message ||
+        data.error?.code ||
+        data.code ||
+        data.raw ||
+        `${response.status} ${response.statusText}`;
+      const error = new Error(message);
+      error.statusCode = response.status;
+      error.code = data.error?.code || data.code || `provider_http_${response.status}`;
+      error.providerBody = data;
+      throw error;
     }
     return data;
   } finally {
@@ -1741,8 +2351,18 @@ async function getJson(url, { headers = {}, timeoutMs = 60000 } = {}) {
       data = { raw: text };
     }
     if (!response.ok) {
-      const message = data.error?.message || data.message || data.raw || `${response.status} ${response.statusText}`;
-      throw new Error(message);
+      const message =
+        data.error?.message ||
+        data.message ||
+        data.error?.code ||
+        data.code ||
+        data.raw ||
+        `${response.status} ${response.statusText}`;
+      const error = new Error(message);
+      error.statusCode = response.status;
+      error.code = data.error?.code || data.code || `provider_http_${response.status}`;
+      error.providerBody = data;
+      throw error;
     }
     return data;
   } finally {
@@ -2107,6 +2727,13 @@ function verifyStripeWebhookSignature(rawBody, signatureHeader, secret) {
     .filter((part) => part.startsWith("v1="))
     .map((part) => part.slice(3));
   if (!timestamp || !signatures.length) throw new Error("Missing Stripe signature.");
+
+  const timestampSeconds = Number(timestamp);
+  const toleranceSeconds = envNumber("STRIPE_WEBHOOK_TOLERANCE_SECONDS", 300);
+  if (!Number.isFinite(timestampSeconds) || Math.abs(Date.now() / 1000 - timestampSeconds) > toleranceSeconds) {
+    throw new Error("Stripe signature timestamp outside tolerance.");
+  }
+
   const payload = `${timestamp}.${rawBody.toString("utf8")}`;
   const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   const expectedBuffer = Buffer.from(expected, "hex");
@@ -2117,91 +2744,244 @@ function verifyStripeWebhookSignature(rawBody, signatureHeader, secret) {
   if (!matched) throw new Error("Invalid Stripe signature.");
 }
 
+function allowUnsignedStripeWebhook(request) {
+  const allowed = envFlag("STRIPE_WEBHOOK_ALLOW_UNSIGNED", false) || envFlag("ALLOW_UNSIGNED_STRIPE_WEBHOOKS", false);
+  const productionAllowed = envFlag("STRIPE_WEBHOOK_ALLOW_UNSIGNED_IN_PRODUCTION", false);
+  const host = String(request.header("host") || "");
+  const localHost = /^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host);
+  return Boolean(allowed && (localHost || process.env.NODE_ENV !== "production" || productionAllowed));
+}
+
+function stripeRawBody(request) {
+  if (Buffer.isBuffer(request.body)) return request.body;
+  if (Buffer.isBuffer(request.rawBody)) return request.rawBody;
+  if (typeof request.body === "string") return Buffer.from(request.body, "utf8");
+  return Buffer.from(JSON.stringify(request.body || {}), "utf8");
+}
+
+function stripeEventKey(event = {}) {
+  const object = event.data?.object || {};
+  return `stripe:${event.id || `${event.type || "event"}:${object.id || object.subscription || object.customer || "unknown"}`}`;
+}
+
+function stripeLineItems(object = {}) {
+  const direct = object.lines?.data || object.line_items?.data || object.display_items || [];
+  return Array.isArray(direct) ? direct : [];
+}
+
+function planFromStripePriceId(priceId = "") {
+  if (!priceId) return "";
+  for (const plan of Object.keys(planCreditAllowance)) {
+    if (stripePriceIdFor(plan, "monthly") === priceId || stripePriceIdFor(plan, "yearly") === priceId) return plan;
+  }
+  return "";
+}
+
+function planFromStripeObject(object = {}) {
+  const line = stripeLineItems(object).find((item) => item?.metadata?.plan || item?.price?.id || item?.plan?.id) || {};
+  const priceId = line.price?.id || line.plan?.id || object.price?.id || "";
+  return object.metadata?.plan
+    || object.subscription_details?.metadata?.plan
+    || line.metadata?.plan
+    || planFromStripePriceId(priceId)
+    || state.subscription.plan
+    || "Free";
+}
+
+function creditPackFromStripeObject(object = {}) {
+  const line = stripeLineItems(object).find((item) => item?.metadata?.creditPackId || item?.price?.id) || {};
+  const packId = object.metadata?.creditPackId || line.metadata?.creditPackId || "";
+  if (packId) return creditPackById(packId);
+  const priceId = line.price?.id || object.price?.id || "";
+  return Object.values(creditPackCatalog).find((pack) => process.env[pack.envKey] === priceId) || null;
+}
+
+function recordStripePaymentEvent(event, result = {}) {
+  const object = event.data?.object || {};
+  state.paymentEvents.unshift({
+    id: event.id || result.eventKey,
+    eventKey: result.eventKey,
+    type: event.type || "unknown",
+    objectId: object.id || null,
+    status: result.idempotent ? "duplicate_ignored" : "processed",
+    actions: result.actions || [],
+    wallet: result.wallet || ledgerSnapshot(),
+    receivedAt: new Date().toISOString()
+  });
+  state.paymentEvents = state.paymentEvents.slice(0, 100);
+}
+
+function handleStripeWebhook(request, response) {
+  const rawBody = stripeRawBody(request);
+  const signature = request.header("Stripe-Signature") || "";
+  const unsignedAllowed = allowUnsignedStripeWebhook(request);
+
+  if (!hasEnvValue("STRIPE_WEBHOOK_SECRET") && !unsignedAllowed) {
+    response.status(503).json({
+      ok: false,
+      code: "stripe_webhook_not_configured",
+      error: "Stripe webhook secret is missing."
+    });
+    return;
+  }
+
+  try {
+    if (!unsignedAllowed) {
+      verifyStripeWebhookSignature(rawBody, signature, process.env.STRIPE_WEBHOOK_SECRET);
+    }
+    const event = JSON.parse(rawBody.toString("utf8"));
+    const result = applyStripeWebhookEvent(event);
+    response.json({
+      ok: true,
+      received: true,
+      verified: !unsignedAllowed,
+      idempotent: result.idempotent,
+      actions: result.actions,
+      wallet: result.wallet
+    });
+  } catch (_error) {
+    response.status(400).json({
+      ok: false,
+      code: "stripe_webhook_verification_failed",
+      error: "Stripe webhook verification failed."
+    });
+  }
+}
+
 function applyStripeWebhookEvent(event = {}) {
   const object = event.data?.object || {};
-  if (event.type === "checkout.session.completed") {
-    if (object.metadata?.type === "credit_pack") {
-      const pack = creditPackById(object.metadata?.creditPackId);
-      const credits = Number(object.metadata?.credits || pack?.credits || 0);
-      if (credits > 0) {
-        grantCredits({
-          amount: credits,
-          idempotencyKey: `stripe:credit_pack:${event.id || object.id || requestId("stripe_event")}`,
-          reason: "credit_pack_purchase",
-          metadata: { stripeSessionId: object.id, packId: pack?.id || object.metadata?.creditPackId || "" }
+  const eventKey = stripeEventKey(event);
+  if (processedWebhookEvents.has(eventKey)) {
+    const result = { idempotent: true, eventKey, actions: ["duplicate_ignored"], wallet: ledgerSnapshot() };
+    recordStripePaymentEvent(event, result);
+    return result;
+  }
+
+  processedWebhookEvents.add(eventKey);
+  const actions = [];
+
+  try {
+    if (["checkout.session.completed", "checkout.session.async_payment_succeeded"].includes(event.type)) {
+      const paymentStatus = object.payment_status || "paid";
+      const paymentConfirmed = ["paid", "no_payment_required"].includes(paymentStatus) || object.mode === "subscription";
+      if (!paymentConfirmed) {
+        actions.push("checkout_not_paid_yet");
+      } else if (object.metadata?.type === "credit_pack") {
+        const pack = creditPackFromStripeObject(object);
+        const credits = Number(object.metadata?.credits || pack?.credits || 0);
+        if (credits > 0) {
+          const ledgerResult = grantCredits({
+            amount: credits,
+            idempotencyKey: `stripe:checkout:${object.id}:credit_pack`,
+            reason: "credit_pack_purchase",
+            metadata: { eventId: event.id || "", stripeSessionId: object.id, packId: pack?.id || object.metadata?.creditPackId || "" }
+          });
+          actions.push(ledgerResult.idempotent ? "credit_pack_duplicate" : "credit_pack_granted");
+        }
+        state.billing.stripeCustomerId = object.customer || state.billing.stripeCustomerId;
+        state.subscription.stripeCustomerId = object.customer || state.subscription.stripeCustomerId;
+        saveHistory({
+          id: requestId("credits"),
+          kind: "billing",
+          title: `Credit pack purchased: ${pack?.name || "extra credits"}`,
+          provider: "Stripe",
+          status: "paid",
+          message: `${credits} extra credits added to the workspace.`,
+          creditsAdded: credits,
+          createdAt: new Date().toISOString()
+        });
+      } else {
+        const plan = planFromStripeObject(object);
+        state.billing.stripeCustomerId = object.customer || state.billing.stripeCustomerId;
+        state.subscription.stripeCustomerId = object.customer || state.subscription.stripeCustomerId;
+        state.subscription.stripeSubscriptionId = object.subscription || state.subscription.stripeSubscriptionId;
+        state.subscription.plan = plan;
+        state.subscription.status = "active";
+        state.user.plan = plan;
+        const ledgerResult = adjustAvailableCredits({
+          targetAmount: creditsForPlan(plan),
+          idempotencyKey: `stripe:checkout:${object.id}:subscription_allowance`,
+          reason: "subscription_plan_credit_reset",
+          metadata: { eventId: event.id || "", stripeSessionId: object.id, stripeSubscriptionId: object.subscription || "", plan }
+        });
+        actions.push(ledgerResult.idempotent ? "subscription_allowance_duplicate" : "subscription_allowance_applied");
+        saveHistory({
+          id: requestId("billing"),
+          kind: "billing",
+          title: "Stripe checkout completed",
+          provider: "Stripe",
+          status: "paid",
+          message: "Stripe checkout completed and subscription state updated.",
+          createdAt: new Date().toISOString()
         });
       }
-      state.billing.stripeCustomerId = object.customer || state.billing.stripeCustomerId;
-      state.subscription.stripeCustomerId = object.customer || state.subscription.stripeCustomerId;
+    }
+
+    if (event.type === "customer.subscription.deleted") {
+      state.subscription.status = "cancelled";
+      actions.push("subscription_cancelled");
       saveHistory({
-        id: requestId("credits"),
-        kind: "billing",
-        title: `Credit pack purchased: ${pack?.name || "extra credits"}`,
+        id: requestId("subscription"),
+        kind: "subscription",
+        title: "Stripe subscription cancelled",
         provider: "Stripe",
-        status: "paid",
-        message: `${credits} extra credits added to the workspace.`,
-        creditsAdded: credits,
+        status: "cancelled",
+        message: "Stripe reported subscription cancellation.",
         createdAt: new Date().toISOString()
       });
-      return;
     }
-    state.billing.stripeCustomerId = object.customer || state.billing.stripeCustomerId;
-    state.subscription.stripeCustomerId = object.customer || state.subscription.stripeCustomerId;
-    state.subscription.stripeSubscriptionId = object.subscription || state.subscription.stripeSubscriptionId;
-    state.subscription.plan = object.metadata?.plan || state.subscription.plan;
-    state.subscription.status = "active";
-    state.user.plan = state.subscription.plan;
-    adjustAvailableCredits({
-      targetAmount: creditsForPlan(state.subscription.plan),
-      idempotencyKey: `stripe:subscription_plan:${event.id || object.id || requestId("stripe_event")}`,
-      reason: "subscription_plan_credit_reset",
-      metadata: { stripeSessionId: object.id, plan: state.subscription.plan }
-    });
-    saveHistory({
-      id: requestId("billing"),
-      kind: "billing",
-      title: "Stripe checkout completed",
-      provider: "Stripe",
-      status: "paid",
-      message: "Stripe checkout completed and subscription state updated.",
-      createdAt: new Date().toISOString()
-    });
-  }
-  if (event.type === "customer.subscription.deleted") {
-    state.subscription.status = "cancelled";
-    saveHistory({
-      id: requestId("subscription"),
-      kind: "subscription",
-      title: "Stripe subscription cancelled",
-      provider: "Stripe",
-      status: "cancelled",
-      message: "Stripe reported subscription cancellation.",
-      createdAt: new Date().toISOString()
-    });
-  }
-  if (event.type === "invoice.payment_failed") {
-    state.billing.failedPayment = {
-      amount: object.amount_due ? `$${(object.amount_due / 100).toFixed(2)}` : state.billing.failedPayment.amount,
-      message: "Stripe reported a failed payment. Ask the customer to update their payment method."
-    };
-    saveHistory({
-      id: requestId("billing"),
-      kind: "billing",
-      title: "Stripe payment failed",
-      provider: "Stripe",
-      status: "failed",
-      message: state.billing.failedPayment.message,
-      createdAt: new Date().toISOString()
-    });
-  }
-  if (event.type === "invoice.payment_succeeded") {
-    state.billing.invoices.unshift({
-      id: object.number || object.id || requestId("invoice"),
-      amount: object.amount_paid ? `$${(object.amount_paid / 100).toFixed(2)}` : "$0.00",
-      status: "paid",
-      date: new Date((object.created || Date.now() / 1000) * 1000).toISOString().slice(0, 10)
-    });
-    state.billing.invoices = state.billing.invoices.slice(0, 20);
+
+    if (event.type === "invoice.payment_failed") {
+      state.billing.failedPayment = {
+        amount: object.amount_due ? `$${(object.amount_due / 100).toFixed(2)}` : state.billing.failedPayment.amount,
+        message: "Stripe reported a failed payment. Ask the customer to update their payment method."
+      };
+      actions.push("invoice_failed_recorded");
+      saveHistory({
+        id: requestId("billing"),
+        kind: "billing",
+        title: "Stripe payment failed",
+        provider: "Stripe",
+        status: "failed",
+        message: state.billing.failedPayment.message,
+        createdAt: new Date().toISOString()
+      });
+    }
+
+    if (["invoice.paid", "invoice.payment_succeeded"].includes(event.type)) {
+      const plan = planFromStripeObject(object);
+      const amountPaid = object.amount_paid ?? object.total ?? 0;
+      state.billing.invoices.unshift({
+        id: object.number || object.id || requestId("invoice"),
+        amount: amountPaid ? `$${(amountPaid / 100).toFixed(2)}` : "$0.00",
+        status: "paid",
+        date: new Date((object.created || Date.now() / 1000) * 1000).toISOString().slice(0, 10)
+      });
+      state.billing.invoices = state.billing.invoices.slice(0, 20);
+      if (object.subscription || plan !== "Free") {
+        state.subscription.plan = plan;
+        state.subscription.status = "active";
+        state.subscription.stripeSubscriptionId = object.subscription || state.subscription.stripeSubscriptionId;
+        state.user.plan = plan;
+        const periodStart = object.lines?.data?.[0]?.period?.start || object.period_start || object.created || "current";
+        const ledgerResult = adjustAvailableCredits({
+          targetAmount: creditsForPlan(plan),
+          idempotencyKey: `stripe:invoice:${object.id || event.id}:${periodStart}:subscription_allowance`,
+          reason: "subscription_invoice_credit_reset",
+          metadata: { eventId: event.id || "", invoiceId: object.id || "", stripeSubscriptionId: object.subscription || "", plan, periodStart }
+        });
+        actions.push(ledgerResult.idempotent ? "invoice_allowance_duplicate" : "invoice_allowance_applied");
+      } else {
+        actions.push("invoice_recorded");
+      }
+    }
+
+    const result = { idempotent: false, eventKey, actions, wallet: ledgerSnapshot() };
+    recordStripePaymentEvent(event, result);
+    return result;
+  } catch (error) {
+    processedWebhookEvents.delete(eventKey);
+    throw error;
   }
 }
 
@@ -2852,7 +3632,7 @@ async function callElevenLabsTTS({ prompt, title }) {
     headers: { "xi-api-key": process.env.ELEVENLABS_API_KEY },
     body: {
       text: prompt || title || "Sweet Little Trauma Studio sound preview.",
-      model_id: process.env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2"
+      model_id: process.env.ELEVENLABS_MODEL_ID || "eleven_flash_v2_5"
     }
   });
   return {
@@ -3062,36 +3842,108 @@ function extractOmniHumanOutputUrls(data = {}) {
   ].filter(Boolean);
 }
 
+function isInternalStudioJobId(jobId = "") {
+  return /^(job|video|image|music|sound|assist|project|session|ceo_session|tenant)_[0-9]+_/i.test(String(jobId || ""));
+}
+
+function seedanceModelCandidates() {
+  const seen = new Set();
+  return [
+    "dreamina-seedance-2-0-260128",
+    process.env.SEEDANCE_MODEL_ID,
+    "dreamina-seedance-2-0-fast-260128",
+    "seedance-1-0-pro-250528"
+  ].filter(Boolean).filter((model) => {
+    const key = String(model).trim();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function buildSeedanceContent({ prompt, title, payload = {} }) {
+  const content = [];
+  const tool = String(payload.tool || payload.actionId || "").toUpperCase();
+  const imageUrl = payload.image_url || payload.imageUrl || payload.referenceImageUrl || payload.image || "";
+  const lastFrameUrl = payload.last_frame_url || payload.lastFrameUrl || payload.endImageUrl || "";
+
+  if ((tool.includes("IMAGE") || tool.includes("IMG")) && !imageUrl) {
+    const error = new Error("Seedance image-to-video requires a reference image URL. Upload an image in Home or attach it to the request.");
+    error.code = "seedance_missing_image";
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (imageUrl) {
+    content.push({
+      type: "image_url",
+      image_url: { url: String(imageUrl) },
+      role: "first_frame"
+    });
+  }
+  if (lastFrameUrl) {
+    content.push({
+      type: "image_url",
+      image_url: { url: String(lastFrameUrl) },
+      role: "last_frame"
+    });
+  }
+
+  content.push({
+    type: "text",
+    text: prompt || title || "Create a cinematic black neon studio video shot."
+  });
+  return content;
+}
+
 async function callSeedanceVideo({ prompt, title, payload = {} }) {
   const apiKey = providerApiKey(providerCatalog.Seedance);
   const baseUrl = seedanceBaseUrl();
-  const model = process.env.SEEDANCE_MODEL_ID || "dreamina-seedance-2-0-pro-250528";
-  const data = await postJson(`${baseUrl}/contents/generations/tasks`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-    body: {
-      model,
-      content: [
-        {
-          type: "text",
-          text: prompt || title || "Create a cinematic black neon studio video shot."
-        }
-      ],
-      ratio: videoAspectRatio(payload, process.env.SEEDANCE_RATIO || "16:9"),
-      duration: videoClipDuration(payload, "Seedance", Number(process.env.SEEDANCE_DURATION || 5)),
-      resolution: process.env.SEEDANCE_RESOLUTION || "720p"
-    },
-    timeoutMs: 90000
-  });
-  const providerJobId = extractProviderJobId(data);
-  return {
-    providerJobId,
-    status: "processing",
-    previewUrl: null,
-    note: providerJobId
-      ? "Seedance task submitted. Poll /api/jobs/:jobId?provider=Seedance to retrieve the video."
-      : "Seedance task submitted. The provider did not return a recognizable job id.",
-    raw: data
+  const duration = Math.max(1, Math.round(videoClipDuration(payload, "Seedance", Number(process.env.SEEDANCE_DURATION || 5))));
+  const requestBody = {
+    content: buildSeedanceContent({ prompt, title, payload }),
+    ratio: videoAspectRatio(payload, process.env.SEEDANCE_RATIO || "16:9"),
+    duration,
+    resolution: process.env.SEEDANCE_RESOLUTION || "720p",
+    generate_audio: envFlag("SEEDANCE_GENERATE_AUDIO", false)
   };
+  const callbackUrl = payload.callback_url || payload.callbackUrl || payload.webhookUrl || payload.webhook_url || "";
+  if (callbackUrl) requestBody.callback_url = callbackUrl;
+
+  let lastError = null;
+  for (const model of seedanceModelCandidates()) {
+    try {
+      const data = await postJson(`${baseUrl}/contents/generations/tasks`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: { ...requestBody, model },
+        timeoutMs: 90000
+      });
+      const providerJobId = extractProviderJobId(data);
+      return {
+        providerJobId,
+        status: "processing",
+        previewUrl: null,
+        note: providerJobId
+          ? "Seedance task submitted. Poll /api/jobs/:jobId to retrieve the video."
+          : "Seedance task submitted. The provider did not return a recognizable job id.",
+        raw: data,
+        model
+      };
+    } catch (error) {
+      lastError = error;
+      const lower = String(error?.message || "").toLowerCase();
+      const retryableModelError = [400, 404].includes(error?.statusCode) && (
+        lower.includes("model") ||
+        lower.includes("endpoint") ||
+        lower.includes("not found") ||
+        lower.includes("notopen") ||
+        lower.includes("invalid") ||
+        lower.includes("does not exist")
+      );
+      if (!retryableModelError) break;
+    }
+  }
+  throw lastError || new Error("Seedance request failed.");
 }
 
 async function callOmniHumanVideo({ prompt, title, payload = {} }) {
@@ -3180,7 +4032,7 @@ async function callRunwayVideo({ prompt, title, payload = {} }) {
       "X-Runway-Version": process.env.RUNWAY_API_VERSION || "2024-11-06"
     },
     body: {
-      model: process.env.RUNWAY_MODEL_ID || "gen4.5",
+      model: payload.model || payload.modelId || process.env.RUNWAY_MODEL_ID || "gen4_turbo",
       promptText: prompt || title || "Create a cinematic futuristic garage studio video shot.",
       ratio: videoAspectRatio(payload, process.env.RUNWAY_RATIO || "1280:720").replace("16:9", "1280:720").replace("9:16", "720:1280"),
       duration: videoClipDuration(payload, "Runway", Number(process.env.RUNWAY_DURATION || 5))
@@ -3256,7 +4108,7 @@ async function callKlingVideo({ prompt, title, payload = {} }) {
   const data = await postJson(`${klingBaseUrl()}/v1/videos/text2video`, {
     headers: { Authorization: `Bearer ${klingJwt()}` },
     body: {
-      model_name: process.env.KLING_MODEL_ID || "kling-v1-6",
+      model_name: payload.model || payload.modelId || process.env.KLING_MODEL_ID || "kling-v3-standard",
       prompt: prompt || title || "Create a cinematic futuristic garage studio video shot.",
       negative_prompt: process.env.KLING_NEGATIVE_PROMPT || "",
       cfg_scale: Number(process.env.KLING_CFG_SCALE || 0.5),
@@ -3854,6 +4706,15 @@ function buildFailedEntry({ kind, title, providerName, prompt, message, code }) 
 function readableProviderError(error, providerName) {
   const message = error?.message || "";
   const lower = message.toLowerCase();
+  if (error?.code === "seedance_missing_image") {
+    return message;
+  }
+  if (lower.includes("invalid model") || lower.includes("model not found") || lower.includes("does not exist")) {
+    return `${providerName} rejected the model ID. Update SEEDANCE_MODEL_ID in your .env (try dreamina-seedance-2-0-260128).`;
+  }
+  if (error?.statusCode === 400 && providerName === "Seedance") {
+    return `${providerName} rejected the request (400): ${message || "Check model ID, duration (5-15s), and image URL for image-to-video."}`;
+  }
   if (lower.includes("quota") || lower.includes("billing")) {
     return `${providerName} is connected, but the account quota or billing limit stopped the request.`;
   }
@@ -4443,6 +5304,7 @@ function handleGenerate(kind) {
       };
       const entry = {
         id: requestId(kind),
+        tenantId: checks.auth.userId,
         kind,
         title,
         provider: selectedProviderName,
@@ -4512,7 +5374,7 @@ function handleGenerate(kind) {
           }
         : null;
       saveHistory(failedEntry);
-      const statusCode = code === "provider_not_connected"
+      const statusCode = code === "provider_not_connected" || code === "seedance_missing_image" || code === "omnihuman_missing_media_urls"
         ? 400
         : code === "insufficient_credits"
         ? 402
@@ -4582,14 +5444,38 @@ function errorFallbackFor(kind) {
 
 app.get("/health", (_request, response) => {
   const providers = providerList();
+  const authProvider = String(process.env.AUTH_PROVIDER || "local").toLowerCase();
   response.json({
     ok: true,
     service: "slt-api-proxy-example",
     mode: "functional-provider-proxy",
     port,
     envFiles: loadedEnvFiles,
+    infrastructure: startupInfrastructureReadiness,
+    auth: {
+      provider: authProvider,
+      supabaseConfigured: authProvider === "supabase" && Boolean(supabaseAuth && supabaseAdmin),
+      signupEnabled: authProvider === "supabase" && Boolean(supabaseAdmin)
+    },
+    dataStore: runtimeStoreStatus(),
+    storage: {
+      kind: supabaseStorage.kind,
+      durable: supabaseStorage.durable,
+      configured: supabaseStorage.configured,
+      bucket: supabaseStorage.bucket || ""
+    },
     providersConnected: providers.filter((provider) => provider.connected).length,
     providersTotal: providers.length
+  });
+});
+
+app.get("/api/db/status", (request, response) => {
+  response.json({
+    ok: true,
+    auth: getAuth(request),
+    dataStore: runtimeStoreStatus(),
+    durable: runtimeStore.durable,
+    productionReady: startupInfrastructureReadiness.ok
   });
 });
 
@@ -4837,8 +5723,15 @@ app.post("/api/webhooks/fal", handleProviderWebhook("fal"));
 app.post("/api/webhooks/replicate", handleProviderWebhook("replicate"));
 
 app.get("/api/jobs/:jobId", async (request, response) => {
+  const auth = getAuth(request);
   const localJob = findJob(request.params.jobId);
   if (localJob) {
+    try {
+      assertTenantAccess(localJob, auth);
+    } catch (error) {
+      response.status(error.statusCode || 403).json({ ok: false, code: error.code || "forbidden", error: "Forbidden." });
+      return;
+    }
     let refreshed;
     try {
       refreshed = await refreshLocalJobFromProvider(localJob);
@@ -4852,8 +5745,14 @@ app.get("/api/jobs/:jobId", async (request, response) => {
       return;
     }
     const currentJob = refreshed.job || findJob(localJob.id);
-    const historyItem = refreshed.historyItem || state.history.find((item) => item.id === currentJob?.historyItemId) || null;
-    const project = refreshed.project || (currentJob?.projectId ? state.projects.find((item) => item.id === currentJob.projectId) || null : null);
+    const historyItem = refreshed.historyItem && canAccessRecord(refreshed.historyItem, auth)
+      ? refreshed.historyItem
+      : state.history.find((item) => item.id === currentJob?.historyItemId && canAccessRecord(item, auth)) || null;
+    const project = refreshed.project && canAccessRecord(refreshed.project, auth)
+      ? refreshed.project
+      : currentJob?.projectId
+      ? state.projects.find((item) => item.id === currentJob.projectId && canAccessRecord(item, auth)) || null
+      : null;
     response.json({
       ok: true,
       job: serializeJob(currentJob),
@@ -4868,7 +5767,26 @@ app.get("/api/jobs/:jobId", async (request, response) => {
     return;
   }
 
+  if (isInternalStudioJobId(request.params.jobId)) {
+    response.status(404).json({
+      ok: false,
+      code: "job_not_found",
+      error: "Studio job not found.",
+      readableError: "Job not found. The server may have restarted — generate again, or stay on the same API process while polling."
+    });
+    return;
+  }
+
   const providerName = normalizeProviderName(String(request.query.provider || "Seedance"));
+  if (!isOwnerAuth(auth)) {
+    response.status(403).json({
+      ok: false,
+      code: "forbidden_external_job_lookup",
+      error: "Direct provider job lookup requires CEO mode.",
+      readableError: "This job is not registered under your session."
+    });
+    return;
+  }
   if (!["Seedance", "OmniHuman"].includes(providerName)) {
     response.status(400).json({
       ok: false,
@@ -5001,7 +5919,7 @@ app.get("/api/jobs/:jobId", async (request, response) => {
   }
 });
 
-app.post("/api/login", (request, response) => {
+app.post("/api/login", async (request, response) => {
   const email = String(request.body?.email || "").trim();
   const username = String(request.body?.username || "").trim();
   const password = String(request.body?.password || "");
@@ -5052,6 +5970,55 @@ app.post("/api/login", (request, response) => {
     return;
   }
 
+  if (String(process.env.AUTH_PROVIDER || "").toLowerCase() === "supabase") {
+    if (!supabaseAuth) {
+      response.status(503).json({
+        ok: false,
+        code: "supabase_auth_not_configured",
+        error: "Supabase Auth is not configured.",
+        readableError: "Supabase Auth is not configured."
+      });
+      return;
+    }
+    const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
+    if (error || !data.session?.access_token || !data.user?.id) {
+      response.status(401).json({
+        ok: false,
+        code: "invalid_supabase_credentials",
+        error: error?.message || "Invalid credentials.",
+        readableError: "Invalid email or password."
+      });
+      return;
+    }
+    const role = data.user.app_metadata?.role || data.user.user_metadata?.role || "authenticated";
+    const tenantId = data.user.app_metadata?.tenant_id || data.user.user_metadata?.tenant_id || data.user.id;
+    state.user = {
+      ...state.user,
+      id: data.user.id,
+      email: data.user.email || email,
+      username: data.user.user_metadata?.username || data.user.user_metadata?.full_name || data.user.email || email,
+      role
+    };
+    state.wallet.tenantId = tenantId;
+    syncCreditViews();
+    response.json({
+      ok: true,
+      session: {
+        token: data.session.access_token,
+        refreshToken: data.session.refresh_token,
+        id: data.user.id,
+        tenantId,
+        email: data.user.email,
+        username: state.user.username,
+        role,
+        mode: "supabase"
+      },
+      user: state.user,
+      message: "Supabase session started."
+    });
+    return;
+  }
+
   const token = requestId("session");
   const session = {
     token,
@@ -5070,6 +6037,43 @@ app.post("/api/login", (request, response) => {
     user: state.user,
     message: "Session started."
   });
+});
+
+app.post("/api/auth/signup", async (request, response) => {
+  if (String(process.env.AUTH_PROVIDER || "").toLowerCase() !== "supabase" || !supabaseAdmin) {
+    response.status(503).json({ ok: false, code: "supabase_auth_not_configured", error: "Supabase Auth is not configured." });
+    return;
+  }
+  const email = String(request.body?.email || "").trim();
+  const password = String(request.body?.password || "");
+  const username = String(request.body?.username || request.body?.full_name || "").trim();
+  const { data, error } = await supabaseAdmin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: false,
+    user_metadata: { username, full_name: username },
+    app_metadata: { tenant_id: requestId("tenant"), role: "authenticated" }
+  });
+  if (error) {
+    response.status(400).json({ ok: false, code: "supabase_signup_failed", error: error.message, readableError: error.message });
+    return;
+  }
+  response.status(201).json({ ok: true, user: { id: data.user?.id, email: data.user?.email }, message: "Supabase user created." });
+});
+
+app.post("/api/auth/password-recovery", async (request, response) => {
+  if (String(process.env.AUTH_PROVIDER || "").toLowerCase() !== "supabase" || !supabaseAdmin) {
+    response.status(503).json({ ok: false, code: "supabase_auth_not_configured", error: "Supabase Auth is not configured." });
+    return;
+  }
+  const email = String(request.body?.email || "").trim();
+  const redirectTo = process.env.PUBLIC_APP_URL ? `${process.env.PUBLIC_APP_URL.replace(/\/$/, "")}/profile` : undefined;
+  const { error } = await supabaseAdmin.auth.resetPasswordForEmail(email, { redirectTo });
+  if (error) {
+    response.status(400).json({ ok: false, code: "supabase_password_recovery_failed", error: error.message, readableError: error.message });
+    return;
+  }
+  response.json({ ok: true, message: "Password recovery email requested." });
 });
 
 app.post("/api/assist", async (request, response) => {
@@ -5351,12 +6355,15 @@ app.get("/api/ceo/provider-credits", async (request, response) => {
 });
 
 app.get("/api/projects", (request, response) => {
-  response.json({ ok: true, auth: getAuth(request), projects: state.projects, emptyState: "No Projects" });
+  const auth = getAuth(request);
+  response.json({ ok: true, auth, projects: filterRecordsForAuth(state.projects, auth), emptyState: "No Projects" });
 });
 
 app.post("/api/projects", (request, response) => {
+  const auth = getAuth(request);
   const project = {
     id: requestId("project"),
+    tenantId: auth.userId,
     title: request.body?.title || "Untitled project",
     kind: request.body?.kind || "studio",
     status: "saved",
@@ -5369,6 +6376,7 @@ app.post("/api/projects", (request, response) => {
   state.projects.unshift(project);
   saveHistory({
     id: requestId("history"),
+    tenantId: auth.userId,
     kind: project.kind,
     title: project.title,
     provider: "project storage mock",
@@ -5376,16 +6384,19 @@ app.post("/api/projects", (request, response) => {
     message: `${mockModeMessage} Project saved in local/mock storage.`,
     createdAt: project.createdAt
   });
-  response.json({ ok: true, auth: getAuth(request), project, mock: true, message: `${mockModeMessage} Project saved in local/mock storage.` });
+  response.json({ ok: true, auth, project, mock: true, message: `${mockModeMessage} Project saved in local/mock storage.` });
 });
 
 app.get("/api/history", (request, response) => {
-  response.json({ ok: true, auth: getAuth(request), history: state.history, emptyState: "No History" });
+  const auth = getAuth(request);
+  response.json({ ok: true, auth, history: filterRecordsForAuth(state.history, auth), emptyState: "No History" });
 });
 
 app.post("/api/history", (request, response) => {
+  const auth = getAuth(request);
   const item = {
     id: requestId("history"),
+    tenantId: auth.userId,
     kind: request.body?.kind || "activity",
     title: request.body?.title || "Activity",
     provider: request.body?.provider || "frontend mock",
@@ -5393,7 +6404,7 @@ app.post("/api/history", (request, response) => {
     createdAt: new Date().toISOString()
   };
   saveHistory(item);
-  response.json({ ok: true, auth: getAuth(request), historyItem: item, message: "History saved." });
+  response.json({ ok: true, auth, historyItem: item, message: "History saved." });
 });
 
 app.get("/api/stripe/status", (request, response) => {
@@ -5416,7 +6427,7 @@ app.get("/api/credits/packs", (request, response) => {
   });
 });
 
-app.post("/api/stripe/checkout", async (request, response) => {
+async function handleSubscriptionCheckout(request, response) {
   const plan = request.body?.plan || "Creator";
   const interval = request.body?.interval || "monthly";
   const email = request.body?.email || state.user.email;
@@ -5482,6 +6493,8 @@ app.post("/api/stripe/checkout", async (request, response) => {
       metadata: {
         plan,
         interval,
+        credits: creditsForPlan(plan),
+        userId: requestIdentity(request, getAuth(request)),
         source: "sweet-little-trauma-studio"
       }
     });
@@ -5528,9 +6541,12 @@ app.post("/api/stripe/checkout", async (request, response) => {
       readableError: error.message
     });
   }
-});
+}
 
-app.post("/api/stripe/credits/checkout", async (request, response) => {
+app.post("/api/stripe/checkout", handleSubscriptionCheckout);
+app.post("/api/billing/checkout", handleSubscriptionCheckout);
+
+async function handleCreditPackCheckout(request, response) {
   const packId = request.body?.packId || "credits_1000";
   const email = request.body?.email || state.user.email;
   const pack = creditPackById(packId);
@@ -5565,6 +6581,7 @@ app.post("/api/stripe/credits/checkout", async (request, response) => {
         type: "credit_pack",
         creditPackId: pack.id,
         credits: pack.credits,
+        userId: requestIdentity(request, getAuth(request)),
         source: "sweet-little-trauma-studio"
       }
     });
@@ -5605,7 +6622,10 @@ app.post("/api/stripe/credits/checkout", async (request, response) => {
       readableError: error.message
     });
   }
-});
+}
+
+app.post("/api/stripe/credits/checkout", handleCreditPackCheckout);
+app.post("/api/billing/credits/checkout", handleCreditPackCheckout);
 
 app.post("/api/stripe/portal", async (request, response) => {
   const flowTypeByAction = {
@@ -5674,6 +6694,7 @@ app.get("/api/billing", (request, response) => {
     provider: stripeStatus,
     stripe: stripeSetupStatus(),
     billing: state.billing,
+    paymentEvents: state.paymentEvents.slice(0, 20),
     actions: ["checkout", "upgrade", "downgrade", "cancel", "reactivation", "invoices", "payment methods", "coupon codes", "failed payments"]
   });
 });
@@ -5685,34 +6706,164 @@ app.post("/api/billing", (request, response) => {
 });
 
 app.get("/api/ledger", (request, response) => {
+  const auth = getAuth(request);
+  if (!isOwnerAuth(auth) && state.wallet.tenantId && state.wallet.tenantId !== auth.userId) {
+    response.status(403).json({
+      ok: false,
+      code: "tenant_wallet_forbidden",
+      error: "Forbidden.",
+      readableError: "This wallet does not belong to your session."
+    });
+    return;
+  }
+  const reservations = filterRecordsForAuth(state.creditReservations, auth);
+  const transactions = filterRecordsForAuth(state.creditTransactions, auth);
+  const assets = filterRecordsForAuth(state.assets, auth);
   response.json({
     ok: true,
-    auth: getAuth(request),
+    auth,
     wallet: ledgerSnapshot(),
-    jobCount: state.jobs.length,
-    reservations: state.creditReservations.slice(0, 20),
-    transactions: state.creditTransactions.slice(0, 50),
-    assetCount: state.assets.length
+    jobCount: filterRecordsForAuth(state.jobs, auth).length,
+    reservations: reservations.slice(0, 20),
+    transactions: transactions.slice(0, 50),
+    paymentEvents: state.paymentEvents.slice(0, 20),
+    assetCount: assets.length
   });
 });
 
 app.get("/api/assets", (request, response) => {
+  const auth = getAuth(request);
   response.json({
     ok: true,
-    auth: getAuth(request),
+    auth,
     cdnBaseUrl: storagePublicBaseUrl(request),
-    storageDir: assetStorageDir,
-    assets: state.assets.slice(0, 100)
+    storageProvider: process.env.STORAGE_PROVIDER || "local",
+    assets: filterRecordsForAuth(state.assets, auth).slice(0, 100).map(serializeAssetForClient)
   });
+});
+
+app.post(["/api/assets/upload", "/api/uploads/reference"], async (request, response) => {
+  const auth = getAuth(request);
+  try {
+    const asset = await storeUploadedReferenceAsset({ request, auth, payload: request.body || {} });
+    response.status(201).json({
+      ok: true,
+      auth,
+      asset: serializeAssetForClient(asset),
+      cdnBaseUrl: storagePublicBaseUrl(request),
+      message: "Reference asset uploaded."
+    });
+  } catch (error) {
+    response.status(error.statusCode || 400).json({
+      ok: false,
+      auth,
+      code: error.code || "upload_failed",
+      error: error.message,
+      readableError: error.message
+    });
+  }
+});
+
+app.get("/api/assets/:assetId/download", (request, response) => {
+  const auth = getAuth(request);
+  try {
+    const asset = findOwnedAsset(request.params.assetId, auth);
+    if (!asset) {
+      response.status(404).json({ ok: false, code: "asset_not_found", error: "Asset not found." });
+      return;
+    }
+    if ((!asset.storagePath || !existsSync(asset.storagePath)) && asset.publicUrl) {
+      response.redirect(asset.publicUrl);
+      return;
+    }
+    if (!asset.storagePath || !existsSync(asset.storagePath)) {
+      response.status(404).json({ ok: false, code: "asset_file_missing", error: "Asset file is not available in local storage." });
+      return;
+    }
+    response.download(asset.storagePath, asset.originalName || asset.storagePath.split("/").pop());
+  } catch (error) {
+    response.status(error.statusCode || 500).json({ ok: false, code: error.code || "asset_download_failed", error: error.message });
+  }
+});
+
+app.delete("/api/assets/:assetId", async (request, response) => {
+  const auth = getAuth(request);
+  try {
+    const asset = findOwnedAsset(request.params.assetId, auth);
+    if (!asset) {
+      response.status(404).json({ ok: false, code: "asset_not_found", error: "Asset not found." });
+      return;
+    }
+    state.assets = state.assets.filter((item) => item.id !== asset.id);
+    if (asset.storageProvider === "supabase" && asset.storageKey) {
+      await supabaseStorage.remove(asset.storageKey);
+    } else if (asset.storagePath && existsSync(asset.storagePath)) {
+      await unlink(asset.storagePath);
+    }
+    response.json({ ok: true, auth, assetId: asset.id, message: "Asset deleted." });
+  } catch (error) {
+    response.status(error.statusCode || 500).json({ ok: false, code: error.code || "asset_delete_failed", error: error.message });
+  }
+});
+
+app.post(["/api/forms/:kind", "/api/contact"], (request, response) => {
+  const auth = getAuth(request);
+  const kind = request.params.kind || request.body?.kind || "contact";
+  try {
+    const form = savePlatformForm({ request, auth, kind, payload: request.body || {} });
+    response.status(201).json({
+      ok: true,
+      auth,
+      form,
+      message: "Request received. It was stored for follow-up."
+    });
+  } catch (error) {
+    response.status(error.statusCode || 400).json({
+      ok: false,
+      auth,
+      code: error.code || "form_submit_failed",
+      error: error.message,
+      readableError: error.message
+    });
+  }
 });
 
 app.get("/api/subscription", (request, response) => {
   response.json({ ok: true, auth: getAuth(request), subscription: state.subscription });
 });
 
+app.get("/api/subscription-status", (request, response) => {
+  const auth = getAuth(request);
+  const wallet = ledgerSnapshot();
+  const subscription = state.subscription;
+  const isCeo = auth.role === "CEO";
+  response.json({
+    ok: true,
+    auth,
+    subscription,
+    subscriptionActive: isCeo || subscription.status === "active" || subscription.status === "trialing",
+    hasCredits: isCeo || wallet.availableCredits > 0,
+    credits: wallet.availableCredits,
+    heldCredits: wallet.heldCredits,
+    plan: subscription.plan || "Free",
+    status: subscription.status || "unknown"
+  });
+});
+
 app.post("/api/subscription", (request, response) => {
+  const auth = getAuth(request);
   const action = request.body?.action || "status";
   const nextPlan = request.body?.plan || state.subscription.plan;
+  if (action !== "status" && !isOwnerAuth(auth)) {
+    response.status(403).json({
+      ok: false,
+      auth,
+      code: "subscription_mutation_forbidden",
+      error: "Subscription changes must go through billing checkout or CEO mode.",
+      readableError: "Use checkout or the billing portal to change a subscription."
+    });
+    return;
+  }
   if (["upgrade", "downgrade", "reactivate"].includes(action)) {
     state.subscription.plan = nextPlan;
     state.subscription.status = "active";
@@ -5730,7 +6881,7 @@ app.post("/api/subscription", (request, response) => {
   }
   response.json({
     ok: true,
-    auth: getAuth(request),
+    auth,
     subscription: state.subscription,
     message: action === "cancel" ? "Your subscription has been cancelled successfully." : "Subscription updated successfully."
   });
@@ -5741,15 +6892,24 @@ app.get("/api/user", (request, response) => {
 });
 
 app.post("/api/user", (request, response) => {
+  const auth = getAuth(request);
+  const allowedPreferences = typeof request.body?.preferences === "object" && request.body.preferences !== null
+    ? request.body.preferences
+    : {};
   state.user = {
     ...state.user,
-    ...request.body,
+    id: auth.userId || state.user.id,
+    role: auth.role || state.user.role,
+    email: typeof request.body?.email === "string" && request.body.email.trim() ? request.body.email.trim() : state.user.email,
+    username: typeof request.body?.username === "string" && request.body.username.trim() ? request.body.username.trim() : state.user.username,
+    language: typeof request.body?.language === "string" && request.body.language.trim() ? request.body.language.trim() : state.user.language,
+    accountType: typeof request.body?.accountType === "string" && request.body.accountType.trim() ? request.body.accountType.trim() : state.user.accountType,
     preferences: {
       ...state.user.preferences,
-      ...(request.body?.preferences || {})
+      ...allowedPreferences
     }
   };
-  response.json({ ok: true, auth: getAuth(request), user: state.user, message: "Profile saved." });
+  response.json({ ok: true, auth, user: state.user, message: "Profile saved." });
 });
 
 app.post("/api/studio/run", (request, response) => {
@@ -5807,6 +6967,130 @@ app.use((request, response) => {
   });
 });
 
-app.listen(port, () => {
-  console.log(`SLT Studio running on http://127.0.0.1:${port} (API + React dist)`);
-});
+function resetTestState({ credits = 100 } = {}) {
+  sessions.clear();
+  processedWebhookEvents.clear();
+  rateBuckets.clear();
+  usageBuckets.clear();
+  state.user = {
+    id: "demo-user",
+    email: "creator@sweetlittletrauma.studio",
+    username: "sweetcreator",
+    plan: "Free",
+    language: "Spanish",
+    accountType: "Creator",
+    credits,
+    storageUsed: "3.2 GB",
+    preferences: {
+      visualStyle: "black neon",
+      assistantVoice: "soft",
+      assistantMemory: "creative preferences"
+    }
+  };
+  state.subscription = {
+    plan: "Free",
+    status: "active",
+    renewsAt: "2026-06-18",
+    credits,
+    heldCredits: 0,
+    capturedCredits: 0,
+    cancellationReason: "",
+    stripeCustomerId: process.env.STRIPE_CUSTOMER_ID || "",
+    stripeSubscriptionId: ""
+  };
+  state.projects = [];
+  state.history = [];
+  state.jobs = [];
+  state.assets = [];
+  state.webhookEvents = [];
+  state.paymentEvents = [];
+  state.wallet = {
+    tenantId: "demo-user",
+    availableCredits: credits,
+    heldCredits: 0,
+    capturedCredits: 0
+  };
+  state.creditReservations = [];
+  state.creditTransactions = [
+    {
+      id: "credit_tx_test_opening",
+      idempotencyKey: "opening:test",
+      idempotency_key: "opening:test",
+      type: "opening_balance",
+      status: "posted",
+      amount: credits,
+      reservationId: null,
+      jobId: null,
+      tenantId: "demo-user",
+      entries: [
+        { account: "SLT.CreditIssuer", direction: "debit", amount: credits },
+        { account: "Tenant.Available", direction: "credit", amount: credits }
+      ],
+      balanceDeltas: {
+        availableCredits: credits,
+        heldCredits: 0,
+        capturedCredits: 0
+      },
+      metadata: { source: "test_reset" },
+      createdAt: new Date().toISOString()
+    }
+  ];
+  syncCreditViews();
+  return state;
+}
+
+async function startServer() {
+  await initializeRuntimeStore();
+  return app.listen(port, () => {
+    console.log(`SLT Studio running on http://127.0.0.1:${port} (API + React dist)`);
+  });
+}
+
+if (process.env.SLT_TEST_MODE !== "1") {
+  startServer().catch((error) => {
+    console.error("[SLT] Server startup failed:", error.message);
+    if (error.report) {
+      console.error(JSON.stringify(error.report, null, 2));
+    }
+    process.exit(1);
+  });
+}
+
+export { app, startServer };
+
+export const __test = {
+  app,
+  state,
+  sessions,
+  runtimeStore,
+  runtimeStoreStatus,
+  initializeRuntimeStore,
+  persistRuntimeState,
+  resetTestState,
+  getAuth,
+  requestIdentity,
+  getProductionReadinessReport,
+  authProtectionMiddleware,
+  rateLimitForPath,
+  providerStatus,
+  runProviderGateway,
+  creditCostFor,
+  reserveCredits,
+  resolveReservation,
+  ledgerSnapshot,
+  runInputModeration,
+  moderationFailurePayload,
+  verifyProviderWebhookSignature,
+  handleProviderWebhook,
+  verifyStripeWebhookSignature,
+  applyStripeWebhookEvent,
+  createJob,
+  findJob,
+  storeUploadedReferenceAsset,
+  serializeAssetForClient,
+  findOwnedAsset,
+  savePlatformForm,
+  buildQueuedHistoryEntry,
+  completeAsyncJob,
+  failAsyncJob
+};

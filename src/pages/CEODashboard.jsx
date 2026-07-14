@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useStudio } from '../context/StudioContext';
 import {
   createCreditsCheckout,
@@ -12,20 +13,26 @@ import { readStore, storageKeys } from '../lib/storage';
 import './StudioLayout.css';
 
 const NAV_ITEMS = [
-  { label: 'Dashboard', active: true },
-  { label: 'Projects' },
-  { label: 'Library' },
-  { label: 'Messaging', badge: 3 },
-  { label: 'Calendar' },
-  { label: 'Clients' },
-  { label: 'Reports' },
-  { label: 'Settings' },
+  { label: 'Dashboard', path: '/ceo', active: true },
+  { label: 'Projects', path: '/library' },
+  { label: 'Library', path: '/library' },
+  { label: 'Messaging', path: '/contact' },
+  { label: 'Calendar', path: '/ceo' },
+  { label: 'Clients', path: '/contact' },
+  { label: 'Reports', path: '/ceo' },
+  { label: 'Settings', path: '/settings' },
 ];
 
 const PLANS = ['Free', 'Pro', 'Studio', 'Business', 'Creator'];
 
 export default function CEODashboard() {
+  const navigate = useNavigate();
+  const audioRef = useRef(null);
   const [playing, setPlaying] = useState(false);
+  const [search, setSearch] = useState('');
+  const [focusMode, setFocusMode] = useState('Deep Work');
+  const [focusSeconds, setFocusSeconds] = useState(45 * 60);
+  const [focusRunning, setFocusRunning] = useState(false);
   const [selectedPlan, setSelectedPlan] = useState('Creator');
   const [creditPacks, setCreditPacks] = useState([]);
   const [billingStatus, setBillingStatus] = useState('');
@@ -39,6 +46,14 @@ export default function CEODashboard() {
       }
     });
   }, []);
+
+  useEffect(() => {
+    if (!focusRunning || focusSeconds <= 0) return undefined;
+    const timer = window.setInterval(() => {
+      setFocusSeconds((current) => Math.max(0, current - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [focusRunning, focusSeconds]);
 
   const userEmail = readStore(storageKeys.user, {})?.email || 'info@studiosweetlittletrauma.com';
 
@@ -91,28 +106,67 @@ export default function CEODashboard() {
     setBillingBusy(false);
   };
 
+  const handlePlayFeatured = async () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (playing) {
+      audio.pause();
+      setPlaying(false);
+      return;
+    }
+    await audio.play();
+    setPlaying(true);
+  };
+
+  const handleSearch = () => {
+    const query = search.trim();
+    if (!query) return;
+    if (/video|clip|film/i.test(query)) navigate(`/video?prompt=${encodeURIComponent(query)}`);
+    else if (/music|song|track/i.test(query)) navigate(`/music?prompt=${encodeURIComponent(query)}`);
+    else if (/image|photo|visual/i.test(query)) navigate(`/image?prompt=${encodeURIComponent(query)}`);
+    else if (/sound|voice|audio/i.test(query)) navigate(`/sound?prompt=${encodeURIComponent(query)}`);
+    else navigate(`/library`);
+  };
+
+  const focusLabel = `${String(Math.floor(focusSeconds / 60)).padStart(2, '0')}:${String(focusSeconds % 60).padStart(2, '0')}`;
+
   return (
     <div className="ceo">
+      <audio ref={audioRef} src="https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3" onEnded={() => setPlaying(false)} />
       <header className="ceo-header">
         <div>
           <span className="ceo-greeting">Welcome back, CEO.</span>
           <h1 className="ceo-headline">Good evening. Let's make something honest.</h1>
         </div>
         <div className="ceo-header-actions">
-          <input type="text" className="ceo-search-input" placeholder="Search across studio..." />
-          <button type="button" className="studio-action">[ Notify ]</button>
-          <button type="button" className="studio-action">[ New Project ]</button>
+          <input
+            type="text"
+            className="ceo-search-input"
+            placeholder="Search across studio..."
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') handleSearch();
+            }}
+          />
+          <button type="button" className="studio-action" onClick={() => navigate('/contact')}>
+            [ Notify ]
+          </button>
+          <button type="button" className="studio-action" onClick={() => navigate('/video')}>
+            [ New Project ]
+          </button>
         </div>
       </header>
 
       <nav className="studio-toggle-row" aria-label="Dashboard navigation">
-        {NAV_ITEMS.map(({ label, active, badge }) => (
+        {NAV_ITEMS.map(({ label, path, active }) => (
           <button
             key={label}
             type="button"
             className={`studio-action ${active ? 'is-active' : ''}`}
+            onClick={() => navigate(path)}
           >
-            [ {label}{badge ? ` · ${badge}` : ''} ]
+            [ {label} ]
           </button>
         ))}
       </nav>
@@ -143,7 +197,7 @@ export default function CEODashboard() {
               <select
                 className="studio-select"
                 value={selectedPlan}
-                onChange={(e) => setSelectedPlan(e.target.value)}
+                onChange={(event) => setSelectedPlan(event.target.value)}
               >
                 {PLANS.map((item) => (
                   <option key={item} value={item}>{item}</option>
@@ -171,7 +225,9 @@ export default function CEODashboard() {
               <div className="studio-preview-inner">
                 <div className="studio-media-placeholder" aria-hidden="true" />
                 <p>"Ideas come to those who break rules."</p>
-                <button type="button" className="studio-action studio-preview-action">[ Play ]</button>
+                <button type="button" className="studio-action studio-preview-action" onClick={handlePlayFeatured}>
+                  [ {playing ? 'Pause' : 'Play'} ]
+                </button>
               </div>
             </div>
           </section>
@@ -183,8 +239,12 @@ export default function CEODashboard() {
             </div>
             <p className="studio-meta">71% Complete · Due Aug 24, 2026 · On Track</p>
             <div className="ceo-project-meta">
-              <button type="button" className="studio-action">[ View ]</button>
-              <button type="button" className="studio-action">[ Edit ]</button>
+              <button type="button" className="studio-action" onClick={() => navigate('/library')}>
+                [ View ]
+              </button>
+              <button type="button" className="studio-action" onClick={() => navigate('/video?prompt=Futures%20campaign%20edit')}>
+                [ Edit ]
+              </button>
             </div>
           </section>
 
@@ -207,14 +267,27 @@ export default function CEODashboard() {
 
           <div className="ceo-widget">
             <h4>Focus Mode</h4>
-            <select className="studio-select">
+            <select className="studio-select" value={focusMode} onChange={(event) => setFocusMode(event.target.value)}>
               <option>Deep Work</option>
               <option>Creative Flow</option>
               <option>Admin Tasks</option>
             </select>
             <div className="ceo-focus-row">
-              <span className="ceo-focus-time">45 min</span>
-              <button type="button" className="studio-action">[ Start ]</button>
+              <span className="ceo-focus-time">{focusLabel}</span>
+              <button
+                type="button"
+                className="studio-action"
+                onClick={() => {
+                  if (focusRunning) {
+                    setFocusRunning(false);
+                    return;
+                  }
+                  setFocusSeconds(45 * 60);
+                  setFocusRunning(true);
+                }}
+              >
+                [ {focusRunning ? 'Pause' : 'Start'} ]
+              </button>
             </div>
           </div>
 
@@ -233,7 +306,7 @@ export default function CEODashboard() {
                 <span className="np-title">Cada Nivel</span>
                 <span className="np-artist">Eduardo Scurack</span>
               </div>
-              <button type="button" className="studio-action" onClick={() => setPlaying(!playing)}>
+              <button type="button" className="studio-action" onClick={handlePlayFeatured}>
                 {playing ? '[ Pause ]' : '[ Play ]'}
               </button>
             </div>

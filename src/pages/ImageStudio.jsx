@@ -1,5 +1,7 @@
 import { useState } from 'react';
+import ReferenceUploader from '../components/ReferenceUploader';
 import { useStudioGenerate } from '../hooks/useStudioGenerate';
+import { useSubscription } from '../hooks/useSubscription';
 import './StudioLayout.css';
 
 const TOOLS = [
@@ -15,28 +17,58 @@ const TOOLS = [
   { label: 'Export', desc: 'Download images' },
 ];
 
-const PROVIDERS = ['OpenAI Images', 'Google Imagen', 'Adobe Firefly', 'FLUX', 'Ideogram', 'Recraft', 'Leonardo', 'Magnific', 'Stability', 'Replicate'];
+const PROVIDERS = [
+  { name: 'OpenAI Images', status: 'Gateway' },
+  { name: 'Gemini Image', status: 'Gateway' },
+  { name: 'Grok Image', status: 'Gateway' },
+  { name: 'FLUX', status: 'Async' },
+  { name: 'Ideogram', status: 'API' },
+  { name: 'Recraft', status: 'API' },
+  { name: 'Leonardo', status: 'API' },
+  { name: 'Stability', status: 'API' },
+  { name: 'Replicate', status: 'Async' },
+];
+
 const RATIOS = ['1:1', '4:5', '16:9', '3:2', '2:3'];
 
 export default function ImageStudio() {
   const [activeTool, setActiveTool] = useState('Text-to-Image');
   const [activeProvider, setActiveProvider] = useState('OpenAI Images');
   const [activeRatio, setActiveRatio] = useState('1:1');
+  const [model, setModel] = useState('GPT-Image 1');
+  const [quality, setQuality] = useState('High');
+  const [style, setStyle] = useState('Photographic');
   const [prompt, setPrompt] = useState('');
-  const { generating, status, runGenerate } = useStudioGenerate('image');
+  const [referenceAsset, setReferenceAsset] = useState(null);
+  const { assetUrl, error, generating, jobStatus, status, runGenerate } = useStudioGenerate('image');
+  const { hasCredits, isCEO } = useSubscription();
 
   const handleGenerate = () => {
+    if (!hasCredits && !isCEO) {
+      alert('Suscríbete para continuar');
+      return;
+    }
     runGenerate({
       title: activeTool,
-      prompt,
+      prompt: `${prompt}\nStyle: ${style}\nQuality: ${quality}`,
       provider: activeProvider,
       providerLabel: activeProvider,
       tool: activeTool,
+      model,
+      modelId: model,
+      aspectRatio: activeRatio,
+      ratio: activeRatio,
+      quality,
+      style,
+      referenceAssets: referenceAsset ? [referenceAsset] : [],
+      referenceImageUrl: referenceAsset?.publicUrl || '',
+      referenceAssetIds: referenceAsset ? [referenceAsset.id] : [],
+      assetUrls: referenceAsset ? [referenceAsset.publicUrl] : [],
     });
   };
 
   return (
-    <div className="studio">
+    <div className="studio studio-container">
       <aside className="studio-rail">
         <p className="studio-rail-label">Image</p>
         <ul className="studio-tool-list">
@@ -58,15 +90,41 @@ export default function ImageStudio() {
       <main className="studio-main">
         <header>
           <h1 className="studio-main-title">Image Studio</h1>
-          <p className="studio-main-meta">{activeTool} · {activeRatio}{status ? ` · ${status}` : ''}</p>
+          <p className="studio-main-meta">
+            {activeTool} · {activeRatio} · {status || 'Ready'}
+          </p>
         </header>
 
-        <div className="studio-image-grid">
-          <div>
-            <div className="studio-media-placeholder" style={{ minHeight: 280, marginBottom: 24 }} aria-hidden="true" />
-            <p>Start creating<br />Add an image, paste a prompt, or choose a tool.</p>
-          </div>
+        <div className="studio-image-grid studio-glass-panel">
+          {assetUrl ? (
+            <div className="studio-result-block">
+              <img className="studio-generated-asset" src={assetUrl} alt="Generated visual" />
+              <p className="studio-async-note">CDN READY · {jobStatus}</p>
+            </div>
+          ) : (
+            <div>
+              <div
+                className="studio-media-placeholder"
+                style={{ minHeight: 280, marginBottom: 24 }}
+                aria-hidden="true"
+              />
+              <p>
+                Start creating
+                <br />
+                Add an image, paste a prompt, or choose a tool.
+              </p>
+            </div>
+          )}
         </div>
+        {error ? <p className="studio-error-note">{error}</p> : null}
+
+        <ReferenceUploader
+          kind="image"
+          label="Image Reference"
+          role={activeTool === 'Image-to-Image' ? 'image-to-image' : 'reference'}
+          note={activeTool}
+          onAsset={setReferenceAsset}
+        />
 
         <div className="studio-toggle-row">
           {RATIOS.map((r) => (
@@ -81,16 +139,21 @@ export default function ImageStudio() {
           ))}
         </div>
 
-        <div className="studio-prompt">
+        <div className="studio-input-bar">
           <input
             type="text"
-            className="studio-prompt-input"
+            className="studio-input"
             placeholder="Describe what you want to create..."
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
           />
-          <button type="button" className="studio-action" disabled={generating} onClick={handleGenerate}>
-            [ Generate ]
+          <button
+            type="button"
+            className="studio-button"
+            disabled={generating || (!hasCredits && !isCEO)}
+            onClick={handleGenerate}
+          >
+            {isCEO ? 'Generate (CEO Mode)' : 'Generate'}
           </button>
         </div>
       </main>
@@ -98,15 +161,15 @@ export default function ImageStudio() {
       <aside className="studio-aside">
         <p className="studio-aside-label">Providers</p>
         <ul className="studio-provider-list">
-          {PROVIDERS.map((p) => (
-            <li key={p}>
+          {PROVIDERS.map((provider) => (
+            <li key={provider.name}>
               <button
                 type="button"
-                className={`studio-provider-item ${activeProvider === p ? 'is-active' : ''}`}
-                onClick={() => setActiveProvider(p)}
+                className={`studio-provider-item ${activeProvider === provider.name ? 'is-active' : ''}`}
+                onClick={() => setActiveProvider(provider.name)}
               >
-                <span className="studio-provider-name">{p}</span>
-                <span className="studio-provider-status">On</span>
+                <span className="studio-provider-name">{provider.name}</span>
+                <span className="studio-provider-status">{provider.status}</span>
               </button>
             </li>
           ))}
@@ -116,21 +179,21 @@ export default function ImageStudio() {
           <p className="studio-aside-label">Settings</p>
           <label className="studio-field">
             <span>Model</span>
-            <select className="studio-select">
+            <select className="studio-select" value={model} onChange={(event) => setModel(event.target.value)}>
               <option>GPT-Image 1</option>
               <option>FLUX 1.1</option>
             </select>
           </label>
           <label className="studio-field">
             <span>Quality</span>
-            <select className="studio-select">
+            <select className="studio-select" value={quality} onChange={(event) => setQuality(event.target.value)}>
               <option>High</option>
               <option>Standard</option>
             </select>
           </label>
           <label className="studio-field">
             <span>Style</span>
-            <select className="studio-select">
+            <select className="studio-select" value={style} onChange={(event) => setStyle(event.target.value)}>
               <option>Photographic</option>
               <option>Anime</option>
               <option>Digital Art</option>

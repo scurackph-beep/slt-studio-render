@@ -6,14 +6,21 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "start": "node server/api-proxy.js",
-    "start:prod": "npm run build && node server/api-proxy.js",
+    "start": "SLT_ENV_DIR=\"/Users/sweetlittletrauma/Desktop/Sweet Little Trauma Produccion/PROYECTO_COMPLETO\" node server/api-proxy.js",
+    "start:prod": "npm run build && NODE_ENV=production node server/api-proxy.js",
+    "deploy:hetzner": "bash scripts/deploy-hetzner.sh",
+    "db:migrate": "node scripts/migrate-postgres.js",
+    "db:verify-persistence": "node scripts/verify-supabase-persistence.js",
+    "supabase:configure": "node scripts/configure-supabase.js",
+    "test": "SLT_TEST_MODE=1 NODE_ENV=test node --test tests/*.test.js",
     "lint": "oxlint",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.110.2",
     "cors": "^2.8.5",
     "express": "^4.21.2",
+    "pg": "^8.22.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-router-dom": "^7.18.0"

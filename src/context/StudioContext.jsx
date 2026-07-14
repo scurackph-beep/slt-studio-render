@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { refreshBackendState } from '../lib/api-client';
-import { readStore, storageKeys } from '../lib/storage';
+import { fetchLedger, refreshBackendState } from '../lib/api-client';
+import { readStore, storageKeys, writeStore } from '../lib/storage';
 
 const StudioContext = createContext(null);
 
@@ -12,6 +12,29 @@ export function StudioProvider({ children }) {
   const [billing, setBilling] = useState(() => readStore(storageKeys.billing, null));
   const [bootError, setBootError] = useState('');
 
+  const refreshLedger = useCallback(async () => {
+    const result = await fetchLedger();
+    const wallet = result.data?.wallet;
+
+    if (result.ok && wallet) {
+      setSubscription((current) => {
+        const next = {
+          ...(current || readStore(storageKeys.subscription, {}) || {}),
+          credits: wallet.availableCredits,
+          availableCredits: wallet.availableCredits,
+          heldCredits: wallet.heldCredits,
+          capturedCredits: wallet.capturedCredits,
+          transactionCount: wallet.transactionCount,
+          reservationCount: wallet.reservationCount,
+        };
+        writeStore(storageKeys.subscription, next);
+        return next;
+      });
+    }
+
+    return result;
+  }, []);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     setBootError('');
@@ -22,6 +45,7 @@ export function StudioProvider({ children }) {
       setProviders(state.providers);
       setSubscription(state.subscription);
       setBilling(state.billing);
+      await refreshLedger().catch(() => null);
 
       if (!state.online) {
         setBootError('Backend offline — start api-proxy on port 3000.');
@@ -32,7 +56,7 @@ export function StudioProvider({ children }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [refreshLedger]);
 
   useEffect(() => {
     refresh();
@@ -47,12 +71,14 @@ export function StudioProvider({ children }) {
       billing,
       bootError,
       refresh,
+      refreshLedger,
       providerCount: providers.length,
-      credits: subscription?.credits ?? null,
+      credits: subscription?.credits ?? subscription?.availableCredits ?? null,
+      heldCredits: subscription?.heldCredits ?? 0,
       plan: subscription?.plan ?? 'Free',
       planStatus: subscription?.status ?? 'unknown',
     }),
-    [loading, online, providers, subscription, billing, bootError, refresh],
+    [loading, online, providers, subscription, billing, bootError, refresh, refreshLedger],
   );
 
   return <StudioContext.Provider value={value}>{children}</StudioContext.Provider>;

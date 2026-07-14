@@ -1,48 +1,124 @@
 .brand-logo {
-  display: flex;
+  display: inline-flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  gap: 14px;
   text-align: center;
-  line-height: 1.2;
   color: var(--ink);
 }
 
+.brand-logo-mark {
+  position: relative;
+  flex: 0 0 auto;
+  width: 52px;
+  height: 38px;
+  border-radius: 52px 52px 0 0;
+  background:
+    radial-gradient(circle at 50% 100%, transparent 0 10px, var(--bg-elevated) 11px 14px, transparent 15px),
+    conic-gradient(
+      from 244deg at 50% 100%,
+      var(--rainbow-red),
+      var(--rainbow-yellow),
+      var(--rainbow-green),
+      var(--rainbow-cyan),
+      var(--rainbow-blue),
+      var(--rainbow-violet),
+      transparent 0
+    );
+  filter: drop-shadow(0 8px 18px rgba(107, 78, 255, 0.18));
+  animation: logoPulse 3.2s ease-in-out infinite, logoFloat 6s ease-in-out infinite;
+}
+
+.brand-logo-mark::before {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: -2px;
+  left: 49%;
+  width: 3px;
+  transform: rotate(12deg);
+  background: var(--ink);
+  box-shadow: 4px 8px 0 var(--ink), -3px 16px 0 var(--ink);
+  opacity: 0.88;
+}
+
+.brand-logo-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .brand-logo-top {
-  font-size: 11px;
-  font-weight: var(--weight-light);
+  font-size: clamp(0.82rem, 1.4vw, 1rem);
+  font-weight: var(--weight-medium);
   letter-spacing: var(--tracking-logo-top);
   text-transform: uppercase;
+  color: var(--ink);
   white-space: nowrap;
 }
 
 .brand-logo-sub {
-  font-size: 8px;
-  font-weight: var(--weight-thin);
+  font-size: clamp(0.68rem, 1.1vw, 0.82rem);
+  font-weight: var(--weight-light);
   letter-spacing: var(--tracking-logo-sub);
   text-transform: uppercase;
-  margin-top: 4px;
+  color: var(--ink-muted);
   white-space: nowrap;
 }
 
+.brand-logo--hero .brand-logo-mark {
+  width: 92px;
+  height: 66px;
+  border-radius: 92px 92px 0 0;
+}
+
 .brand-logo--hero .brand-logo-top {
-  font-size: clamp(14px, 2.5vw, 22px);
-  letter-spacing: var(--tracking-logo-top);
+  font-size: clamp(1rem, 2.2vw, 1.45rem);
+  letter-spacing: 0.22em;
 }
 
 .brand-logo--hero .brand-logo-sub {
-  font-size: clamp(10px, 1.5vw, 14px);
-  letter-spacing: var(--tracking-logo-sub);
-  margin-top: 10px;
+  font-size: clamp(0.78rem, 1.5vw, 1rem);
+  letter-spacing: 0.48em;
 }
 
+.brand-logo--compact {
+  flex-direction: row;
+  gap: 12px;
+}
 
-@media (min-width: 768px) {
-  .brand-logo-top {
-    font-size: 12px;
-  }
+.brand-logo--compact .brand-logo-mark {
+  width: 36px;
+  height: 26px;
+  border-radius: 36px 36px 0 0;
+}
 
-  .brand-logo-sub {
-    font-size: 9px;
+.brand-logo--compact .brand-logo-copy {
+  align-items: flex-start;
+  text-align: left;
+  gap: 2px;
+}
+
+.brand-logo--compact .brand-logo-top {
+  font-size: 0.62rem;
+  letter-spacing: 0.16em;
+}
+
+.brand-logo--compact .brand-logo-sub {
+  font-size: 0.52rem;
+  letter-spacing: 0.34em;
+}
+
+@keyframes logoPulse {
+  0%, 100% {
+    filter: drop-shadow(0 8px 18px rgba(255, 93, 110, 0.2));
   }
+  50% {
+    filter: drop-shadow(0 10px 28px rgba(53, 213, 255, 0.28));
+  }
+}
+
+@keyframes logoFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
 }

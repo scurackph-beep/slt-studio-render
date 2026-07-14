@@ -1,91 +1,267 @@
-import { useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import ReferenceUploader from '../components/ReferenceUploader';
+import { useStudioGenerate } from '../hooks/useStudioGenerate';
+import { useSubscription } from '../hooks/useSubscription';
+import { useStudio } from '../context/StudioContext';
+import './StudioLayout.css';
+
+const TOOLS = [
+  { label: 'Upload Audio', desc: 'Import files' },
+  { label: 'Stem Separation', desc: 'Extract vocals/drums' },
+  { label: 'Recreate Instrument', desc: 'AI instrument gen' },
+  { label: 'Recreate Voice', desc: 'AI voice recreation' },
+  { label: 'Record Voice', desc: 'Direct recording' },
+  { label: 'Track Builder', desc: 'AI-assisted tracks' },
+  { label: 'Arrangement', desc: 'Compose & arrange' },
+  { label: 'Mix Assistant', desc: 'AI-powered mixing' },
+  { label: 'Mastering', desc: 'Professional master' },
+  { label: 'Export Stems', desc: 'Download tracks' },
+];
+
+const MODES = ['Manual Studio', 'Suno Mode', 'Udio Mode'];
+const DEFAULT_PROVIDERS = [
+  { name: 'SLT Composer', model: 'Local planning', status: 'Ready' },
+  { name: 'MiniMax Music', model: 'Music generation', status: 'API' },
+  { name: 'Stable Audio', model: 'Audio generation', status: 'API' },
+  { name: 'Suno', model: 'v5.5', status: 'Prepared' },
+  { name: 'ElevenLabs Music', model: 'music_v2', status: 'Prepared' },
+  { name: 'Udio', model: 'External account', status: 'Prepared' },
+  { name: 'Mubert', model: 'Track API', status: 'Prepared' },
+];
+
+const TRACKS_DEFAULT = [
+  { name: 'Vocals', muted: false, solo: false, vol: -1.2 },
+  { name: 'Drums', muted: false, solo: false, vol: -0.5 },
+  { name: 'Bass', muted: false, solo: false, vol: -2.1 },
+  { name: 'Guitar', muted: false, solo: false, vol: -1.8 },
+  { name: 'Keys', muted: false, solo: false, vol: -3.0 },
+  { name: 'Atmosphere', muted: false, solo: false, vol: -4.5 },
+];
 
 export default function MusicStudio() {
-  const [isGenerating, setIsGenerating] = useState(false);
+  const audioRef = useRef(null);
+  const [activeMode, setActiveMode] = useState('Manual Studio');
+  const [activeTool, setActiveTool] = useState('Track Builder');
+  const [activeProvider, setActiveProvider] = useState('SLT Composer');
+  const [tracks, setTracks] = useState(TRACKS_DEFAULT);
+  const [playing, setPlaying] = useState(false);
+  const [prompt, setPrompt] = useState('');
+  const [referenceAsset, setReferenceAsset] = useState(null);
+  const { assetUrl, error, generating, jobStatus, status, runGenerate } = useStudioGenerate('music');
+  const { hasCredits, isCEO } = useSubscription();
+  const { providers } = useStudio();
 
-  const handleSynthesize = () => {
-    setIsGenerating(true);
-    setTimeout(() => setIsGenerating(false), 3000); 
+  const providerOptions = useMemo(() => {
+    const connected = new Set(providers.filter((item) => item.connected).map((item) => item.name));
+    return DEFAULT_PROVIDERS.map((provider) => ({
+      ...provider,
+      available: connected.has(provider.name) || provider.name === 'SLT Composer',
+    }));
+  }, [providers]);
+
+  const toggleTrack = (name, field) => {
+    setTracks((current) => current.map((track) => (
+      track.name === name ? { ...track, [field]: !track[field] } : track
+    )));
+  };
+
+  const handlePlay = async () => {
+    if (!assetUrl) {
+      alert('Generá música primero o subí un audio de referencia.');
+      return;
+    }
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (playing) {
+      audio.pause();
+      setPlaying(false);
+      return;
+    }
+    await audio.play();
+    setPlaying(true);
+  };
+
+  const handleGenerate = () => {
+    if (!hasCredits && !isCEO) {
+      alert('Iniciá sesión y agregá créditos para continuar.');
+      return;
+    }
+    runGenerate({
+      title: activeTool,
+      prompt: `[${activeMode}] ${prompt}`,
+      provider: activeProvider,
+      providerLabel: activeProvider,
+      tool: activeTool,
+      referenceAssets: referenceAsset ? [referenceAsset] : [],
+      referenceAudioUrl: referenceAsset?.publicUrl || '',
+      referenceAssetIds: referenceAsset ? [referenceAsset.id] : [],
+      assetUrls: referenceAsset ? [referenceAsset.publicUrl] : [],
+    });
   };
 
   return (
-    <div style={styles.studioLayout}>
-      {/* PANEL IZQUIERDO: FORMULARIO */}
-      <div style={styles.controlPanel}>
-        <h2 style={styles.title}>MUSIC / <span style={{color: '#666'}}>SYNTHESIS</span></h2>
-        <p style={styles.subtitle}>Void-Audio Engine (v1.0)</p>
-        
-        <div style={styles.formGroup}>
-          <label style={styles.label}>// INSTRUCCIÓN (PROMPT)</label>
-          <textarea style={styles.textarea} placeholder="Ej: Canción acústica vulnerable, cruda, tipo Damien Rice..."></textarea>
+    <div className="studio studio-container">
+      <aside className="studio-rail">
+        <p className="studio-rail-label">Music</p>
+        <ul className="studio-tool-list">
+          {TOOLS.map(({ label, desc }) => (
+            <li key={label}>
+              <button
+                type="button"
+                className={`studio-tool-item ${activeTool === label ? 'is-active' : ''}`}
+                onClick={() => setActiveTool(label)}
+              >
+                <span className="studio-tool-label">{label}</span>
+                <span className="studio-tool-desc">{desc}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </aside>
+
+      <main className="studio-main">
+        <header>
+          <h1 className="studio-main-title">Music Studio</h1>
+          <p className="studio-main-meta">{activeMode} · {activeTool} · {status || 'Ready'}</p>
+        </header>
+
+        <div className="studio-toggle-row">
+          {MODES.map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              className={`studio-action ${activeMode === mode ? 'is-active' : ''}`}
+              onClick={() => setActiveMode(mode)}
+            >
+              [ {mode} ]
+            </button>
+          ))}
         </div>
 
-        <div style={styles.formGroup}>
-          <label style={styles.label}>// ESTILO & INSTRUMENTOS</label>
-          <input style={styles.input} type="text" placeholder="Guitarra acústica, voz rota, sin dolor..." />
-        </div>
-
-        <div style={styles.formGroup}>
-          <label style={styles.label}>// LETRA (VACÍO = AUTO-GENERADA)</label>
-          <textarea style={styles.textareaLarge} placeholder="[Verse 1]&#10;Everything is white..."></textarea>
-        </div>
-
-        <button 
-          style={isGenerating ? styles.buttonGenerating : styles.button} 
-          onClick={handleSynthesize}
-          disabled={isGenerating}
-        >
-          {isGenerating ? '[ SINTETIZANDO FRECUENCIAS... ]' : '[ INICIAR SÍNTESIS ]'}
-        </button>
-      </div>
-
-      {/* PANEL DERECHO: CASCADA HOLOGRÁFICA (RESULTADOS) */}
-      <div style={styles.feedPanel}>
-        <div style={styles.feedHeader}>
-          <span style={styles.feedTitle}>RENDER QUEUE</span>
-          <span style={styles.statusLive}>● LIVE API</span>
-        </div>
-
-        {/* Tarjeta de Canción (Holograma) */}
-        <div style={styles.trackCard}>
-          <div style={styles.trackInfo}>
-            <h4 style={{margin: 0, fontWeight: 'normal'}}>Sweet_Trauma_Acoustic.wav</h4>
-            <span style={{fontSize: '0.7rem', color: '#888'}}>03:12 / Raw Acoustic</span>
+        <div className="studio-project-row studio-glass-panel">
+          <div>
+            <p className="studio-project-title">New Project</p>
+            <p className="studio-project-sub">Sweet Little Trauma</p>
+            <div className="studio-tags">
+              <span className="studio-tag">Alternative</span>
+              <span className="studio-tag">Dream Pop</span>
+            </div>
           </div>
-          <div style={styles.waveformPlaceholder}>
-            ||||| || | |||| ||| | || |||| | ||| || ||||
-          </div>
-          <div style={styles.trackActions}>
-            <button style={styles.actionBtn}>▶ PLAY</button>
-            <button style={styles.actionBtn}>SPLIT STEMS</button>
-          </div>
+          <button type="button" className="studio-action" onClick={handlePlay}>
+            [ {playing ? 'Pause' : 'Play'} ]
+          </button>
         </div>
 
-      </div>
+        <audio
+          ref={audioRef}
+          src={assetUrl || referenceAsset?.publicUrl || ''}
+          onEnded={() => setPlaying(false)}
+          className="studio-audio-player"
+          controls={Boolean(assetUrl)}
+        />
+
+        {(assetUrl || generating || error) ? (
+          <div className="studio-result-block studio-glass-panel">
+            <p className={error ? 'studio-error-note' : 'studio-async-note'}>
+              {error || `${jobStatus || 'processing'} · ${status || 'Waiting for provider status'}`}
+            </p>
+          </div>
+        ) : null}
+
+        <ReferenceUploader
+          kind="music"
+          label="Audio / Lyric Reference"
+          role={activeTool}
+          note={activeMode}
+          onAsset={setReferenceAsset}
+        />
+
+        <table className="studio-table">
+          <thead>
+            <tr>
+              <th>Track</th>
+              <th>M / S</th>
+              <th>Level</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tracks.map((track) => (
+              <tr key={track.name}>
+                <td>{track.name}</td>
+                <td>
+                  <div className="studio-table-actions">
+                    <button
+                      type="button"
+                      className={`studio-action ${track.muted ? 'is-active' : ''}`}
+                      onClick={() => toggleTrack(track.name, 'muted')}
+                    >
+                      M
+                    </button>
+                    <button
+                      type="button"
+                      className={`studio-action ${track.solo ? 'is-active' : ''}`}
+                      onClick={() => toggleTrack(track.name, 'solo')}
+                    >
+                      S
+                    </button>
+                  </div>
+                </td>
+                <td>{track.vol} dB</td>
+                <td>
+                  <button
+                    type="button"
+                    className="studio-action"
+                    onClick={() => setPrompt((current) => `${current} Focus on ${track.name.toLowerCase()} layer.`.trim())}
+                  >
+                    [ View ]
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <div className="studio-input-bar">
+          <input
+            type="text"
+            className="studio-input"
+            placeholder="Describe the music you want to create..."
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+          />
+          <button
+            type="button"
+            className="studio-button"
+            disabled={generating || (!hasCredits && !isCEO)}
+            onClick={handleGenerate}
+          >
+            {isCEO ? 'Generate (CEO Mode)' : 'Generate'}
+          </button>
+        </div>
+      </main>
+
+      <aside className="studio-aside">
+        <p className="studio-aside-label">Providers</p>
+        <ul className="studio-provider-list">
+          {providerOptions.map((provider) => (
+            <li key={provider.name}>
+              <button
+                type="button"
+                className={`studio-provider-item ${activeProvider === provider.name ? 'is-active' : ''}`}
+                disabled={!provider.available}
+                onClick={() => setActiveProvider(provider.name)}
+              >
+                <span>
+                  <span className="studio-provider-name">{provider.name}</span>
+                  <span className="studio-provider-model">{provider.model}</span>
+                </span>
+                <span className="studio-provider-status">{provider.available ? provider.status : 'Offline'}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </aside>
     </div>
   );
 }
-
-const styles = {
-  studioLayout: { display: 'flex', height: '100%', gap: '2rem', padding: '1rem', width: '100%' },
-  controlPanel: { width: '35%', display: 'flex', flexDirection: 'column', gap: '1.5rem', borderRight: '1px solid rgba(255,255,255,0.05)', paddingRight: '2rem' },
-  title: { margin: 0, fontSize: '1.5rem', letterSpacing: '1px' },
-  subtitle: { margin: 0, color: '#555', fontSize: '0.8rem', textTransform: 'uppercase' },
-  formGroup: { display: 'flex', flexDirection: 'column', gap: '0.5rem' },
-  label: { fontSize: '0.7rem', color: '#888', letterSpacing: '1px' },
-  input: { backgroundColor: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '0.8rem', fontFamily: 'monospace', borderRadius: '4px', outline: 'none' },
-  textarea: { backgroundColor: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '0.8rem', fontFamily: 'monospace', minHeight: '80px', borderRadius: '4px', outline: 'none', resize: 'none' },
-  textareaLarge: { backgroundColor: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '0.8rem', fontFamily: 'monospace', minHeight: '150px', borderRadius: '4px', outline: 'none', resize: 'none' },
-  button: { backgroundColor: '#fff', color: '#000', border: 'none', padding: '1rem', fontFamily: 'monospace', fontWeight: 'bold', cursor: 'pointer', marginTop: 'auto', transition: 'all 0.2s', borderRadius: '4px' },
-  buttonGenerating: { backgroundColor: '#333', color: '#0f0', border: '1px solid #0f0', padding: '1rem', fontFamily: 'monospace', fontWeight: 'bold', marginTop: 'auto', borderRadius: '4px' },
-  
-  feedPanel: { width: '65%', display: 'flex', flexDirection: 'column', gap: '1rem' },
-  feedHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '0.5rem' },
-  feedTitle: { fontSize: '0.8rem', color: '#666', letterSpacing: '1px' },
-  statusLive: { fontSize: '0.7rem', color: '#0f0', letterSpacing: '1px', animation: 'blink 2s infinite' },
-  trackCard: { backgroundColor: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', padding: '1.5rem', borderRadius: '4px', display: 'flex', flexDirection: 'column', gap: '1rem' },
-  trackInfo: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' },
-  waveformPlaceholder: { color: '#444', fontSize: '1.5rem', letterSpacing: '2px', overflow: 'hidden', whiteSpace: 'nowrap' },
-  trackActions: { display: 'flex', gap: '1rem' },
-  actionBtn: { backgroundColor: 'transparent', border: '1px solid rgba(255,255,255,0.2)', color: '#fff', padding: '0.5rem 1rem', fontFamily: 'monospace', fontSize: '0.7rem', cursor: 'pointer', transition: 'background 0.2s' }
-};
