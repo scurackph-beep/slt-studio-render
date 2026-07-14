@@ -78,50 +78,80 @@
   background: var(--accent-soft);
 }
 
-.navbar-profile {
+.navbar-profile,
+.navbar-account-link {
   position: relative;
-  width: 38px;
-  height: 38px;
-  flex: 0 0 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 14px 0 10px;
   border: 1px solid var(--line-strong);
-  border-radius: 50%;
+  border-radius: 999px;
   background: var(--surface-strong);
-  transition: transform var(--fade), border-color var(--fade), box-shadow var(--fade);
+  color: var(--ink-muted);
+  transition: transform var(--fade), border-color var(--fade), box-shadow var(--fade), color var(--fade);
+}
+
+.navbar-account-text {
+  font-size: 10px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .navbar-profile:hover,
-.navbar-profile.is-active {
+.navbar-profile.is-active,
+.navbar-account-link:hover {
   transform: translateY(-1px);
   border-color: rgba(107, 78, 255, 0.35);
   box-shadow: var(--shadow-lift);
+  color: var(--ink);
+}
+
+.navbar-profile {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  padding: 0;
+  border-radius: 50%;
+  justify-content: center;
 }
 
 .navbar-profile-dot {
-  position: absolute;
-  top: 9px;
-  left: 50%;
+  position: relative;
+  top: auto;
+  left: auto;
+  flex: 0 0 8px;
   width: 8px;
   height: 8px;
   border: 1px solid currentColor;
   border-radius: 50%;
-  transform: translateX(-50%);
+  transform: none;
   background: transparent;
   transition: background var(--fade), border-color var(--fade), box-shadow var(--fade);
 }
 
+.navbar-account-link.is-connected .navbar-profile-dot,
 .navbar-profile.is-connected .navbar-profile-dot {
   background: #3ecf8e;
   border-color: #3ecf8e;
   box-shadow: 0 0 0 3px rgba(62, 207, 142, 0.18);
 }
 
-.navbar-profile.is-ceo .navbar-profile-dot {
+.navbar-profile.is-ceo .navbar-profile-dot,
+.navbar-account-link.is-ceo .navbar-profile-dot {
   background: #f5b942;
   border-color: #f5b942;
   box-shadow: 0 0 0 3px rgba(245, 185, 66, 0.2);
 }
 
-.navbar-profile.is-ceo.is-connected {
+.navbar-profile.is-ceo.is-connected,
+.navbar-account-link.is-ceo.is-connected {
   border-color: rgba(245, 185, 66, 0.45);
 }
 

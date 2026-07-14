@@ -17,8 +17,8 @@ const DEFAULT_LINKS = [
 ];
 
 function formatCredits(value) {
-  if (typeof value !== 'number') return 'CR --';
-  return `${new Intl.NumberFormat('en-US').format(value)} CR`;
+  if (typeof value !== 'number') return null;
+  return `${new Intl.NumberFormat('en-US').format(value)} credits`;
 }
 
 export default function Navbar({ links = [], activeId, onNavigate, mode = 'route' }) {
@@ -29,8 +29,10 @@ export default function Navbar({ links = [], activeId, onNavigate, mode = 'route
   const accountLabel = isCEO
     ? 'CEO mode'
     : isAuthenticated
-      ? (session?.email || session?.username || 'Connected')
+      ? (session?.email || session?.username || 'Account')
       : 'Sign in';
+
+  const creditsLabel = formatCredits(credits);
 
   return (
     <header className="navbar" role="banner">
@@ -70,17 +72,22 @@ export default function Navbar({ links = [], activeId, onNavigate, mode = 'route
         </nav>
 
         <div className="navbar-account" aria-label="Account status">
-          <span className="navbar-credits" title={heldCredits ? `${heldCredits} credits reserved` : 'Available credits'}>
-            {formatCredits(credits)}
-          </span>
+          {creditsLabel ? (
+            <span
+              className="navbar-credits"
+              title={heldCredits ? `${heldCredits} credits reserved` : 'Available credits'}
+            >
+              {creditsLabel}
+            </span>
+          ) : null}
           <Link
             to="/profile"
-            className={`navbar-profile ${isAuthenticated ? 'is-connected' : ''} ${isCEO ? 'is-ceo' : ''}`}
+            className={`navbar-account-link ${isAuthenticated ? 'is-connected' : ''} ${isCEO ? 'is-ceo' : ''}`}
             aria-label={accountLabel}
             title={accountLabel}
           >
-            <span className="navbar-profile-dot" />
-            <span className="navbar-profile-line" aria-hidden="true" />
+            <span className="navbar-profile-dot" aria-hidden="true" />
+            <span className="navbar-account-text">{accountLabel}</span>
           </Link>
         </div>
       </div>

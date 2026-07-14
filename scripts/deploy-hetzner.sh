@@ -3,6 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 HOST="${DEPLOY_HOST:-root@87.99.147.67}"
+SSH_KEY="${DEPLOY_SSH_KEY:-$HOME/.ssh/slt-hetzner}"
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new)
+if [[ -f "$SSH_KEY" ]]; then
+  SSH_OPTS+=(-i "$SSH_KEY")
+fi
+SSH_CMD="ssh ${SSH_OPTS[*]}"
 REMOTE_DIR="${DEPLOY_PATH:-/var/www/slt-studio-v2}"
 ENV_SOURCE="${ENV_SOURCE:-/Users/sweetlittletrauma/Desktop/Sweet Little Trauma Produccion/PROYECTO_COMPLETO/.env}"
 DOMAIN="${PUBLIC_DOMAIN:-https://www.studiosweetlittletrauma.com}"
@@ -12,20 +18,22 @@ echo "==> Deploying slt-studio-v2 to ${HOST}:${REMOTE_DIR}"
 cd "$ROOT_DIR"
 npm run build
 
-rsync -avz --delete \
+rsync -avz --delete -e "$SSH_CMD" \
   --exclude node_modules \
   --exclude .git \
   --exclude storage \
+  --exclude '.env' \
+  --exclude '.env.*' \
   --exclude '.env.local' \
   "$ROOT_DIR/" "${HOST}:${REMOTE_DIR}/"
 
 if [[ -f "$ENV_SOURCE" ]]; then
-  scp "$ENV_SOURCE" "${HOST}:${REMOTE_DIR}/.env"
+  scp "${SSH_OPTS[@]}" "$ENV_SOURCE" "${HOST}:${REMOTE_DIR}/.env"
 else
   echo "WARN: ENV_SOURCE not found at $ENV_SOURCE — keep existing remote .env"
 fi
 
-ssh "$HOST" bash -s <<EOF
+ssh "${SSH_OPTS[@]}" "$HOST" bash -s <<EOF
 set -euo pipefail
 cd ${REMOTE_DIR}
 chmod +x deploy/hetzner/patch-production-env.sh

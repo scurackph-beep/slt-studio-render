@@ -51,14 +51,14 @@
 .site-gate-panel {
   position: relative;
   z-index: 1;
-  width: min(480px, 100%);
+  width: min(720px, 100%);
   text-align: center;
-  padding: 48px 40px;
-  border: 1px solid rgba(255, 255, 255, 0.72);
-  border-radius: 28px;
-  background: rgba(255, 255, 255, 0.72);
-  box-shadow: var(--shadow-soft);
-  backdrop-filter: blur(18px);
+  padding: 42px;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.74);
+  box-shadow: 0 24px 80px rgba(18, 16, 14, 0.14);
+  backdrop-filter: blur(22px);
 }
 
 .site-gate-logo {
@@ -86,6 +86,40 @@
   font-size: 0.98rem;
 }
 
+.site-gate-copy {
+  max-width: 420px;
+  margin: 0 auto;
+}
+
+.site-gate-tabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 1px;
+  margin: 26px 0 10px;
+  border: 1px solid rgba(16, 16, 16, 0.14);
+  background: rgba(16, 16, 16, 0.14);
+}
+
+.site-gate-tabs button {
+  min-height: 44px;
+  border: 0;
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.72);
+  color: rgba(16, 16, 16, 0.62);
+  font-size: 0.68rem;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background var(--fade), color var(--fade), transform var(--fade);
+}
+
+.site-gate-tabs button:hover,
+.site-gate-tabs button.is-active {
+  background: rgba(8, 8, 8, 0.9);
+  color: #fff;
+}
+
 .site-gate-panel form {
   display: grid;
   gap: 12px;
@@ -95,7 +129,7 @@
 .site-gate-panel input {
   background: var(--surface-strong);
   border: 1px solid var(--line-strong);
-  border-radius: 14px;
+  border-radius: 0;
   color: var(--ink);
   padding: 15px 16px;
   transition: border-color var(--fade), box-shadow var(--fade);
@@ -107,9 +141,9 @@
   box-shadow: 0 0 0 4px var(--accent-soft);
 }
 
-.site-gate-panel button {
+.site-gate-panel form > button {
   border: none;
-  border-radius: 14px;
+  border-radius: 0;
   background: linear-gradient(135deg, #6b4eff 0%, #4d7dff 55%, #35d5ff 100%);
   color: #fff;
   padding: 15px 16px;
@@ -120,9 +154,29 @@
   transition: transform var(--fade), box-shadow var(--fade);
 }
 
-.site-gate-panel button:hover {
+.site-gate-panel form > button:hover {
   transform: translateY(-2px);
   box-shadow: 0 14px 30px rgba(77, 125, 255, 0.28);
+}
+
+.site-gate-panel form > button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+  transform: none;
+  box-shadow: none;
+}
+
+.site-gate-note,
+.site-gate-codes {
+  margin: 4px 0 0;
+  font-size: 0.82rem !important;
+  color: rgba(16, 16, 16, 0.55) !important;
+}
+
+.site-gate-codes {
+  margin-top: 16px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .site-gate-error {
@@ -135,4 +189,18 @@
   0%, 100% { transform: translate(0, 0) scale(1); }
   33% { transform: translate(18px, -12px) scale(1.04); }
   66% { transform: translate(-14px, 16px) scale(0.96); }
+}
+
+@media (max-width: 720px) {
+  .site-gate {
+    padding: 16px;
+  }
+
+  .site-gate-panel {
+    padding: 30px 20px;
+  }
+
+  .site-gate-tabs {
+    grid-template-columns: 1fr;
+  }
 }

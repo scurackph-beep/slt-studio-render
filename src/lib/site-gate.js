@@ -1,9 +1,18 @@
-export const SITE_GATE_STORAGE_KEY = 'slt-site-gate-unlocked';
+export const SITE_GATE_STORAGE_KEY = 'slt-site-gate-unlocked-v2';
 export const SITE_GATE_KEY = import.meta.env.VITE_SITE_GATE_KEY || 'Dientito2032';
 
 export function isSiteGateUnlocked() {
   try {
     return sessionStorage.getItem(SITE_GATE_STORAGE_KEY) === SITE_GATE_KEY;
+  } catch {
+    return false;
+  }
+}
+
+export function unlockSiteGateFromUrl() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return unlockSiteGate(params.get('site_gate') || '');
   } catch {
     return false;
   }

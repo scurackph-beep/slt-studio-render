@@ -1880,3 +1880,193 @@ La migracion a Supabase esta implementada en codigo y lista para activar, pero n
 npm run db:migrate
 npm run db:verify-persistence
 ```
+
+## Activacion real Supabase + Hetzner - 2026-07-14
+
+Se activo la infraestructura real de produccion sin exponer secretos en consola ni chat.
+
+### Cambios operativos realizados
+
+- Se configuro Supabase como fuente durable:
+  - `DATABASE_URL`: configurada con pooler de Supabase.
+  - `AUTH_PROVIDER=supabase`.
+  - `STORAGE_PROVIDER=supabase`.
+  - `STORAGE_BUCKET=slt-assets`.
+  - `WEBHOOK_BASE_URL=https://www.studiosweetlittletrauma.com`.
+- Se creo/verifico el bucket publico `slt-assets` en Supabase Storage.
+- Se subio un archivo smoke test al bucket para confirmar uploads reales.
+- Se fusiono el `.env` de produccion con las variables Supabase, conservando las claves generativas existentes.
+- Se creo backup local antes de modificar el `.env` de produccion:
+  - `/Users/sweetlittletrauma/Desktop/Sweet Little Trauma Produccion/PROYECTO_COMPLETO/.env.backup-before-supabase-20260714`
+- Se subio el `.env` fusionado al servidor Hetzner:
+  - `/var/www/slt-studio-v2/.env`
+- Se ajusto `slt-studio.service` para cargar:
+  - `EnvironmentFile=/var/www/slt-studio-v2/.env`
+- Se dejo el archivo remoto con permisos seguros:
+  - owner `root:www-data`
+  - mode `640`
+
+### Comandos/verificaciones ejecutadas
+
+```txt
+npm run supabase:configure
+ssh root@87.99.147.67 "cd /var/www/slt-studio-v2 && node .tmp-remote-verify.mjs"
+ssh root@87.99.147.67 "systemctl restart slt-studio"
+ssh root@87.99.147.67 "curl -sS http://127.0.0.1:3000/health"
+curl -sS -I https://www.studiosweetlittletrauma.com
+curl -sS -I 'https://www.studiosweetlittletrauma.com/?site_gate=Dientito2032'
+curl -sS https://www.studiosweetlittletrauma.com/health
+```
+
+### Resultados
+
+- `npm run supabase:configure`: OK.
+- Migraciones aplicadas:
+  - `001_production_schema.sql`
+  - `002_supabase_rls.sql`
+- Verificacion local de persistencia: OK.
+- Verificacion remota desde Hetzner de persistencia: OK.
+  - `users=1`
+  - `projects=1`
+  - `forms=1`
+  - `jobs=1`
+- `slt-studio.service`: active/running.
+- `/health` publico:
+  - `infrastructure.ok=true`
+  - `dataStore.kind=postgres`
+  - `dataStore.durable=true`
+  - `storage.kind=supabase`
+  - `storage.durable=true`
+  - `providersConnected=43`
+  - `providersTotal=56`
+- `https://www.studiosweetlittletrauma.com`: responde por HTTPS.
+- Sin clave de preview responde `403` por `SLT_SITE_GATE_KEY`.
+- Con `?site_gate=Dientito2032` responde `200`.
+
+### Estado final
+
+Produccion queda arrancando con PostgreSQL/Supabase/Auth/Storage reales. La plataforma ya no depende de memoria como fuente principal en produccion. El sitio esta online detras del gate privado de preview.
+
+## Hotfix gate/assets home publica - 2026-07-14
+
+### Problema
+
+La URL publica con `?site_gate=Dientito2032` devolvia el HTML de React, pero los archivos del build (`/assets/*.js` y `/assets/*.css`) quedaban bloqueados por el middleware del gate y respondian `403`. Como consecuencia, el navegador no podia montar la app real y el usuario veia una pantalla incorrecta/incompleta.
+
+Ademas, el gate del frontend solo leia `sessionStorage`, por lo que el query param `site_gate` desbloqueaba el servidor pero no desbloqueaba la interfaz React.
+
+### Cambio aplicado
+
+- `server/api-proxy.js`:
+  - Se agregaron excepciones para assets estaticos:
+    - `/assets/`
+    - `/favicon.svg`
+    - `/icons.svg`
+- `src/lib/site-gate.js`:
+  - Se agrego `unlockSiteGateFromUrl()` para aceptar `?site_gate=...`.
+- `src/components/SiteGate.jsx`:
+  - El estado inicial ahora desbloquea si el query param trae la clave correcta.
+
+### Verificacion
+
+```txt
+node --check server/api-proxy.js
+npm run build
+curl -sS -I https://www.studiosweetlittletrauma.com/assets/index-BJabaYqq.js
+curl -sS https://www.studiosweetlittletrauma.com/health
+```
+
+Resultados:
+
+- JS/CSS publicos del build: `200`.
+- `/health`: OK.
+- Render browser: Home visible, sin `Acceso privado` ni `Coming soon`.
+- Controles visibles: Home, Video, Music, Image, Sound, Library, Contact, Sign in, chat, Image/Video/Sound FX/Music/Fashion/Engineering/Virtual Assist.
+
+## Hotfix comportamiento gate dominio base - 2026-07-14
+
+### Objetivo
+
+Cuando un usuario entra a `studiosweetlittletrauma.com` o `www.studiosweetlittletrauma.com`, debe ver una pantalla con campo de clave. Al ingresar `Dientito2032`, debe aparecer la pantalla normal de Sweet Little Trauma Studio.
+
+### Cambio aplicado
+
+- `server/api-proxy.js`:
+  - El middleware del gate ya no bloquea rutas visuales del frontend.
+  - Las rutas no-API cargan React para que se muestre la pantalla de clave.
+  - Las rutas `/api/...` siguen protegidas por `x-slt-site-gate` o `site_gate`.
+
+### Verificacion
+
+```txt
+curl -sS -I https://www.studiosweetlittletrauma.com
+curl -sS -I https://studiosweetlittletrauma.com
+curl -sS -i https://www.studiosweetlittletrauma.com/api/ledger
+```
+
+Resultados:
+
+- `https://www.studiosweetlittletrauma.com`: `200`, carga React.
+- `https://studiosweetlittletrauma.com`: `200`, carga React.
+- `/api/ledger` sin clave: `403 site_gate_required`.
+- Verificacion visual en navegador:
+  - Antes de clave: muestra `ACCESO PRIVADO`.
+  - Campo `Clave de acceso`: visible.
+  - Clave `Dientito2032`: desbloquea correctamente.
+  - Despues de clave: muestra Home normal con chat, categorias y herramientas.
+
+## Access portal, guest quotas y reporte - 2026-07-14
+
+### Objetivo
+
+La primera pantalla publica del dominio debe ofrecer entradas claras para crear usuario, loguearse, entrar en modo CEO, usar codigo de invitado o navegar como espia. El modo espia debe ser solo lectura. Los invitados deben poder probar creacion con limites simples por categoria.
+
+### Cambio aplicado
+
+- `src/components/SiteGate.jsx` y `src/components/SiteGate.css`:
+  - Se reemplazo el gate de una sola clave por un portal con cinco modos:
+    - Create User
+    - Log In
+    - CEO
+    - Guest Code
+    - Spy
+  - El portal usa `x-slt-site-gate` internamente para poder crear/login antes de montar la app.
+  - Se versiono el storage del gate para evitar bypass por accesos viejos.
+- `server/api-proxy.js`:
+  - Las sesiones locales del servidor ahora se validan antes del JWT de Supabase, permitiendo CEO e invitados en produccion.
+  - Se agregaron codigos de invitado:
+    - `NICO.slt`
+    - `VALE.slt`
+    - `MIRIAM.slt`
+    - `CUÑA.slt`
+    - `SOFI.slt`
+    - `GUS.slt`
+  - El invitado usa modo `INVITED_GUEST` sin cobro interno de creditos.
+  - Engineering requiere sesion real para enviar formularios de proyecto.
+- `src/lib/access-control.js`:
+  - Se agrego control local de cuotas de invitado: 2 usos por video, image, sound, music, fashion y engineering.
+- `src/hooks/useStudioGenerate.js`, `src/hooks/useVideoChat.js`, `src/pages/EngineeringLab.jsx`, `src/pages/Home.jsx`:
+  - Espia queda bloqueado antes de generar, subir archivos o llamar al asistente.
+  - Invitado consume una cuota al iniciar una generacion aceptada o enviar Engineering.
+- `src/components/SiteReport.jsx`, `src/components/Layout.jsx`, `src/components/Layout.css`:
+  - Se agrego boton rojo intermitente `REPORTE` con cara geometrica visible.
+  - El reporte abre un panel lateral con desglose de modulos y cuotas restantes para invitados.
+
+### Verificacion prevista
+
+```txt
+node --check server/api-proxy.js
+bash -n scripts/deploy-hetzner.sh && bash -n scripts/hetzner-console-install.sh
+npm run lint
+npm run build
+npm run deploy:hetzner
+```
+
+### Verificacion local
+
+- `node --check server/api-proxy.js`: OK.
+- `bash -n scripts/deploy-hetzner.sh && bash -n scripts/hetzner-console-install.sh`: OK.
+- `npm run build`: OK.
+- `npm run lint`: OK con warnings no bloqueantes preexistentes.
+
+El dominio debe abrir primero el portal de acceso. Invitado con codigo valido debe entrar al sitio y ver cuotas en `REPORTE`. Espia debe poder navegar sin crear contenido.

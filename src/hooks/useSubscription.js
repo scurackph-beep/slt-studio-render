@@ -4,16 +4,22 @@ import { useAuth } from '../context/AuthContext';
 import { useStudio } from '../context/StudioContext';
 
 export function useSubscription() {
-  const { isCEO, isAuthenticated } = useAuth();
+  const { isCEO, isGuest, isSpy, isAuthenticated } = useAuth();
   const { credits, planStatus, refreshLedger } = useStudio();
   const [loading, setLoading] = useState(true);
   const [hasCreditsState, setHasCreditsState] = useState(true);
   const [subscriptionActiveState, setSubscriptionActiveState] = useState(true);
 
   const refreshStatus = useCallback(async () => {
-    if (isCEO) {
+    if (isCEO || isGuest) {
       setHasCreditsState(true);
       setSubscriptionActiveState(true);
+      setLoading(false);
+      return;
+    }
+    if (isSpy) {
+      setHasCreditsState(false);
+      setSubscriptionActiveState(false);
       setLoading(false);
       return;
     }
@@ -48,20 +54,22 @@ export function useSubscription() {
     } finally {
       setLoading(false);
     }
-  }, [isCEO, credits, planStatus, refreshLedger]);
+  }, [isCEO, isGuest, isSpy, credits, planStatus, refreshLedger]);
 
   useEffect(() => {
     refreshStatus();
   }, [refreshStatus, isAuthenticated]);
 
-  const hasCredits = isCEO || hasCreditsState || (typeof credits === 'number' && credits > 0);
-  const subscriptionActive = isCEO || subscriptionActiveState || planStatus === 'active' || planStatus === 'trialing';
+  const hasCredits = !isSpy && (isCEO || isGuest || hasCreditsState || (typeof credits === 'number' && credits > 0));
+  const subscriptionActive = !isSpy && (isCEO || isGuest || subscriptionActiveState || planStatus === 'active' || planStatus === 'trialing');
 
   return {
     hasCredits,
     subscriptionActive,
     isCEO,
-    loading: isCEO ? false : loading,
+    isGuest,
+    isSpy,
+    loading: isCEO || isGuest || isSpy ? false : loading,
     refreshStatus,
   };
 }

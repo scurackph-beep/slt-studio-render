@@ -1,7 +1,7 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import BrandLogo from '../components/BrandLogo';
 import { assistStudio, uploadReferenceAsset } from '../lib/api-client';
+import { useAuth } from '../context/AuthContext';
 import { readStore, storageKeys, writeStore } from '../lib/storage';
 import './Home.css';
 
@@ -169,8 +169,6 @@ const CATEGORY_ASSISTANT_INTRO = {
   assist: 'Virtual Assist active. I can help route you to the right studio and provider.',
 };
 
-const VIDEO_ACTIONS = CATEGORY_ACTIONS.video;
-
 function classifyIntent(text) {
   const lower = text.toLowerCase();
   const category = CATEGORIES.find((item) => item.keywords.some((keyword) => lower.includes(keyword))) || CATEGORIES[6];
@@ -206,17 +204,21 @@ function localAssistantReply(text, category, action) {
 
 export default function Home() {
   const navigate = useNavigate();
+  const { isSpy } = useAuth();
   const fileInputRef = useRef(null);
+  const messagesEndRef = useRef(null);
+  const chatInputRef = useRef(null);
   const [input, setInput] = useState('');
   const [activeCategory, setActiveCategory] = useState(CATEGORIES[1]);
   const [activeAction, setActiveAction] = useState(CATEGORY_ACTIONS.video[0]);
   const [messages, setMessages] = useState([
     {
       sender: 'studio',
-      text: 'What do you want to create today?',
+      text: 'Hi — I\'m your studio assistant. Describe what you want to create and I\'ll route you to the right tool and provider.',
     },
   ]);
   const [assistantState, setAssistantState] = useState('Ready');
+  const [isThinking, setIsThinking] = useState(false);
 
   const suggestedActions = useMemo(
     () => CATEGORY_ACTIONS[activeCategory.id] || [],
@@ -227,6 +229,10 @@ export default function Home() {
     () => CATEGORY_QUICK_PROMPTS[activeCategory.id] || CATEGORY_QUICK_PROMPTS.assist,
     [activeCategory.id],
   );
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isThinking]);
 
   const handleCategorySelect = (category) => {
     const actions = CATEGORY_ACTIONS[category.id] || [];
@@ -239,32 +245,50 @@ export default function Home() {
     setAssistantState(`${category.label} selected`);
   };
 
-  const openStudio = (category = activeCategory, action = activeAction) => {
+  const openStudio = (category = activeCategory, action = activeAction, prompt = input) => {
     const params = new URLSearchParams();
-    if (input.trim()) params.set('prompt', input.trim());
+    if (prompt.trim()) params.set('prompt', prompt.trim());
     if (action?.id) params.set('tool', action.id);
     if (action?.providers?.[0]) params.set('provider', action.providers[0]);
     navigate(`${category.path}${params.toString() ? `?${params.toString()}` : ''}`);
   };
 
   const runIntent = async (text) => {
-    const { category, action } = classifyIntent(text);
+    const trimmed = text.trim();
+    if (!trimmed || isThinking) return;
+    if (isSpy) {
+      setInput('');
+      const { category, action } = classifyIntent(trimmed);
+      setActiveCategory(category);
+      if (action) setActiveAction(action);
+      setMessages((current) => [
+        ...current,
+        { sender: 'user', text: trimmed },
+        { sender: 'studio', text: 'Spy mode is read-only. You can browse the site and inspect tools, but AI requests, uploads and generation are disabled.' },
+      ]);
+      setAssistantState('Spy read-only');
+      return;
+    }
+
+    const { category, action } = classifyIntent(trimmed);
     setActiveCategory(category);
     if (action) setActiveAction(action);
+    setInput('');
+    setIsThinking(true);
 
-    const reply = localAssistantReply(text, category, action);
+    const reply = localAssistantReply(trimmed, category, action);
     setMessages((current) => [
       ...current,
-      { sender: 'user', text },
+      { sender: 'user', text: trimmed },
       { sender: 'studio', text: reply },
     ]);
 
-    setAssistantState('Checking studio intelligence...');
+    setAssistantState('Thinking...');
     const ai = await Promise.race([
       assistStudio({
         title: 'Home Intent Assistant',
         provider: 'OpenAI',
-        prompt: `You are the Sweet Little Trauma Studio routing assistant. Briefly guide the user to the best module, action and providers. User request: ${text}`,
+        prompt: `You are the Sweet Little Trauma Studio routing assistant. Briefly guide the user to the best module, action and providers. User request: ${trimmed}`,
       }),
       new Promise((resolve) => {
         window.setTimeout(() => resolve({ ok: false, timedOut: true }), 3500);
@@ -276,31 +300,50 @@ export default function Home() {
         ...current,
         { sender: 'studio', text: ai.data.historyItem.response },
       ]);
-      setAssistantState('AI online');
+      setAssistantState('Online');
     } else {
-      setAssistantState('Local routing');
+      setAssistantState('Ready');
     }
+
+    setIsThinking(false);
   };
 
   const handleSubmit = (event) => {
     event.preventDefault();
-    const text = input.trim();
-    if (!text) return;
-    runIntent(text);
+    runIntent(input);
   };
 
   const handleQuickPrompt = (prompt) => {
-    setInput(prompt);
     runIntent(prompt);
   };
 
+  const handleChatKeyDown = (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      runIntent(input);
+    }
+  };
+
   const handleAttach = () => {
+    if (isSpy) {
+      setMessages((current) => [
+        ...current,
+        { sender: 'studio', text: 'Spy mode is read-only. File upload is disabled.' },
+      ]);
+      setAssistantState('Spy read-only');
+      return;
+    }
     fileInputRef.current?.click();
   };
 
   const handleFileSelected = async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    if (isSpy) {
+      setAssistantState('Spy read-only');
+      event.target.value = '';
+      return;
+    }
     setAssistantState('Uploading reference...');
     const module = activeCategory.id === 'assist' ? 'image' : activeCategory.id;
     const kind = module === 'music' || module === 'sound' ? module : module === 'video' ? 'video' : 'image';
@@ -334,34 +377,6 @@ export default function Home() {
       <div className="home-command-bg" aria-hidden="true" />
 
       <div className="home-command-shell">
-        <BrandLogo className="home-command-logo" variant="hero" />
-        <p className="home-command-kicker">Sweet Little Trauma Studio</p>
-        <h1>What do you want to create today?</h1>
-        <p className="home-command-lead">
-          Describe the result. The studio will route you to the right category, tool and provider.
-        </p>
-
-        <form className="home-command-box" onSubmit={handleSubmit}>
-          <input
-            ref={fileInputRef}
-            type="file"
-            hidden
-            accept="image/*,video/*,audio/*"
-            onChange={handleFileSelected}
-          />
-          <textarea
-            value={input}
-            onChange={(event) => setInput(event.target.value.slice(0, 500))}
-            placeholder="Example: I want to make a lip sync video from my song and a portrait..."
-            rows={3}
-          />
-          <div className="home-command-actions">
-            <span>{assistantState}</span>
-            <button type="button" className="home-icon-button" aria-label="Attach file" onClick={handleAttach}>+</button>
-            <button type="submit" className="home-send-button">Send</button>
-          </div>
-        </form>
-
         <div className="home-category-row" aria-label="Studios">
           {CATEGORIES.map((category) => (
             <button
@@ -376,22 +391,69 @@ export default function Home() {
         </div>
 
         <div className="home-intent-grid">
-          <div className="home-chat-panel" key={`chat-${activeCategory.id}`}>
-            <p className="home-panel-label">Assistant</p>
-            <div className="home-message-list">
-              {messages.slice(-5).map((message, index) => (
-                <p key={`${message.sender}-${index}`} className={`home-message home-message--${message.sender}`}>
-                  {message.text}
-                </p>
-              ))}
+          <div className="home-chat-panel">
+            <div className="home-chat-header">
+              <p className="home-panel-label">Studio Assistant</p>
+              <span className="home-chat-status">{assistantState}</span>
             </div>
-            <div className="home-prompt-row">
-              {quickPrompts.map((prompt) => (
-                <button key={prompt} type="button" onClick={() => handleQuickPrompt(prompt)}>
-                  {prompt}
+
+            <div className="home-message-list" aria-live="polite">
+              {messages.map((message, index) => (
+                <div
+                  key={`${message.sender}-${index}-${message.text.slice(0, 24)}`}
+                  className={`home-message-bubble home-message-bubble--${message.sender}`}
+                >
+                  <span className="home-message-role">
+                    {message.sender === 'user' ? 'You' : 'Assistant'}
+                  </span>
+                  <p>{message.text}</p>
+                </div>
+              ))}
+              {isThinking ? (
+                <div className="home-message-bubble home-message-bubble--studio home-message-bubble--typing">
+                  <span className="home-message-role">Assistant</span>
+                  <p><span className="home-typing-dots" aria-hidden="true">...</span> Thinking</p>
+                </div>
+              ) : null}
+              <div ref={messagesEndRef} />
+            </div>
+
+            {!messages.some((message) => message.sender === 'user') ? (
+              <div className="home-chat-suggestions">
+                {quickPrompts.map((prompt) => (
+                  <button key={prompt} type="button" onClick={() => handleQuickPrompt(prompt)}>
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
+            <form className="home-chat-composer" onSubmit={handleSubmit}>
+              <input
+                ref={fileInputRef}
+                type="file"
+                hidden
+                accept="image/*,video/*,audio/*"
+                onChange={handleFileSelected}
+              />
+              <textarea
+                ref={chatInputRef}
+                value={input}
+                onChange={(event) => setInput(event.target.value.slice(0, 500))}
+                onKeyDown={handleChatKeyDown}
+                placeholder="Message the assistant..."
+                rows={2}
+                disabled={isThinking}
+              />
+              <div className="home-chat-composer-actions">
+                <button type="button" className="home-icon-button" aria-label="Attach file" onClick={handleAttach}>
+                  +
                 </button>
-              ))}
-            </div>
+                <button type="submit" className="home-send-button" disabled={!input.trim() || isThinking}>
+                  Send
+                </button>
+              </div>
+            </form>
           </div>
 
           <div className="home-tool-panel" key={`tool-${activeCategory.id}`}>

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { apiRequest } from '../lib/api-client';
 import { useAuth } from '../context/AuthContext';
+import { canUseGuestQuota, consumeGuestQuota } from '../lib/access-control';
 import './StudioLayout.css';
 
 const TOOLS = [
@@ -30,7 +31,7 @@ const ROADMAP = [
 
 export default function EngineeringLab() {
   const navigate = useNavigate();
-  const { isAuthenticated } = useAuth();
+  const { session, isAuthenticated, isGuest, isSpy } = useAuth();
   const [activeTool, setActiveTool] = useState('Custom App Request');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -41,6 +42,14 @@ export default function EngineeringLab() {
   const handleExecute = async () => {
     if (!brief.trim() || brief.trim().length < 12) {
       setStatus('Escribí un brief más detallado (mínimo 12 caracteres).');
+      return;
+    }
+    if (isSpy) {
+      setStatus('Spy mode is read-only. Use a user, CEO or guest access to send Engineering requests.');
+      return;
+    }
+    if (isGuest && !canUseGuestQuota('engineering', session)) {
+      setStatus('Guest quota reached for Engineering. This guest pass allows 2 engineering requests.');
       return;
     }
     if (!isAuthenticated) {
@@ -64,6 +73,7 @@ export default function EngineeringLab() {
     });
 
     if (result.ok) {
+      if (isGuest) consumeGuestQuota('engineering', session);
       setStatus(result.data?.message || 'Solicitud recibida. El equipo la revisará.');
       setBrief('');
     } else {

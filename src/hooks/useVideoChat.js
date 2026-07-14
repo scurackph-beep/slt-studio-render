@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
 import {
   extractAsyncJob,
   generateStudio,
@@ -9,6 +8,7 @@ import {
 } from '../lib/api-client';
 import { useAuth } from '../context/AuthContext';
 import { useStudio } from '../context/StudioContext';
+import { canUseGuestQuota, consumeGuestQuota } from '../lib/access-control';
 
 export const VIDEO_CHAT_TOOLS = [
   { id: 'TEXT2VIDEO', label: 'Text to Video', providers: ['Seedance', 'Runway', 'Luma', 'Kling'] },
@@ -54,7 +54,7 @@ function extractVideoUrl(result) {
 }
 
 export function useVideoChat({ initialPrompt = '' } = {}) {
-  const { isAuthenticated, isCEO } = useAuth();
+  const { session, isAuthenticated, isCEO, isGuest, isSpy } = useAuth();
   const { credits, refreshLedger } = useStudio();
   const [messages, setMessages] = useState([
     {
@@ -89,6 +89,11 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
   const handleSend = () => {
     if (!input.trim() || step === 'generating') return;
 
+    if (isSpy) {
+      addMsg('AI', 'Spy mode is read-only. Create an account, use CEO mode or enter a guest code to generate video.');
+      return;
+    }
+
     if (!isAuthenticated) {
       addMsg('AI', 'Sesión requerida. Iniciá sesión desde Profile antes de generar.');
       return;
@@ -108,6 +113,10 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
   };
 
   const selectTool = (tool) => {
+    if (isSpy) {
+      addMsg('AI', 'Spy mode is read-only. Video creation is blocked.');
+      return;
+    }
     addMsg('User', `[ TOOL: ${tool.label} ]`);
     setSelectedTool(tool);
     setStep('await_provider');
@@ -120,13 +129,23 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
   };
 
   const selectProvider = async (provider) => {
+    if (isSpy) {
+      addMsg('AI', 'Spy mode is read-only. Video creation is blocked.');
+      return;
+    }
     if (!isAuthenticated) {
       addMsg('AI', 'Sesión requerida. Iniciá sesión desde Profile.');
       return;
     }
 
+    if (isGuest && !canUseGuestQuota('video', session)) {
+      addMsg('AI', 'Guest quota reached for video. This guest pass allows 2 video requests.');
+      setStep('idle');
+      return;
+    }
+
     const cost = VIDEO_PROVIDER_COSTS[provider] || 100;
-    if (!isCEO && typeof credits === 'number' && credits < cost) {
+    if (!isCEO && !isGuest && typeof credits === 'number' && credits < cost) {
       addMsg('AI', `ERROR: Fondos insuficientes (${credits} CR disponibles, ~${cost} CR requeridos).`);
       setStep('idle');
       return;
@@ -153,6 +172,7 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
       }
 
       await refreshLedger().catch(() => null);
+      if (isGuest) consumeGuestQuota('video', session);
 
       const immediateUrl = extractVideoUrl(result);
       const { jobId, provider: jobProvider, needsPoll } = extractAsyncJob(result);

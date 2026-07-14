@@ -40,7 +40,7 @@ function loadEnvFile(filename) {
     const separator = line.indexOf("=");
     if (separator === -1) continue;
     const key = line.slice(0, separator).trim();
-    const value = line.slice(separator + 1).trim().replace(/^['"]|['"]$/g, "");
+    const value = sanitizeEnvValue(line.slice(separator + 1));
     if (key) process.env[key] = value;
   }
   return true;
@@ -79,9 +79,23 @@ app.use((request, response, next) => {
 app.use(cors({ origin: "*" }));
 
 const SITE_GATE_KEY = String(process.env.SLT_SITE_GATE_KEY || "Dientito2032").trim();
+const INVITE_CODES = ["NICO.slt", "VALE.slt", "MIRIAM.slt", "CUÑA.slt", "SOFI.slt", "GUS.slt"];
+
+function inviteGuestProfile(code = "") {
+  const normalized = String(code || "").trim();
+  const matched = INVITE_CODES.find((entry) => entry.localeCompare(normalized, "es", { sensitivity: "accent" }) === 0);
+  if (!matched) return null;
+  return {
+    code: matched,
+    username: matched.replace(/\.slt$/i, "")
+  };
+}
 
 function siteGateExempt(path = "") {
   return [
+    "/assets/",
+    "/favicon.svg",
+    "/icons.svg",
     "/health",
     "/api/stripe/webhook",
     "/api/webhooks/"
@@ -97,6 +111,10 @@ function siteGateMiddleware(request, response, next) {
     next();
     return;
   }
+  if (!request.path.startsWith("/api/")) {
+    next();
+    return;
+  }
   const provided = String(
     request.header?.("x-slt-site-gate") ||
     request.query?.site_gate ||
@@ -106,16 +124,12 @@ function siteGateMiddleware(request, response, next) {
     next();
     return;
   }
-  if (request.path.startsWith("/api/")) {
-    response.status(403).json({
-      ok: false,
-      code: "site_gate_required",
-      error: "Private preview. Site gate required.",
-      readableError: "Acceso privado. Ingresá la clave del sitio."
-    });
-    return;
-  }
-  response.status(403).send("Private preview. Site gate required.");
+  response.status(403).json({
+    ok: false,
+    code: "site_gate_required",
+    error: "Private preview. Site gate required.",
+    readableError: "Acceso privado. Ingresá la clave del sitio."
+  });
 }
 
 app.use(siteGateMiddleware);
@@ -127,10 +141,24 @@ function authTokenFromRequest(request) {
 
 function strictAuthForRequest(request) {
   const token = authTokenFromRequest(request);
+  const session = token ? sessions.get(token) : null;
+  if (session) {
+    return {
+      ok: true,
+      mode: session.mode || (session.role === "CEO" ? "CEO_FULL_CREATIVE_MODE" : "local-session"),
+      tenantId: session.tenantId || session.userId,
+      userId: session.userId,
+      role: session.role,
+      email: session.email,
+      username: session.username,
+      inviteCode: session.inviteCode,
+      token,
+      message: session.role === "CEO" ? "CEO session accepted." : "Server session accepted."
+    };
+  }
   if (String(process.env.AUTH_PROVIDER || "").toLowerCase() === "supabase") {
     return verifySupabaseJwt(token, process.env);
   }
-  const session = token ? sessions.get(token) : null;
   if (!session) return null;
   return {
     ok: true,
@@ -816,6 +844,47 @@ function envNumber(key, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function sanitizeEnvValue(value = "") {
+  return String(value)
+    .trim()
+    .replace(/^['"]|['"]$/g, "")
+    .replace(/\s+folder\s*$/i, "")
+    .trim();
+}
+
+function uniqueEnvModels(candidates = []) {
+  const seen = new Set();
+  return candidates
+    .map((item) => sanitizeEnvValue(item))
+    .filter((item) => {
+      if (!item || seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    });
+}
+
+function isRetryableProviderModelError(error) {
+  const lower = String(error?.message || "").toLowerCase();
+  return [400, 404, 422].includes(error?.statusCode) && (
+    lower.includes("model") ||
+    lower.includes("endpoint") ||
+    lower.includes("not found") ||
+    lower.includes("notopen") ||
+    lower.includes("invalid") ||
+    lower.includes("does not exist") ||
+    lower.includes("unknown")
+  );
+}
+
+const providerModelEnvHints = {
+  Seedance: "SEEDANCE_MODEL_ID",
+  Runway: "RUNWAY_MODEL_ID",
+  Luma: "LUMA_MODEL_ID",
+  Kling: "KLING_MODEL_ID",
+  Veo: "VEO_MODEL_ID",
+  PixVerse: "PIXVERSE_MODEL"
+};
+
 function requestId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
 }
@@ -1277,6 +1346,10 @@ function isOwnerAuth(auth = {}) {
   return auth.role === "CEO" || (ownerUserId && auth.userId === ownerUserId) || (ownerEmail && auth.email === ownerEmail);
 }
 
+function isGuestAuth(auth = {}) {
+  return auth.role === "GUEST" || auth.mode === "INVITED_GUEST";
+}
+
 function recordTenantId(record = {}) {
   return record.tenantId || record.userId || record.metadata?.userId || record.metadata?.tenantId || record.checks?.auth?.userId || "";
 }
@@ -1513,6 +1586,13 @@ function incrementUsage({ kind, request, auth }) {
 function validatePlan(kind, request, auth) {
   const plan = state.subscription.plan || "Free";
   const rules = usageRulesForPlan(plan);
+  if (isGuestAuth(auth)) {
+    return {
+      ok: true,
+      mode: "guest-limited-pass",
+      message: "Guest mode uses frontend category quotas and does not use plan limits."
+    };
+  }
   if (kind === "video" && !isOwnerAuth(auth)) {
     const used = usageCount({ kind, request, auth });
     const dailyLimit = envNumber(`PLAN_${plan.toUpperCase()}_DAILY_VIDEO_LIMIT`, rules.dailyVideoLimit);
@@ -1548,7 +1628,7 @@ function validatePlan(kind, request, auth) {
 function validateCredits(kind, auth = {}, payload = {}) {
   const cost = creditCostFor(kind, payload);
   const wallet = ledgerSnapshot();
-  if (isOwnerAuth(auth)) {
+  if (isOwnerAuth(auth) || isGuestAuth(auth)) {
     return {
       ok: true,
       cost: 0,
@@ -1557,8 +1637,10 @@ function validateCredits(kind, auth = {}, payload = {}) {
       available: wallet.availableCredits,
       held: wallet.heldCredits,
       wallet,
-      mode: "ceo-unmetered",
-      message: "CEO mode: internal SLT credits are not charged."
+      mode: isOwnerAuth(auth) ? "ceo-unmetered" : "guest-limited-pass",
+      message: isOwnerAuth(auth)
+        ? "CEO mode: internal SLT credits are not charged."
+        : "Guest mode: internal SLT credits are not charged."
     };
   }
   if (wallet.availableCredits < cost) {
@@ -3689,6 +3771,10 @@ function extractSeedanceOutputUrls(data = {}) {
     data.data?.videoUrl,
     data.data?.output_url,
     data.data?.outputUrl,
+    data.content?.video_url,
+    data.content?.videoUrl,
+    data.content?.output_url,
+    data.content?.outputUrl,
     data.result?.video_url,
     data.result?.videoUrl,
     data.result?.output_url,
@@ -3699,12 +3785,22 @@ function extractSeedanceOutputUrls(data = {}) {
     ...(Array.isArray(data.outputs) ? data.outputs : []),
     ...(Array.isArray(data.data?.output) ? data.data.output : []),
     ...(Array.isArray(data.data?.outputs) ? data.data.outputs : []),
+    ...(Array.isArray(data.content?.output) ? data.content.output : []),
+    ...(Array.isArray(data.content?.outputs) ? data.content.outputs : []),
     ...(Array.isArray(data.result?.output) ? data.result.output : []),
     ...(Array.isArray(data.result?.outputs) ? data.result.outputs : [])
   ]
     .flatMap((item) => [item?.video_url, item?.videoUrl, item?.url, item?.output_url, item?.outputUrl])
     .filter(Boolean);
   return [...directUrls, ...nestedUrls];
+}
+
+function extractProviderFailureMessage(data = {}, fallback = "Provider job failed.") {
+  const providerError = data.error || data.data?.error || data.result?.error || {};
+  const code = providerError.code || data.code || data.data?.code || data.result?.code || "";
+  const message = providerError.message || data.message || data.data?.message || data.result?.message || "";
+  if (code && message) return `${code}: ${message}`;
+  return message || code || fallback;
 }
 
 function byteplusVisionConfig() {
@@ -3847,18 +3943,47 @@ function isInternalStudioJobId(jobId = "") {
 }
 
 function seedanceModelCandidates() {
-  const seen = new Set();
-  return [
+  return uniqueEnvModels([
     "dreamina-seedance-2-0-260128",
     process.env.SEEDANCE_MODEL_ID,
     "dreamina-seedance-2-0-fast-260128",
     "seedance-1-0-pro-250528"
-  ].filter(Boolean).filter((model) => {
-    const key = String(model).trim();
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  ]);
+}
+
+function runwayModelCandidates() {
+  return uniqueEnvModels([
+    process.env.RUNWAY_MODEL_ID,
+    "gen4.5",
+    "gen4_turbo"
+  ]);
+}
+
+function lumaModelCandidates() {
+  return uniqueEnvModels([
+    process.env.LUMA_MODEL_ID,
+    "ray-2",
+    "ray-flash-2",
+    "ray-1-6"
+  ]);
+}
+
+function klingModelCandidates() {
+  return uniqueEnvModels([
+    process.env.KLING_MODEL_ID,
+    "kling-v1-6",
+    "kling-v3-standard",
+    "kling-v1"
+  ]);
+}
+
+function veoModelCandidates() {
+  return uniqueEnvModels([
+    process.env.VEO_MODEL_ID,
+    "veo-3.1-generate-preview",
+    "veo-3.0-generate-preview",
+    "veo-2.0-generate-001"
+  ]);
 }
 
 function buildSeedanceContent({ prompt, title, payload = {} }) {
@@ -3931,16 +4056,7 @@ async function callSeedanceVideo({ prompt, title, payload = {} }) {
       };
     } catch (error) {
       lastError = error;
-      const lower = String(error?.message || "").toLowerCase();
-      const retryableModelError = [400, 404].includes(error?.statusCode) && (
-        lower.includes("model") ||
-        lower.includes("endpoint") ||
-        lower.includes("not found") ||
-        lower.includes("notopen") ||
-        lower.includes("invalid") ||
-        lower.includes("does not exist")
-      );
-      if (!retryableModelError) break;
+      if (!isRetryableProviderModelError(error)) break;
     }
   }
   throw lastError || new Error("Seedance request failed.");
@@ -3993,32 +4109,43 @@ function veoBaseUrl() {
 }
 
 async function callVeoVideo({ prompt, title, payload = {} }) {
-  const model = process.env.VEO_MODEL_ID || "veo-3.1-generate-preview";
-  const data = await postJson(`${veoBaseUrl()}/models/${model}:predictLongRunning`, {
-    headers: { "x-goog-api-key": process.env.GEMINI_API_KEY },
-    body: {
-      instances: [
-        {
-          prompt: prompt || title || "Create a cinematic futuristic garage studio video shot."
-        }
-      ],
-      parameters: {
-        aspectRatio: videoAspectRatio(payload, process.env.VEO_ASPECT_RATIO || "16:9"),
-        durationSeconds: videoClipDuration(payload, "Veo", Number(process.env.VEO_DURATION || 8))
+  const apiKey = process.env.GEMINI_API_KEY || process.env.VEO_API_KEY || "";
+  const body = {
+    instances: [
+      {
+        prompt: prompt || title || "Create a cinematic futuristic garage studio video shot."
       }
-    },
-    timeoutMs: 90000
-  });
-  const providerJobId = extractProviderJobId(data) || data.name || null;
-  return {
-    providerJobId,
-    status: "processing",
-    previewUrl: null,
-    note: providerJobId
-      ? "Flow / Veo task submitted. Polling/output retrieval will use the operation id."
-      : "Flow / Veo task submitted. The provider did not return a recognizable operation id.",
-    raw: data
+    ],
+    parameters: {
+      aspectRatio: videoAspectRatio(payload, process.env.VEO_ASPECT_RATIO || "16:9"),
+      durationSeconds: videoClipDuration(payload, "Veo", Number(process.env.VEO_DURATION || 8))
+    }
   };
+  let lastError = null;
+  for (const model of veoModelCandidates()) {
+    try {
+      const data = await postJson(`${veoBaseUrl()}/models/${model}:predictLongRunning`, {
+        headers: { "x-goog-api-key": apiKey },
+        body,
+        timeoutMs: 90000
+      });
+      const providerJobId = extractProviderJobId(data) || data.name || null;
+      return {
+        providerJobId,
+        status: "processing",
+        previewUrl: null,
+        note: providerJobId
+          ? "Flow / Veo task submitted. Polling/output retrieval will use the operation id."
+          : "Flow / Veo task submitted. The provider did not return a recognizable operation id.",
+        raw: data,
+        model
+      };
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableProviderModelError(error)) break;
+    }
+  }
+  throw lastError || new Error("Veo request failed.");
 }
 
 function runwayBaseUrl() {
@@ -4026,29 +4153,41 @@ function runwayBaseUrl() {
 }
 
 async function callRunwayVideo({ prompt, title, payload = {} }) {
-  const data = await postJson(`${runwayBaseUrl()}/text_to_video`, {
-    headers: {
-      Authorization: `Bearer ${process.env.RUNWAY_API_KEY}`,
-      "X-Runway-Version": process.env.RUNWAY_API_VERSION || "2024-11-06"
-    },
-    body: {
-      model: payload.model || payload.modelId || process.env.RUNWAY_MODEL_ID || "gen4_turbo",
-      promptText: prompt || title || "Create a cinematic futuristic garage studio video shot.",
-      ratio: videoAspectRatio(payload, process.env.RUNWAY_RATIO || "1280:720").replace("16:9", "1280:720").replace("9:16", "720:1280"),
-      duration: videoClipDuration(payload, "Runway", Number(process.env.RUNWAY_DURATION || 5))
-    },
-    timeoutMs: 90000
-  });
-  const providerJobId = extractProviderJobId(data);
-  return {
-    providerJobId,
-    status: "processing",
-    previewUrl: null,
-    note: providerJobId
-      ? "Runway task submitted. Poll the provider task endpoint for the output."
-      : "Runway task submitted. The provider did not return a recognizable task id.",
-    raw: data
+  const requestBody = {
+    promptText: prompt || title || "Create a cinematic futuristic garage studio video shot.",
+    ratio: videoAspectRatio(payload, process.env.RUNWAY_RATIO || "1280:720").replace("16:9", "1280:720").replace("9:16", "720:1280"),
+    duration: videoClipDuration(payload, "Runway", Number(process.env.RUNWAY_DURATION || 5))
   };
+  const explicitModel = sanitizeEnvValue(payload.model || payload.modelId || "");
+  const models = explicitModel ? [explicitModel] : runwayModelCandidates();
+  let lastError = null;
+  for (const model of models) {
+    try {
+      const data = await postJson(`${runwayBaseUrl()}/text_to_video`, {
+        headers: {
+          Authorization: `Bearer ${process.env.RUNWAY_API_KEY}`,
+          "X-Runway-Version": process.env.RUNWAY_API_VERSION || "2024-11-06"
+        },
+        body: { ...requestBody, model },
+        timeoutMs: 90000
+      });
+      const providerJobId = extractProviderJobId(data);
+      return {
+        providerJobId,
+        status: "processing",
+        previewUrl: null,
+        note: providerJobId
+          ? "Runway task submitted. Poll the provider task endpoint for the output."
+          : "Runway task submitted. The provider did not return a recognizable task id.",
+        raw: data,
+        model
+      };
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableProviderModelError(error)) break;
+    }
+  }
+  throw lastError || new Error("Runway request failed.");
 }
 
 function lumaBaseUrl() {
@@ -4056,27 +4195,37 @@ function lumaBaseUrl() {
 }
 
 async function callLumaVideo({ prompt, title, payload = {} }) {
-  const data = await postJson(`${lumaBaseUrl()}/generations/video`, {
-    headers: { Authorization: `Bearer ${process.env.LUMA_API_KEY}` },
-    body: {
-      model: process.env.LUMA_MODEL_ID || "ray-2",
-      prompt: prompt || title || "Create a cinematic futuristic garage studio video shot.",
-      aspect_ratio: videoAspectRatio(payload, process.env.LUMA_ASPECT_RATIO || "16:9"),
-      duration: `${videoClipDuration(payload, "Luma", Number.parseInt(process.env.LUMA_DURATION || "5", 10) || 5)}s`,
-      resolution: process.env.LUMA_RESOLUTION || "720p"
-    },
-    timeoutMs: 90000
-  });
-  const providerJobId = extractProviderJobId(data);
-  return {
-    providerJobId,
-    status: "processing",
-    previewUrl: data.assets?.video || null,
-    note: providerJobId
-      ? "Luma task submitted. Poll the provider generation endpoint for the output."
-      : "Luma task submitted. The provider did not return a recognizable generation id.",
-    raw: data
+  const requestBody = {
+    prompt: prompt || title || "Create a cinematic futuristic garage studio video shot.",
+    aspect_ratio: videoAspectRatio(payload, process.env.LUMA_ASPECT_RATIO || "16:9"),
+    duration: `${videoClipDuration(payload, "Luma", Number.parseInt(process.env.LUMA_DURATION || "5", 10) || 5)}s`,
+    resolution: process.env.LUMA_RESOLUTION || "720p"
   };
+  let lastError = null;
+  for (const model of lumaModelCandidates()) {
+    try {
+      const data = await postJson(`${lumaBaseUrl()}/generations/video`, {
+        headers: { Authorization: `Bearer ${process.env.LUMA_API_KEY}` },
+        body: { ...requestBody, model },
+        timeoutMs: 90000
+      });
+      const providerJobId = extractProviderJobId(data);
+      return {
+        providerJobId,
+        status: "processing",
+        previewUrl: data.assets?.video || null,
+        note: providerJobId
+          ? "Luma task submitted. Poll the provider generation endpoint for the output."
+          : "Luma task submitted. The provider did not return a recognizable generation id.",
+        raw: data,
+        model
+      };
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableProviderModelError(error)) break;
+    }
+  }
+  throw lastError || new Error("Luma request failed.");
 }
 
 function base64UrlEncode(input) {
@@ -4105,29 +4254,41 @@ function klingJwt() {
 }
 
 async function callKlingVideo({ prompt, title, payload = {} }) {
-  const data = await postJson(`${klingBaseUrl()}/v1/videos/text2video`, {
-    headers: { Authorization: `Bearer ${klingJwt()}` },
-    body: {
-      model_name: payload.model || payload.modelId || process.env.KLING_MODEL_ID || "kling-v3-standard",
-      prompt: prompt || title || "Create a cinematic futuristic garage studio video shot.",
-      negative_prompt: process.env.KLING_NEGATIVE_PROMPT || "",
-      cfg_scale: Number(process.env.KLING_CFG_SCALE || 0.5),
-      mode: process.env.KLING_MODE || "std",
-      aspect_ratio: videoAspectRatio(payload, process.env.KLING_ASPECT_RATIO || "16:9"),
-      duration: String(videoClipDuration(payload, "Kling", Number(process.env.KLING_DURATION || 5)))
-    },
-    timeoutMs: 90000
-  });
-  const providerJobId = data.data?.task_id || data.task_id || extractProviderJobId(data);
-  return {
-    providerJobId,
-    status: providerJobId ? "processing" : "submitted",
-    previewUrl: null,
-    note: providerJobId
-      ? "Kling task submitted. Poll the Kling task endpoint for the output."
-      : "Kling request submitted. The provider did not return a recognizable task id.",
-    raw: data
+  const requestBody = {
+    prompt: prompt || title || "Create a cinematic futuristic garage studio video shot.",
+    negative_prompt: process.env.KLING_NEGATIVE_PROMPT || "",
+    cfg_scale: Number(process.env.KLING_CFG_SCALE || 0.5),
+    mode: process.env.KLING_MODE || "std",
+    aspect_ratio: videoAspectRatio(payload, process.env.KLING_ASPECT_RATIO || "16:9"),
+    duration: String(videoClipDuration(payload, "Kling", Number(process.env.KLING_DURATION || 5)))
   };
+  const explicitModel = sanitizeEnvValue(payload.model || payload.modelId || "");
+  const models = explicitModel ? [explicitModel] : klingModelCandidates();
+  let lastError = null;
+  for (const model of models) {
+    try {
+      const data = await postJson(`${klingBaseUrl()}/v1/videos/text2video`, {
+        headers: { Authorization: `Bearer ${klingJwt()}` },
+        body: { ...requestBody, model_name: model },
+        timeoutMs: 90000
+      });
+      const providerJobId = data.data?.task_id || data.task_id || extractProviderJobId(data);
+      return {
+        providerJobId,
+        status: providerJobId ? "processing" : "submitted",
+        previewUrl: null,
+        note: providerJobId
+          ? "Kling task submitted. Poll the Kling task endpoint for the output."
+          : "Kling request submitted. The provider did not return a recognizable task id.",
+        raw: data,
+        model
+      };
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableProviderModelError(error)) break;
+    }
+  }
+  throw lastError || new Error("Kling request failed.");
 }
 
 function pixverseBaseUrl() {
@@ -4709,11 +4870,12 @@ function readableProviderError(error, providerName) {
   if (error?.code === "seedance_missing_image") {
     return message;
   }
-  if (lower.includes("invalid model") || lower.includes("model not found") || lower.includes("does not exist")) {
-    return `${providerName} rejected the model ID. Update SEEDANCE_MODEL_ID in your .env (try dreamina-seedance-2-0-260128).`;
+  const envHint = providerModelEnvHints[providerName];
+  if (envHint && (lower.includes("invalid model") || lower.includes("model not found") || lower.includes("does not exist") || lower.includes("modelnotopen"))) {
+    return `${providerName} rejected the model ID. Update ${envHint} in your .env.`;
   }
-  if (error?.statusCode === 400 && providerName === "Seedance") {
-    return `${providerName} rejected the request (400): ${message || "Check model ID, duration (5-15s), and image URL for image-to-video."}`;
+  if ([400, 404].includes(error?.statusCode) && envHint) {
+    return `${providerName} rejected the request (${error.statusCode}): ${message || `Check ${envHint}, duration, and required media URLs.`}`;
   }
   if (lower.includes("quota") || lower.includes("billing")) {
     return `${providerName} is connected, but the account quota or billing limit stopped the request.`;
@@ -5105,8 +5267,10 @@ async function refreshLocalJobFromProvider(job) {
       });
     }
     if (jobStatus === "failed") {
-      const error = new Error("Seedance video failed.");
+      const error = new Error(extractProviderFailureMessage(data, "Seedance video failed."));
       error.code = "provider_job_failed";
+      error.provider = "Seedance";
+      error.providerJobId = job.providerJobId;
       return failAsyncJob({ job, error });
     }
   }
@@ -5923,6 +6087,7 @@ app.post("/api/login", async (request, response) => {
   const email = String(request.body?.email || "").trim();
   const username = String(request.body?.username || "").trim();
   const password = String(request.body?.password || "");
+  const inviteCode = String(request.body?.inviteCode || request.body?.code || "").trim();
   const configuredCeoEmail = process.env.CEO_EMAIL || "";
   const configuredCeoUsername = process.env.CEO_USERNAME || "";
   const attemptingCeo =
@@ -5966,6 +6131,43 @@ app.post("/api/login", async (request, response) => {
       session: { token, id: session.userId, email: session.email, username: session.username, role: session.role, mode: session.mode },
       user: state.user,
       message: "CEO session started."
+    });
+    return;
+  }
+
+  if (inviteCode) {
+    const inviteProfile = inviteGuestProfile(inviteCode);
+    if (!inviteProfile) {
+      response.status(401).json({ ok: false, code: "invalid_invite_code", error: "Invalid guest code.", readableError: "Código de invitado inválido." });
+      return;
+    }
+    const token = requestId("guest_session");
+    const session = {
+      token,
+      userId: `guest-${inviteProfile.username.toLowerCase()}`,
+      tenantId: `guest-${inviteProfile.username.toLowerCase()}`,
+      role: "GUEST",
+      email: `${inviteProfile.username.toLowerCase()}@guest.slt.local`,
+      username: inviteProfile.username,
+      inviteCode: inviteProfile.code,
+      mode: "INVITED_GUEST",
+      createdAt: new Date().toISOString()
+    };
+    sessions.set(token, session);
+    const user = {
+      id: session.userId,
+      tenantId: session.tenantId,
+      email: session.email,
+      username: session.username,
+      role: session.role,
+      mode: session.mode,
+      inviteCode: session.inviteCode
+    };
+    response.json({
+      ok: true,
+      session: { token, id: session.userId, tenantId: session.tenantId, email: session.email, username: session.username, role: session.role, mode: session.mode, inviteCode: session.inviteCode },
+      user,
+      message: "Guest session started."
     });
     return;
   }
@@ -6809,6 +7011,16 @@ app.delete("/api/assets/:assetId", async (request, response) => {
 app.post(["/api/forms/:kind", "/api/contact"], (request, response) => {
   const auth = getAuth(request);
   const kind = request.params.kind || request.body?.kind || "contact";
+  if (kind === "engineering" && !auth.ok) {
+    response.status(401).json({
+      ok: false,
+      auth,
+      code: "auth_required",
+      error: "Authentication required.",
+      readableError: "Engineering requests need user, CEO or guest access."
+    });
+    return;
+  }
   try {
     const form = savePlatformForm({ request, auth, kind, payload: request.body || {} });
     response.status(201).json({

@@ -1,15 +1,14 @@
 import { Outlet, useLocation } from 'react-router-dom';
 import Navbar from './Navbar';
+import SiteReport from './SiteReport';
 import './Layout.css';
 
 const NAV_LINKS = [
-  { path: '/', label: 'Home' },
-  { path: '/video', label: 'Video' },
-  { path: '/music', label: 'Music' },
-  { path: '/image', label: 'Image' },
-  { path: '/sound', label: 'Sound' },
-  { path: '/library', label: 'Library' },
-  { path: '/contact', label: 'Contact' },
+  { path: '/about', label: 'About Us' },
+  { path: '/sitemap', label: 'Mapa del sitio' },
+  { path: '/subscription', label: 'Planes' },
+  { path: '/careers', label: 'Careers' },
+  { path: '/help', label: 'Ayuda y soporte' },
 ];
 
 export default function Layout() {
@@ -23,6 +22,7 @@ export default function Layout() {
           <Outlet />
         </div>
       </main>
+      <SiteReport />
     </div>
   );
 }

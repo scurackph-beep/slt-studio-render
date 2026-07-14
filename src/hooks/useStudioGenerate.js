@@ -8,7 +8,9 @@ import {
   readableStudioMessage,
 } from '../lib/api-client';
 import { readStore, storageKeys, writeStore } from '../lib/storage';
+import { canUseGuestQuota, consumeGuestQuota, quotaKindFor } from '../lib/access-control';
 import { useStudio } from '../context/StudioContext';
+import { useAuth } from '../context/AuthContext';
 
 function persistGeneration(result) {
   const entry = result.data?.historyItem || result.data?.project;
@@ -55,6 +57,7 @@ function asyncStatusMessage({ kind, provider, status, attempt, maxAttempts }) {
 
 export function useStudioGenerate(kind) {
   const { refreshLedger } = useStudio();
+  const { session, isGuest, isSpy } = useAuth();
   const [assetUrl, setAssetUrl] = useState('');
   const [error, setError] = useState('');
   const [generating, setGenerating] = useState(false);
@@ -66,6 +69,23 @@ export function useStudioGenerate(kind) {
   const runGenerate = async ({ title, prompt, provider, providerLabel, tool, ...payload }) => {
     setAssetUrl('');
     setError('');
+    const quotaKind = quotaKindFor(kind, payload);
+    if (isSpy) {
+      const message = 'Spy mode is read-only. Create an account, log in, use CEO mode or enter a guest code to generate.';
+      setGenerating(false);
+      setJobStatus('blocked');
+      setStatus(message);
+      setError(message);
+      return { ok: false, status: 403, message };
+    }
+    if (isGuest && !canUseGuestQuota(quotaKind, session)) {
+      const message = `Guest quota reached for ${quotaKind}. This guest pass allows 2 ${quotaKind} requests.`;
+      setGenerating(false);
+      setJobStatus('blocked');
+      setStatus(message);
+      setError(message);
+      return { ok: false, status: 402, message };
+    }
     setGenerating(true);
     setJobId('');
     setJobStatus('submitting');
@@ -91,6 +111,7 @@ export function useStudioGenerate(kind) {
       }
 
       persistGeneration(result);
+      if (isGuest) consumeGuestQuota(quotaKind, session);
 
       const immediateUrl = extractOutputUrl(result);
       if (immediateUrl) setAssetUrl(immediateUrl);

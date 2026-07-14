@@ -6,12 +6,14 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "start": "SLT_ENV_DIR=\"/Users/sweetlittletrauma/Desktop/Sweet Little Trauma Produccion/PROYECTO_COMPLETO\" node server/api-proxy.js",
-    "start:prod": "npm run build && NODE_ENV=production node server/api-proxy.js",
+    "start": "NODE_ENV=production SLT_STATIC_DIR=./dist node server/api-proxy.js",
+    "start:local": "SLT_ENV_DIR=\"/Users/sweetlittletrauma/Desktop/Sweet Little Trauma Produccion/PROYECTO_COMPLETO\" node server/api-proxy.js",
+    "start:prod": "npm run build && npm run start",
     "deploy:hetzner": "bash scripts/deploy-hetzner.sh",
     "db:migrate": "node scripts/migrate-postgres.js",
     "db:verify-persistence": "node scripts/verify-supabase-persistence.js",
     "supabase:configure": "node scripts/configure-supabase.js",
+    "providers:verify": "node scripts/verify-providers.js",
     "test": "SLT_TEST_MODE=1 NODE_ENV=test node --test tests/*.test.js",
     "lint": "oxlint",
     "preview": "vite preview"

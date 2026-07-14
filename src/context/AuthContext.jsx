@@ -38,6 +38,8 @@ export function AuthProvider({ children }) {
 
   const value = useMemo(() => {
     const isCEO = session?.role === 'CEO' || user?.role === 'CEO';
+    const isGuest = session?.role === 'GUEST' || user?.role === 'GUEST' || session?.mode === 'INVITED_GUEST';
+    const isSpy = session?.role === 'SPY' || user?.role === 'SPY' || session?.mode === 'SPY_READ_ONLY';
     const isAuthenticated = Boolean(session?.token);
 
     return {
@@ -47,6 +49,8 @@ export function AuthProvider({ children }) {
       setSession,
       logout,
       isCEO,
+      isGuest,
+      isSpy,
       isAuthenticated,
     };
   }, [user, session, setUser, setSession, logout]);

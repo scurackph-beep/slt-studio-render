@@ -4,7 +4,7 @@ services:
     env: node
     plan: starter
     buildCommand: npm ci && npm run build
-    startCommand: npm start
+    startCommand: NODE_ENV=production SLT_STATIC_DIR=./dist node server/api-proxy.js
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
