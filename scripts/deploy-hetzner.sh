@@ -50,8 +50,17 @@ systemctl daemon-reload
 systemctl enable slt-studio
 systemctl restart slt-studio
 systemctl --no-pager status slt-studio | head -15
-curl -sS -H 'x-slt-site-gate: Dientito2032' http://127.0.0.1:3000/health | head -c 200
-echo
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -sS --max-time 8 -H 'x-slt-site-gate: Dientito2032' http://127.0.0.1:3000/health | head -c 200; then
+    echo
+    break
+  fi
+  if [[ "\$attempt" == "10" ]]; then
+    echo "ERROR: local health check did not respond after restart."
+    exit 1
+  fi
+  sleep 1
+done
 EOF
 
 echo "==> Done. Open ${DOMAIN} and enter gate key: Dientito2032"
