@@ -24,9 +24,9 @@ const port = Number(process.env.PORT || 3000);
 const projectDir = dirname(fileURLToPath(import.meta.url));
 const staticDir = process.env.SLT_STATIC_DIR || resolve(projectDir, "../dist");
 const assetStorageDir = process.env.SLT_STORAGE_DIR || resolve(projectDir, "../storage/assets");
-const supabaseStorage = createSupabaseStorageService(process.env);
-const supabaseAdmin = createSupabaseAdminClient(process.env);
-const supabaseAuth = createSupabaseUserClient(process.env);
+let supabaseStorage;
+let supabaseAdmin;
+let supabaseAuth;
 
 function loadEnvFile(filename) {
   const filePath = typeof filename === "string" && filename.includes("/")
@@ -54,6 +54,9 @@ const loadedEnvFiles = [".env", ".env.local"].filter(loadEnvFile);
 ].filter(Boolean).forEach((filePath) => loadEnvFile(filePath));
 
 const startupInfrastructureReadiness = assertProductionInfrastructureReady(process.env);
+supabaseStorage = createSupabaseStorageService(process.env);
+supabaseAdmin = createSupabaseAdminClient(process.env);
+supabaseAuth = createSupabaseUserClient(process.env);
 
 function envList(key) {
   return String(process.env[key] || "")

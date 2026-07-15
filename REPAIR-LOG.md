@@ -2070,3 +2070,20 @@ npm run deploy:hetzner
 - `npm run lint`: OK con warnings no bloqueantes preexistentes.
 
 El dominio debe abrir primero el portal de acceso. Invitado con codigo valido debe entrar al sitio y ver cuotas en `REPORTE`. Espia debe poder navegar sin crear contenido.
+
+## Hotfix inicializacion Supabase despues de .env - 2026-07-14
+
+### Problema
+
+El health remoto confirmaba variables de Supabase presentes, pero `auth.supabaseConfigured` y `storage.kind` podian reportar valores locales porque los clientes de Supabase se creaban antes de cargar `.env`.
+
+### Cambio aplicado
+
+- `server/api-proxy.js`:
+  - `supabaseStorage`, `supabaseAdmin` y `supabaseAuth` ahora se inicializan despues de cargar `.env`.
+
+### Verificacion
+
+- `node --check server/api-proxy.js`: OK.
+- `npm run build`: OK.
+- `npm run lint`: OK con warnings no bloqueantes preexistentes.
