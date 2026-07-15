@@ -60,7 +60,14 @@ function formatElapsed(ms) {
   return `${minutes}:${seconds}`;
 }
 
-export function useVideoChat({ initialPrompt = '', directorBrief = '', referenceAsset = null, durationSeconds = 10 } = {}) {
+export function useVideoChat({
+  initialPrompt = '',
+  directorBrief = '',
+  referenceAsset = null,
+  durationSeconds = 10,
+  resolution = '4K',
+  frameRate = '24 fps',
+} = {}) {
   const { session, isAuthenticated, isCEO, isGuest, isSpy } = useAuth();
   const { credits, refreshLedger } = useStudio();
   const [messages, setMessages] = useState([
@@ -184,6 +191,11 @@ export function useVideoChat({ initialPrompt = '', directorBrief = '', reference
         title: 'SLT Project',
         durationSeconds: renderDuration,
         videoDurationSeconds: renderDuration,
+        resolution,
+        outputResolution: resolution,
+        targetResolution: resolution,
+        frameRate,
+        fps: Number.parseInt(frameRate, 10) || 24,
         referenceAssets: referenceAsset ? [referenceAsset] : [],
         referenceAssetIds: referenceAsset ? [referenceAsset.id] : [],
         referenceVideoUrl: referenceAsset?.contentType?.startsWith('video/') ? referenceAsset.publicUrl : '',

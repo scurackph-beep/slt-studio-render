@@ -30,6 +30,46 @@ const DEFAULT_PROVIDERS = [
   { name: 'FFmpeg', model: 'Local utility', status: 'Internal' },
 ];
 
+const AUDIO_SECTIONS = [
+  {
+    id: 'voice',
+    title: 'Voice',
+    description: 'Narration, voice generation, cloning, dubbing and lip-sync source audio.',
+    tools: ['Voice', 'Clone', 'Narration', 'Dubbing'],
+    provider: 'ElevenLabs',
+  },
+  {
+    id: 'sfx',
+    title: 'Sound FX',
+    description: 'Foley, impacts, risers, glitches, room tone and cinematic atmosphere.',
+    tools: ['FX', 'Foley', 'Soundscapes'],
+    provider: 'Stability Audio',
+  },
+  {
+    id: 'music-bed',
+    title: 'Music Bed',
+    description: 'Underscore, rhythm bed, emotional cue and reference music layer.',
+    tools: ['Mix'],
+    provider: 'MiniMax Speech',
+  },
+  {
+    id: 'cleanup',
+    title: 'Cleanup / Master',
+    description: 'Noise cleanup, speech clarity, balance, loudness and final mastering.',
+    tools: ['Cleanup', 'Mix', 'Master'],
+    provider: 'Moises',
+  },
+];
+
+const AUDIO_MIXER_LAYERS = [
+  { name: 'Voice', level: '-1.0 dB', pan: 'C', color: 'voice' },
+  { name: 'Dialogue Clean', level: '-2.5 dB', pan: 'C', color: 'clean' },
+  { name: 'Sound FX', level: '-4.0 dB', pan: 'L/R', color: 'sfx' },
+  { name: 'Foley / Room', level: '-7.0 dB', pan: 'Wide', color: 'foley' },
+  { name: 'Music Bed', level: '-9.0 dB', pan: 'Stereo', color: 'music' },
+  { name: 'Master Bus', level: '-0.8 dB', pan: 'C', color: 'master' },
+];
+
 export default function SoundStudio() {
   const audioRef = useRef(null);
   const uploadSectionRef = useRef(null);
@@ -90,6 +130,12 @@ export default function SoundStudio() {
     });
   };
 
+  const selectAudioSection = (section) => {
+    setActiveTool(section.tools[0]);
+    setActiveProvider(section.provider);
+    setPrompt((current) => current || `${section.title}: ${section.description}`);
+  };
+
   return (
     <div className="studio studio-container">
       <aside className="studio-rail">
@@ -148,6 +194,42 @@ export default function SoundStudio() {
             [ {playing ? 'Pause' : 'Play'} ]
           </button>
         </div>
+
+        <section className="sound-section-grid" aria-label="Audio sections">
+          {AUDIO_SECTIONS.map((section) => (
+            <button
+              key={section.id}
+              type="button"
+              className={`sound-section-card ${section.tools.includes(activeTool) ? 'is-active' : ''}`}
+              onClick={() => selectAudioSection(section)}
+            >
+              <span>{section.title}</span>
+              <p>{section.description}</p>
+              <small>{section.tools.join(' / ')}</small>
+            </button>
+          ))}
+        </section>
+
+        <section className="audio-editor-panel" aria-label="Audio editor mixer">
+          <div className="video-editor-header">
+            <div>
+              <p className="studio-aside-label">Audio Editor</p>
+              <h2>Voice, FX, music and master lanes</h2>
+            </div>
+            <span>{activeTool} · {activeProvider}</span>
+          </div>
+          <div className="audio-mixer-list">
+            {AUDIO_MIXER_LAYERS.map((layer) => (
+              <div key={layer.name} className={`audio-mixer-lane audio-mixer-lane--${layer.color}`}>
+                <span>{layer.name}</span>
+                <div aria-hidden="true">
+                  <i />
+                </div>
+                <small>{layer.level} · {layer.pan}</small>
+              </div>
+            ))}
+          </div>
+        </section>
 
         <div ref={uploadSectionRef}>
           <ReferenceUploader

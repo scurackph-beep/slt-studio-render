@@ -39,6 +39,18 @@ const DIRECTOR_FIELDS = [
   },
 ];
 
+const RESOLUTION_OPTIONS = ['1080p', '2K', '4K', '8K'];
+const FRAME_RATE_OPTIONS = ['24 fps', '30 fps', '60 fps'];
+
+const EDITOR_LANES = [
+  { name: 'Video A', detail: 'Main render / camera pass', active: true },
+  { name: 'Motion Ref', detail: 'Movement, pose or scene transfer input', active: true },
+  { name: 'Voice / Lip Sync', detail: 'Dialogue, song or mouth sync layer', active: false },
+  { name: 'Sound FX', detail: 'Foley, impacts, atmosphere and transitions', active: false },
+  { name: 'Music Bed', detail: 'Score, song, rhythm or emotional bed', active: false },
+  { name: 'Color Grade', detail: 'Look, contrast, grain and finishing pass', active: true },
+];
+
 const DEFAULT_DIRECTOR = {
   camera: 'Steadicam',
   shot: 'Medium shot',
@@ -46,6 +58,8 @@ const DEFAULT_DIRECTOR = {
   color: 'Natural cinema',
   lens: '35mm',
   intention: 'Cinematic',
+  resolution: '4K',
+  frameRate: '24 fps',
   duration: '10',
   sceneStart: '',
   sceneEnd: '',
@@ -81,6 +95,8 @@ export default function VideoStudio() {
     `Color: ${director.color}`,
     `Lens: ${director.lens}`,
     `Intention: ${director.intention}`,
+    `Target resolution: ${director.resolution}`,
+    `Frame rate: ${director.frameRate}`,
     `Scene starts: ${director.sceneStart || 'define from prompt'}`,
     `Scene ends: ${director.sceneEnd || 'define from prompt'}`,
     `Wardrobe / styling: ${director.wardrobe || 'define from prompt'}`,
@@ -105,6 +121,8 @@ export default function VideoStudio() {
     directorBrief,
     referenceAsset,
     durationSeconds: Number(director.duration) || 10,
+    resolution: director.resolution,
+    frameRate: director.frameRate,
   });
 
   const refreshLibrary = async () => {
@@ -202,6 +220,22 @@ export default function VideoStudio() {
                 <option value="60">60 seconds</option>
               </select>
             </label>
+            <label className="video-director-field">
+              <span>Resolution</span>
+              <select value={director.resolution} onChange={(event) => updateDirector('resolution', event.target.value)}>
+                {RESOLUTION_OPTIONS.map((option) => (
+                  <option key={option}>{option}</option>
+                ))}
+              </select>
+            </label>
+            <label className="video-director-field">
+              <span>Frame Rate</span>
+              <select value={director.frameRate} onChange={(event) => updateDirector('frameRate', event.target.value)}>
+                {FRAME_RATE_OPTIONS.map((option) => (
+                  <option key={option}>{option}</option>
+                ))}
+              </select>
+            </label>
           </section>
 
           <section className="video-scene-grid" aria-label="Scene brief">
@@ -229,6 +263,40 @@ export default function VideoStudio() {
                 placeholder="Wardrobe, hair, styling, props, set design..."
               />
             </label>
+          </section>
+
+          <section className="video-editor-panel" aria-label="Cinema editor">
+            <div className="video-editor-header">
+              <div>
+                <p className="studio-aside-label">Cinema Editor</p>
+                <h2>Timeline, layers and finishing controls</h2>
+              </div>
+              <span>{director.resolution} · {director.frameRate}</span>
+            </div>
+
+            <div className="video-editor-preview">
+              <div className="video-editor-viewfinder" aria-hidden="true">
+                <span>Preview monitor</span>
+              </div>
+              <div className="video-editor-export">
+                <button type="button" className="video-chip">Cut</button>
+                <button type="button" className="video-chip">Grade</button>
+                <button type="button" className="video-chip">Sync</button>
+                <button type="button" className="video-chip">Export {director.resolution}</button>
+              </div>
+            </div>
+
+            <div className="video-editor-timeline">
+              {EDITOR_LANES.map((lane, index) => (
+                <div key={lane.name} className={`video-editor-lane ${lane.active ? 'is-active' : ''}`}>
+                  <span>{lane.name}</span>
+                  <div>
+                    <i style={{ width: `${44 + index * 7}%` }} />
+                  </div>
+                  <small>{lane.detail}</small>
+                </div>
+              ))}
+            </div>
           </section>
 
           <div className="video-chat-messages" aria-live="polite">

@@ -2018,6 +2018,192 @@
   text-transform: uppercase;
 }
 
+.video-editor-panel,
+.audio-editor-panel {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.34);
+}
+
+.video-editor-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.video-editor-header h2 {
+  margin: 0;
+  font-size: clamp(1.05rem, 2vw, 1.45rem);
+  line-height: 1.1;
+}
+
+.video-editor-header span {
+  color: var(--ink-muted);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.video-editor-preview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.video-editor-viewfinder {
+  min-height: 150px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background:
+    linear-gradient(90deg, rgba(255,255,255,0.08) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(255,255,255,0.06) 1px, transparent 1px),
+    radial-gradient(circle at 50% 48%, rgba(255,255,255,0.16), transparent 38%),
+    #050505;
+  background-size: 34px 34px, 34px 34px, auto, auto;
+}
+
+.video-editor-viewfinder span {
+  color: rgba(255,255,255,0.74);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.video-editor-export {
+  display: grid;
+  align-content: center;
+  gap: 8px;
+}
+
+.video-editor-timeline,
+.audio-mixer-list {
+  display: grid;
+  gap: 8px;
+}
+
+.video-editor-lane,
+.audio-mixer-lane {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr) 190px;
+  align-items: center;
+  gap: 10px;
+}
+
+.video-editor-lane > span,
+.audio-mixer-lane > span {
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.video-editor-lane > div,
+.audio-mixer-lane > div {
+  height: 22px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(0,0,0,0.08);
+}
+
+.video-editor-lane i,
+.audio-mixer-lane i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  opacity: 0.42;
+}
+
+.video-editor-lane.is-active i {
+  opacity: 0.78;
+}
+
+.video-editor-lane small,
+.audio-mixer-lane small {
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.sound-section-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.sound-section-card {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255,255,255,0.34);
+  text-align: left;
+  transition: transform var(--fade), border-color var(--fade), background var(--fade), box-shadow var(--fade);
+}
+
+.sound-section-card:hover,
+.sound-section-card.is-active {
+  transform: translateY(-2px);
+  border-color: var(--line-strong);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-lift);
+}
+
+.sound-section-card span {
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.sound-section-card p {
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.sound-section-card small {
+  color: var(--ink-subtle);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.audio-mixer-lane i {
+  width: 62%;
+}
+
+.audio-mixer-lane--voice i,
+.audio-mixer-lane--clean i {
+  background: var(--rainbow-cyan);
+}
+
+.audio-mixer-lane--sfx i,
+.audio-mixer-lane--foley i {
+  background: var(--rainbow-yellow);
+}
+
+.audio-mixer-lane--music i {
+  background: var(--rainbow-violet);
+}
+
+.audio-mixer-lane--master i {
+  width: 88%;
+  background: var(--accent);
+}
+
 /* ─── Virtual Assist ─── */
 .assist-page {
   min-height: calc(100vh - var(--navbar-height));
@@ -2233,6 +2419,10 @@
   .video-director-controls {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .sound-section-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 680px) {
@@ -2249,6 +2439,13 @@
   }
 
   .subscription-cost-table div {
+    grid-template-columns: 1fr;
+  }
+
+  .video-editor-preview,
+  .video-editor-lane,
+  .audio-mixer-lane,
+  .sound-section-grid {
     grid-template-columns: 1fr;
   }
 }
