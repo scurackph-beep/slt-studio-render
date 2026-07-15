@@ -5,7 +5,7 @@
   right: 0;
   z-index: 100;
   height: var(--navbar-height);
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--surface);
   border-bottom: 1px solid var(--line);
   backdrop-filter: blur(18px);
   box-shadow: 0 8px 30px rgba(31, 23, 40, 0.04);
@@ -86,10 +86,10 @@
 }
 
 .navbar-preferences select {
-  max-width: 110px;
+  max-width: 148px;
   height: 28px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--control-radius);
   background: var(--surface-strong);
   color: var(--ink-muted);
   font-size: 9px;
@@ -121,7 +121,7 @@
   min-height: 38px;
   padding: 0 14px 0 10px;
   border: 1px solid var(--line-strong);
-  border-radius: 999px;
+  border-radius: var(--control-radius);
   background: var(--surface-strong);
   color: var(--ink-muted);
   transition: transform var(--fade), border-color var(--fade), box-shadow var(--fade), color var(--fade);
@@ -154,6 +154,45 @@
   padding: 0;
   border-radius: 50%;
   justify-content: center;
+}
+
+:root[data-theme='pop-art'] .navbar {
+  border-bottom: 3px solid var(--ink);
+  backdrop-filter: none;
+  box-shadow: 0 6px 0 rgba(17, 17, 17, 0.9);
+}
+
+:root[data-theme='pop-art'] .navbar-link,
+:root[data-theme='pop-art'] .navbar-preferences select,
+:root[data-theme='pop-art'] .navbar-account-link,
+:root[data-theme='pop-art'] .navbar-credits {
+  border: 2px solid var(--ink);
+  box-shadow: 3px 3px 0 var(--ink);
+}
+
+:root[data-theme='bangkok'] .navbar {
+  border-bottom-color: rgba(35, 255, 242, 0.24);
+  box-shadow: 0 18px 56px rgba(255, 63, 200, 0.08);
+}
+
+:root[data-theme='bangkok'] .navbar-link.is-active {
+  text-shadow: 0 0 16px rgba(35, 255, 242, 0.5);
+}
+
+:root[data-theme='fifa-2026'] .navbar {
+  background:
+    linear-gradient(90deg, rgba(140, 255, 95, 0.1), rgba(247, 255, 249, 0.035)),
+    var(--surface);
+}
+
+:root[data-theme='parravicini'] .navbar {
+  background:
+    repeating-linear-gradient(90deg, rgba(25, 21, 15, 0.025) 0 1px, transparent 1px 28px),
+    var(--surface);
+}
+
+:root[data-theme='tango-noir'] .navbar {
+  border-bottom-color: rgba(227, 22, 45, 0.28);
 }
 
 .navbar-profile-dot {
@@ -227,22 +266,33 @@
 @media (max-width: 640px) {
   .navbar-inner {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr);
     gap: 14px;
+  }
+
+  .navbar-brand {
+    min-width: 0;
   }
 
   .navbar-links {
     grid-column: 1 / -1;
     justify-content: flex-start;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    width: 100%;
     order: 3;
   }
 
   .navbar-account {
-    justify-self: end;
+    justify-self: stretch;
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 10px;
   }
 
   .navbar-preferences {
-    grid-column: 1 / -1;
+    flex: 1 1 100%;
     order: 4;
     width: 100%;
   }
@@ -254,5 +304,14 @@
   .navbar-preferences select {
     width: 100%;
     max-width: none;
+  }
+
+  .navbar-account-link {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .navbar-account-text {
+    max-width: min(180px, 54vw);
   }
 }

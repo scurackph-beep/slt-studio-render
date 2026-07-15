@@ -1,14 +1,13 @@
 export const THEME_OPTIONS = [
-  { id: 'atelier', label: 'Atelier Light' },
-  { id: 'noir', label: 'Noir Glass' },
-  { id: 'porcelain', label: 'Porcelain Glow' },
-  { id: 'graphite', label: 'Graphite Film' },
-  { id: 'ultraviolet', label: 'Ultraviolet' },
-  { id: 'oxygen', label: 'Oxygen White' },
-  { id: 'ember', label: 'Ember Cut' },
-  { id: 'emerald', label: 'Emerald Lab' },
-  { id: 'royal', label: 'Royal Blue' },
-  { id: 'mono', label: 'Mono Editorial' },
+  { id: 'garage', label: 'Garage Future' },
+  { id: 'dark-core', label: 'Dark Core' },
+  { id: 'white-porcelain', label: 'White Porcelain' },
+  { id: 'argentina', label: 'Argentina' },
+  { id: 'pop-art', label: 'Pop Art' },
+  { id: 'bangkok', label: 'Bangkok Neon' },
+  { id: 'fifa-2026', label: 'FIFA 2026' },
+  { id: 'parravicini', label: 'Parravicini' },
+  { id: 'tango-noir', label: 'Tango Noir' },
 ];
 
 export const LANGUAGE_OPTIONS = [
@@ -29,8 +28,10 @@ const THEME_KEY = 'slt-ui-theme';
 const LANGUAGE_KEY = 'slt-ui-language';
 
 export function storedTheme() {
-  if (typeof window === 'undefined') return 'atelier';
-  return window.localStorage.getItem(THEME_KEY) || 'atelier';
+  if (typeof window === 'undefined') return 'garage';
+  const savedTheme = window.localStorage.getItem(THEME_KEY);
+  if (THEME_OPTIONS.some((option) => option.id === savedTheme)) return savedTheme;
+  return 'garage';
 }
 
 export function storedLanguage() {
@@ -38,10 +39,11 @@ export function storedLanguage() {
   return window.localStorage.getItem(LANGUAGE_KEY) || 'en';
 }
 
-export function applyTheme(themeId = 'atelier') {
+export function applyTheme(themeId = 'garage') {
   if (typeof document === 'undefined') return;
-  document.documentElement.dataset.theme = themeId;
-  window.localStorage.setItem(THEME_KEY, themeId);
+  const nextTheme = THEME_OPTIONS.some((option) => option.id === themeId) ? themeId : 'garage';
+  document.documentElement.dataset.theme = nextTheme;
+  window.localStorage.setItem(THEME_KEY, nextTheme);
 }
 
 export function applyLanguage(languageId = 'en') {

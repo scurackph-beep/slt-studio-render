@@ -94,8 +94,8 @@ const INVITE_CODES = envList("SLT_INVITE_CODES").map((entry, index) => {
 }).filter((entry) => entry.code);
 
 function secureEqualText(a = "", b = "") {
-  const left = Buffer.from(String(a || "").trim().normalize("NFC"));
-  const right = Buffer.from(String(b || "").trim().normalize("NFC"));
+  const left = Buffer.from(String(a || "").trim().normalize("NFC").toLowerCase());
+  const right = Buffer.from(String(b || "").trim().normalize("NFC").toLowerCase());
   return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
 
