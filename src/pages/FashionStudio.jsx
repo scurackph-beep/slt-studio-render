@@ -46,7 +46,7 @@ export default function FashionStudio() {
 
   const handleGenerate = () => {
     if (!hasCredits && !isCEO) {
-      alert('Iniciá sesión y agregá créditos para continuar.');
+      alert('Log in and add credits to continue.');
       return;
     }
 
@@ -72,7 +72,7 @@ export default function FashionStudio() {
 
   const handleSaveProject = () => {
     if (!assetUrl) {
-      alert('Generá un look antes de guardar el proyecto.');
+      alert('Generate a look before saving the project.');
       return;
     }
     const projects = readStore(storageKeys.projects, []);

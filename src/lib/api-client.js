@@ -28,12 +28,12 @@ export function getApiBase() {
 
 export function readableStudioMessage(message = '') {
   const text = String(message || '');
-  if (/authentication required|auth_required|please log in|unauthorized/i.test(text)) return 'Iniciá sesión desde Profile antes de usar esta acción.';
-  if (/PAYMENT_REQUIRED|not enough credits|insufficient credits/i.test(text)) return 'No tenés créditos suficientes para esta acción.';
-  if (/provider not connected|add api key/i.test(text)) return 'Proveedor no conectado. Falta API key o configuración.';
-  if (/stripe setup required/i.test(text)) return 'Stripe todavía no está configurado para este flujo.';
-  if (/missing api key/i.test(text)) return 'Falta pegar la API key en el .env.';
-  if (/missing endpoint|missing config/i.test(text)) return 'Falta completar URL o configuración.';
+  if (/authentication required|auth_required|please log in|unauthorized/i.test(text)) return 'Log in from Profile before using this action.';
+  if (/PAYMENT_REQUIRED|not enough credits|insufficient credits/i.test(text)) return 'You do not have enough credits for this action.';
+  if (/provider not connected|add api key/i.test(text)) return 'Provider not connected. API key or configuration is missing.';
+  if (/stripe setup required/i.test(text)) return 'Stripe is not configured for this flow yet.';
+  if (/missing api key/i.test(text)) return 'Missing API key in the .env file.';
+  if (/missing endpoint|missing config/i.test(text)) return 'Missing URL or configuration.';
   return text || 'Something went wrong. Try again.';
 }
 
@@ -71,7 +71,7 @@ export async function apiRequest(path, options = {}) {
         data,
         message: readableStudioMessage(
           data.code === 'site_gate_required'
-            ? 'Acceso privado. Ingresá la clave del sitio.'
+            ? 'Private access. Enter the site code.'
             : (data.readableError || data.error || data.warning || 'PAYMENT_REQUIRED'),
         ),
       };
@@ -94,14 +94,14 @@ export async function apiRequest(path, options = {}) {
         ok: false,
         online: true,
         error,
-        message: 'El proveedor tardó demasiado. La app liberó el botón para que puedas cambiar proveedor o probar de nuevo.',
+        message: 'The provider took too long. The app released the button so you can change provider or try again.',
       };
     }
     return {
       ok: false,
       online: false,
       error,
-      message: 'Proveedor no conectado. Revisá la API key, URL o el servidor local.',
+      message: 'Provider not connected. Check the API key, URL or local server.',
     };
   } finally {
     if (timeout) globalThis.clearTimeout(timeout);

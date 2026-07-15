@@ -53,12 +53,12 @@ export default function EngineeringLab() {
       return;
     }
     if (!isAuthenticated) {
-      setStatus('Iniciá sesión desde Profile antes de enviar la solicitud.');
+      setStatus('Log in from Profile before sending an Engineering request.');
       return;
     }
 
     setBusy(true);
-    setStatus('Enviando solicitud al queue de Engineering...');
+    setStatus('Sending request to the Engineering queue...');
 
     const result = await apiRequest('/api/forms/engineering', {
       method: 'POST',

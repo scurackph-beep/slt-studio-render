@@ -3,6 +3,61 @@ import { Link } from 'react-router-dom';
 import { submitPlatformForm } from '../lib/api-client';
 import './StudioLayout.css';
 
+const SUBSCRIPTION_PLANS = [
+  {
+    name: 'Free',
+    price: '$0',
+    credits: '30 credits',
+    video: 'Up to 10 seconds, limited daily testing',
+    includes: ['Browse the platform', 'Preview workflows', 'Use bought credits for short tests'],
+  },
+  {
+    name: 'Pro',
+    price: '$59 / month',
+    credits: '1,500 credits / month',
+    video: 'Up to 10 seconds per render',
+    includes: ['Image, sound and video creation', 'Saved library', 'Provider fallback routing'],
+  },
+  {
+    name: 'Studio',
+    price: '$149 / month',
+    credits: '5,000 credits / month',
+    video: 'Up to 15 seconds per render',
+    includes: ['Higher daily video volume', 'Music and sound workflows', 'Production history'],
+  },
+  {
+    name: 'Business',
+    price: '$299 / month',
+    credits: '12,000 credits / month',
+    video: 'Up to 30 seconds per render',
+    includes: ['Team-ready production use', 'More daily video capacity', 'Priority support queue'],
+  },
+  {
+    name: 'Creator',
+    price: '$400 / month',
+    credits: '20,000 credits / month',
+    video: 'Up to 60 seconds per render',
+    includes: ['Advanced creator allowance', 'Film-style workflows', 'Long-form planning support'],
+  },
+];
+
+const CREDIT_PACKS = [
+  { name: '500 extra credits', price: '$30' },
+  { name: '1,000 extra credits', price: '$49' },
+  { name: '3,000 extra credits', price: '$129' },
+  { name: '7,500 extra credits', price: '$299' },
+  { name: '15,000 extra credits', price: '$549' },
+];
+
+const VIDEO_COSTS = [
+  { provider: 'Runway Gen-4 Turbo', estimate: '5 credits / second', minimum: '25 credits minimum' },
+  { provider: 'Runway Gen-4.5', estimate: '12 credits / second', minimum: '60 credits minimum' },
+  { provider: 'Seedance', estimate: '12 credits / second', minimum: '60 credits minimum' },
+  { provider: 'Kling 3.0 Standard', estimate: '8 credits / second', minimum: '40 credits minimum' },
+  { provider: 'Kling Omni', estimate: '14 credits / second', minimum: '70 credits minimum' },
+  { provider: 'OmniHuman', estimate: '18 credits / second', minimum: '90 credits minimum' },
+];
+
 const PAGES = {
   about: {
     eyebrow: 'About Us',
@@ -26,10 +81,10 @@ const PAGES = {
     eyebrow: 'Terms',
     title: 'Terms and Conditions.',
     body: 'This page is ready for the final legal terms, including acceptable use, subscription rules, credits, refunds, generated content, licenses and service availability.',
-    actions: [{ label: 'Planes', to: '/subscription' }],
+    actions: [{ label: 'Plans', to: '/subscription' }],
   },
   sitemap: {
-    eyebrow: 'Mapa del sitio',
+    eyebrow: 'Site Map',
     title: 'Main areas.',
     body: 'Home, Image Studio, Video Studio, Music Studio, Sound FX Studio, Library, Fashion Studio, Engineering Lab, Virtual Assist, Billing, Profile, Settings, Help and Contact.',
     actions: [
@@ -43,10 +98,11 @@ const PAGES = {
     ],
   },
   subscription: {
-    eyebrow: 'Planes',
+    eyebrow: 'Subscription',
     title: 'Plans and credits.',
-    body: 'This section connects to Stripe through the backend. The current backend already includes subscription, billing, checkout and credit-pack routes.',
+    body: 'Plans combine monthly credits with optional credit packs. CEO and invited guest modes skip SLT billing, but still consume credits directly from provider accounts.',
     actions: [{ label: 'Open Studio', to: '/' }],
+    isSubscription: true,
   },
   profile: {
     eyebrow: 'Profile',
@@ -58,10 +114,10 @@ const PAGES = {
     eyebrow: 'Settings',
     title: 'Studio settings.',
     body: 'This area is prepared for language, theme, default providers, API routing preferences, safety settings and storage options.',
-    actions: [{ label: 'Ayuda y soporte', to: '/help' }],
+    actions: [{ label: 'Help and Support', to: '/help' }],
   },
   help: {
-    eyebrow: 'Ayuda y soporte',
+    eyebrow: 'Help and Support',
     title: 'How can we help?',
     body: 'Use the Home assistant to describe what you want. The system will guide you to the right studio, action and provider. You can also send a support request from Contact.',
     actions: [{ label: 'Go Home', to: '/' }, { label: 'Contact', to: '/contact?kind=support' }],
@@ -79,6 +135,58 @@ const PAGES = {
     actions: [{ label: 'Back Home', to: '/' }],
   },
 };
+
+function SubscriptionDetails() {
+  return (
+    <div className="subscription-detail">
+      <div className="subscription-plan-grid">
+        {SUBSCRIPTION_PLANS.map((plan) => (
+          <article key={plan.name} className="subscription-card">
+            <span className="subscription-plan-name">{plan.name}</span>
+            <strong>{plan.price}</strong>
+            <p>{plan.credits}</p>
+            <small>{plan.video}</small>
+            <ul>
+              {plan.includes.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </article>
+        ))}
+      </div>
+
+      <div className="subscription-info-grid">
+        <section className="subscription-panel">
+          <p className="studio-aside-label">Extra credit packs</p>
+          <div className="subscription-pack-list">
+            {CREDIT_PACKS.map((pack) => (
+              <span key={pack.name}>
+                <strong>{pack.name}</strong>
+                {pack.price}
+              </span>
+            ))}
+          </div>
+        </section>
+
+        <section className="subscription-panel">
+          <p className="studio-aside-label">Video credit estimates</p>
+          <div className="subscription-cost-table">
+            {VIDEO_COSTS.map((row) => (
+              <div key={row.provider}>
+                <span>{row.provider}</span>
+                <span>{row.estimate}</span>
+                <span>{row.minimum}</span>
+              </div>
+            ))}
+          </div>
+          <p className="subscription-note">
+            Final cost is calculated server-side before the job is queued. Failed provider jobs release reserved credits automatically.
+          </p>
+        </section>
+      </div>
+    </div>
+  );
+}
 
 function CareersApplicationForm() {
   const [name, setName] = useState('');
@@ -164,11 +272,12 @@ export default function InfoPage({ type = 'about' }) {
   const page = PAGES[type] || PAGES.about;
 
   return (
-    <section className="info-page">
+    <section className={`info-page ${page.isSubscription ? 'info-page--wide' : ''}`}>
       <p className="studio-rail-label">{page.eyebrow}</p>
       <h1 className="info-page-title">{page.title}</h1>
       <p className="info-page-body">{page.body}</p>
 
+      {page.isSubscription ? <SubscriptionDetails /> : null}
       {page.hasForm ? <CareersApplicationForm /> : null}
 
       {page.actions?.length ? (

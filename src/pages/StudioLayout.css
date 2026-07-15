@@ -1096,6 +1096,10 @@
   padding: 72px 0;
 }
 
+.info-page--wide {
+  width: min(1240px, calc(100% - 48px));
+}
+
 .info-page-title {
   margin: 18px 0 24px;
   font-size: clamp(2rem, 5vw, 4.5rem);
@@ -1811,6 +1815,440 @@
   }
 
   .video-chat-input {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ─── Video Director Workspace ─── */
+.video-director {
+  min-height: calc(100vh - var(--navbar-height));
+  padding: 38px clamp(18px, 3.5vw, 48px) 56px;
+  color: var(--ink);
+}
+
+.video-director-grid {
+  display: grid;
+  grid-template-columns: minmax(230px, 0.62fr) minmax(420px, 1.35fr) minmax(230px, 0.58fr);
+  gap: 18px;
+  margin-top: 22px;
+}
+
+.video-director-panel,
+.video-library-panel,
+.assist-agent-list,
+.assist-chat-panel,
+.subscription-card,
+.subscription-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow-lift);
+  backdrop-filter: blur(16px);
+}
+
+.video-director-panel,
+.video-library-panel {
+  padding: 18px;
+}
+
+.video-director-chat {
+  margin-top: 0;
+  min-height: 70vh;
+}
+
+.video-director-actions,
+.video-provider-stack,
+.video-library-list {
+  display: grid;
+  gap: 10px;
+}
+
+.video-director-action,
+.video-provider-button,
+.assist-agent,
+.assist-quick-row button {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.36);
+  color: var(--ink);
+  text-align: left;
+  transition: transform var(--fade), border-color var(--fade), background var(--fade), box-shadow var(--fade);
+}
+
+.video-director-action:hover,
+.video-provider-button:hover,
+.assist-agent:hover,
+.assist-agent.is-active,
+.assist-quick-row button:hover {
+  transform: translateY(-2px);
+  border-color: var(--line-strong);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-lift);
+}
+
+.video-director-action span,
+.assist-agent span {
+  display: block;
+  font-size: 10px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.video-director-action small,
+.assist-agent small {
+  display: block;
+  margin-top: 6px;
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.video-provider-button {
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.video-director-controls {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.video-director-field,
+.video-scene-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.video-director-field span,
+.video-scene-grid span,
+.video-reference-current span {
+  color: var(--ink-subtle);
+  font-size: 9px;
+  letter-spacing: 0.17em;
+  text-transform: uppercase;
+}
+
+.video-director-field select,
+.video-scene-grid input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-strong);
+  color: var(--ink);
+  font-size: 11px;
+  padding: 0 10px;
+}
+
+.video-scene-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.video-scene-wide {
+  grid-column: 1 / -1;
+}
+
+.video-library-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.video-reference-current {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--accent-soft);
+}
+
+.video-reference-current strong {
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.video-library-item {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.video-library-item span {
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.video-library-thumb,
+.video-library-audio {
+  width: 54px;
+  height: 42px;
+  object-fit: cover;
+  border-radius: 10px;
+  background: #050505;
+}
+
+.video-library-audio {
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* ─── Virtual Assist ─── */
+.assist-page {
+  min-height: calc(100vh - var(--navbar-height));
+  padding: 38px clamp(18px, 4vw, 56px) 56px;
+}
+
+.assist-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 28px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.assist-header h1 {
+  margin: 10px 0 8px;
+  font-size: clamp(2rem, 5vw, 4rem);
+  line-height: 0.96;
+}
+
+.assist-header p:not(.studio-rail-label) {
+  color: var(--ink-muted);
+}
+
+.assist-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.7fr) minmax(420px, 1.3fr);
+  gap: 18px;
+  margin-top: 22px;
+}
+
+.assist-agent-list,
+.assist-chat-panel {
+  padding: 20px;
+}
+
+.assist-agent-list {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.assist-chat-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.assist-message-list {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-height: 360px;
+  max-height: 56vh;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.assist-message {
+  max-width: min(760px, 100%);
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.34);
+}
+
+.assist-message--user {
+  justify-self: end;
+  background: var(--surface-strong);
+}
+
+.assist-message span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ink-subtle);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.assist-message p {
+  color: var(--ink);
+  line-height: 1.62;
+}
+
+.assist-quick-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.assist-input {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: end;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.assist-input textarea {
+  width: 100%;
+  min-height: 100px;
+  resize: vertical;
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  background: var(--surface-strong);
+  color: var(--ink);
+  padding: 14px 16px;
+}
+
+/* ─── Subscription Detail ─── */
+.subscription-detail {
+  display: grid;
+  gap: 24px;
+  width: min(1180px, 100%);
+  margin-top: 34px;
+}
+
+.subscription-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.subscription-card {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 18px;
+}
+
+.subscription-plan-name {
+  color: var(--ink-subtle);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+.subscription-card strong {
+  color: var(--ink);
+  font-size: 1.4rem;
+  font-weight: var(--weight-light);
+}
+
+.subscription-card p,
+.subscription-card small,
+.subscription-card li,
+.subscription-note {
+  color: var(--ink-muted);
+  line-height: 1.5;
+}
+
+.subscription-card ul {
+  display: grid;
+  gap: 8px;
+  padding-left: 16px;
+}
+
+.subscription-info-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.65fr) minmax(0, 1.35fr);
+  gap: 12px;
+}
+
+.subscription-panel {
+  padding: 20px;
+}
+
+.subscription-pack-list,
+.subscription-cost-table {
+  display: grid;
+  gap: 10px;
+}
+
+.subscription-pack-list span,
+.subscription-cost-table div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.subscription-pack-list strong,
+.subscription-cost-table span:first-child {
+  color: var(--ink);
+  font-weight: var(--weight-medium);
+}
+
+.subscription-cost-table div {
+  grid-template-columns: minmax(180px, 1fr) minmax(140px, auto) minmax(140px, auto);
+}
+
+.subscription-note {
+  margin-top: 16px;
+  font-size: 12px;
+}
+
+@media (max-width: 1180px) {
+  .video-director-grid,
+  .subscription-plan-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .subscription-info-grid,
+  .assist-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .video-director-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 680px) {
+  .video-director-controls,
+  .video-scene-grid,
+  .assist-quick-row,
+  .assist-input {
+    grid-template-columns: 1fr;
+  }
+
+  .assist-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .subscription-cost-table div {
     grid-template-columns: 1fr;
   }
 }

@@ -5,10 +5,10 @@ import './Layout.css';
 
 const NAV_LINKS = [
   { path: '/about', label: 'About Us' },
-  { path: '/sitemap', label: 'Mapa del sitio' },
-  { path: '/subscription', label: 'Planes' },
+  { path: '/sitemap', label: 'Site Map' },
+  { path: '/subscription', label: 'Plans' },
   { path: '/careers', label: 'Careers' },
-  { path: '/help', label: 'Ayuda y soporte' },
+  { path: '/help', label: 'Help' },
 ];
 
 export default function Layout() {

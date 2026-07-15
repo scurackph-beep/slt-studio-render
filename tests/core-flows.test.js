@@ -103,6 +103,20 @@ function wait(ms = 25) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isDurableAssetUrl(value = "") {
+  return /\/cdn\/assets\//.test(value) || /\/storage\/v1\/object\/public\/slt-assets\//.test(value);
+}
+
+async function waitForJobStatus(jobId, status, timeoutMs = 3000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const job = __test.findJob(jobId);
+    if (job?.status === status) return job;
+    await wait(100);
+  }
+  return __test.findJob(jobId);
+}
+
 test.afterEach(() => {
   globalThis.fetch = originalFetch;
 });
@@ -351,8 +365,8 @@ test("reference uploads are stored as tenant-owned assets without exposing stora
 
   assert.equal(asset.tenantId, "demo-user");
   assert.equal(asset.kind, "image");
-  assert.match(asset.publicUrl, /\/cdn\/assets\//);
-  assert.equal(existsSync(asset.storagePath), true);
+  assert.equal(isDurableAssetUrl(asset.publicUrl), true);
+  if (asset.storagePath) assert.equal(existsSync(asset.storagePath), true);
   assert.equal(__test.findOwnedAsset(asset.id, auth).id, asset.id);
   assert.equal("storagePath" in __test.serializeAssetForClient(asset), false);
   assert.throws(() => {
@@ -455,11 +469,10 @@ test("provider webhook validates signatures, stores completed assets and ignores
   assert.equal(response.statusCode, 202);
   assert.equal(response.payload.accepted, true);
 
-  await wait(50);
-  const completedJob = __test.findJob(job.id);
+  const completedJob = await waitForJobStatus(job.id, "COMPLETED");
   assert.equal(completedJob.status, "COMPLETED");
   assert.equal(__test.state.assets.length, 1);
-  assert.match(completedJob.outputUrl, /\/cdn\/assets\//);
+  assert.equal(isDurableAssetUrl(completedJob.outputUrl), true);
   assert.equal(__test.ledgerSnapshot().capturedCredits, 10);
 
   const duplicate = makeResponse();

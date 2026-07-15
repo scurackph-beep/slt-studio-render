@@ -45,7 +45,7 @@ export default function ImageStudio() {
 
   const handleGenerate = () => {
     if (!hasCredits && !isCEO) {
-      alert('Suscríbete para continuar');
+      alert('Log in and add credits to continue.');
       return;
     }
     runGenerate({

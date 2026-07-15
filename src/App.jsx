@@ -12,6 +12,7 @@ import CEODashboard from './pages/CEODashboard';
 import InfoPage from './pages/InfoPage';
 import ProfilePage from './pages/ProfilePage';
 import LibraryPage from './pages/LibraryPage';
+import VirtualAssist from './pages/VirtualAssist';
 import { AuthProvider } from './context/AuthContext';
 import { StudioProvider } from './context/StudioContext';
 import SiteGate from './components/SiteGate';
@@ -43,7 +44,7 @@ export default function App() {
           <Route path="profile" element={<ProfilePage />} />
           <Route path="settings" element={<InfoPage type="settings" />} />
           <Route path="help" element={<InfoPage type="help" />} />
-          <Route path="assist" element={<InfoPage type="assist" />} />
+          <Route path="assist" element={<VirtualAssist />} />
           <Route path="*" element={<InfoPage type="not-found" />} />
         </Route>
         </Routes>

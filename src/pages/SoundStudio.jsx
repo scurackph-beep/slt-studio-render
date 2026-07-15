@@ -58,7 +58,7 @@ export default function SoundStudio() {
   const handlePlay = async () => {
     const source = assetUrl || referenceAsset?.publicUrl;
     if (!source) {
-      alert('Generá audio o subí una referencia primero.');
+      alert('Generate audio or upload a reference first.');
       return;
     }
     const audio = audioRef.current;
@@ -74,7 +74,7 @@ export default function SoundStudio() {
 
   const handleGenerate = () => {
     if (!hasCredits && !isCEO) {
-      alert('Iniciá sesión y agregá créditos para continuar.');
+      alert('Log in and add credits to continue.');
       return;
     }
     runGenerate({

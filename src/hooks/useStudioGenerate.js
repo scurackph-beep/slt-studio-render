@@ -47,12 +47,11 @@ async function persistLedgerSnapshot() {
   return result;
 }
 
-function asyncStatusMessage({ kind, provider, status, attempt, maxAttempts }) {
+function asyncStatusMessage({ kind, provider, status }) {
   const readableStatus = String(status || 'processing').replace(/_/g, ' ');
   const phase = readableStatus === 'queued' ? 'In queue' : readableStatus === 'completed' ? 'Completed' : 'Generating';
-  const suffix = typeof attempt === 'number' ? ` ${attempt + 1}/${maxAttempts}` : '';
   const label = kind === 'video' ? 'Render' : 'Generation';
-  return `${label} ${phase.toLowerCase()}${provider ? ` on ${provider}` : ''}.${suffix}`;
+  return `${label} ${phase.toLowerCase()}${provider ? ` on ${provider}` : ''}.`;
 }
 
 export function useStudioGenerate(kind) {
@@ -122,19 +121,17 @@ export function useStudioGenerate(kind) {
         const activeProvider = jobProvider || provider;
         setJobId(asyncJobId);
         setJobStatus(initialJobStatus || 'queued');
-        setStatus(`Queued on ${activeProvider || 'provider'}. Job ${String(asyncJobId).slice(0, 12)}...`);
+        setStatus(`Queued on ${activeProvider || 'provider'}. Timer running.`);
 
         const pollResult = await pollJob(asyncJobId, activeProvider, {
           intervalMs: payload.pollIntervalMs || 5000,
           maxAttempts: payload.maxPollAttempts || 36,
-          onTick: ({ attempt, maxAttempts, status: polledStatus }) => {
+          onTick: ({ status: polledStatus }) => {
             setJobStatus(polledStatus || 'processing');
             setStatus(asyncStatusMessage({
               kind,
               provider: activeProvider,
               status: polledStatus,
-              attempt,
-              maxAttempts,
             }));
           },
         });

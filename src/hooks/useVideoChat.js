@@ -53,13 +53,20 @@ function extractVideoUrl(result) {
   );
 }
 
-export function useVideoChat({ initialPrompt = '' } = {}) {
+function formatElapsed(ms) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+  const seconds = String(totalSeconds % 60).padStart(2, '0');
+  return `${minutes}:${seconds}`;
+}
+
+export function useVideoChat({ initialPrompt = '', directorBrief = '', referenceAsset = null, durationSeconds = 10 } = {}) {
   const { session, isAuthenticated, isCEO, isGuest, isSpy } = useAuth();
   const { credits, refreshLedger } = useStudio();
   const [messages, setMessages] = useState([
     {
       sender: 'AI',
-      text: 'Sweet Little Trauma - Secure Terminal. Motor en línea. Describe los requerimientos técnicos de tu proyecto.',
+      text: 'Sweet Little Trauma Video Director is online. Describe the scene, choose a creation mode, then pick the provider.',
     },
   ]);
   const [input, setInput] = useState('');
@@ -83,7 +90,7 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
     setCurrentPrompt(prompt);
     setStep('await_tool');
     addMsg('User', prompt);
-    addMsg('AI', 'Entendido. ¿Qué protocolo usamos? Selecciona una herramienta.');
+    addMsg('AI', 'Understood. Choose the video creation mode.');
   }, [initialPrompt, addMsg]);
 
   const handleSend = () => {
@@ -95,7 +102,7 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
     }
 
     if (!isAuthenticated) {
-      addMsg('AI', 'Sesión requerida. Iniciá sesión desde Profile antes de generar.');
+      addMsg('AI', 'Session required. Log in from Profile before generating.');
       return;
     }
 
@@ -107,7 +114,7 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
       setCurrentPrompt(userInput);
       setStep('await_tool');
       setTimeout(() => {
-        addMsg('AI', 'Entendido. ¿Qué protocolo usamos? Selecciona una herramienta.');
+        addMsg('AI', 'Understood. Choose the video creation mode.');
       }, 300);
     }
   };
@@ -124,7 +131,7 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
       const options = tool.providers
         .map((name) => `- ${name} (${VIDEO_PROVIDER_COSTS[name] || 100} provider CR est.)`)
         .join('\n');
-      addMsg('AI', `Selecciona el proveedor. CEO/Guest no factura en SLT, pero consume saldo directo del proveedor:\n${options}`);
+      addMsg('AI', `Select a provider. CEO/Guest skips SLT billing, but provider API credits are still consumed directly:\n${options}`);
     }, 300);
   };
 
@@ -134,7 +141,13 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
       return;
     }
     if (!isAuthenticated) {
-      addMsg('AI', 'Sesión requerida. Iniciá sesión desde Profile.');
+      addMsg('AI', 'Session required. Log in from Profile.');
+      return;
+    }
+
+    if (!currentPrompt.trim()) {
+      addMsg('AI', 'Write the scene brief first, then choose the creation mode and provider.');
+      setStep('idle');
       return;
     }
 
@@ -146,25 +159,36 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
 
     const cost = VIDEO_PROVIDER_COSTS[provider] || 100;
     if (!isCEO && !isGuest && typeof credits === 'number' && credits < cost) {
-      addMsg('AI', `ERROR: Fondos insuficientes (${credits} CR disponibles, ~${cost} CR requeridos).`);
+      addMsg('AI', `Insufficient credits: ${credits} CR available, about ${cost} CR required.`);
       setStep('idle');
       return;
     }
 
     addMsg('User', `[ PROVIDER: ${provider} ]`);
     setStep('generating');
-    addMsg('AI', `[ INICIANDO SECUENCIA ] Conectando a ${provider}...`);
+    addMsg('AI', `Connecting to ${provider}. Timer started.`);
 
     try {
+      const renderPrompt = [
+        currentPrompt,
+        directorBrief ? `Director brief:\n${directorBrief}` : '',
+        referenceAsset?.publicUrl ? `Reference asset: ${referenceAsset.publicUrl}` : '',
+      ].filter(Boolean).join('\n\n');
+      const renderDuration = Number(durationSeconds) || 10;
       const result = await generateStudio({
         kind: 'video',
-        prompt: currentPrompt,
+        prompt: renderPrompt,
         provider,
         providerLabel: provider,
         tool: selectedTool?.id || 'TEXT2VIDEO',
         title: 'SLT Project',
-        durationSeconds: 10,
-        videoDurationSeconds: 10,
+        durationSeconds: renderDuration,
+        videoDurationSeconds: renderDuration,
+        referenceAssets: referenceAsset ? [referenceAsset] : [],
+        referenceAssetIds: referenceAsset ? [referenceAsset.id] : [],
+        referenceVideoUrl: referenceAsset?.contentType?.startsWith('video/') ? referenceAsset.publicUrl : '',
+        referenceImageUrl: referenceAsset?.contentType?.startsWith('image/') ? referenceAsset.publicUrl : '',
+        assetUrls: referenceAsset?.publicUrl ? [referenceAsset.publicUrl] : [],
       });
 
       if (!result.ok) {
@@ -178,7 +202,8 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
       const { jobId, provider: jobProvider, needsPoll } = extractAsyncJob(result);
 
       if (needsPoll && jobId) {
-        addMsg('AI', `[ ENCOLADO - ID: ${jobId} ] Procesando...`);
+        const startedAt = Date.now();
+        addMsg('AI', `[ TIMER 00:00 ] Render queued. Keep this page open or check Library when it completes.`);
 
         const pollable = ['Seedance', 'OmniHuman', 'Runway', 'Luma', 'Kling'].includes(
           normalizeJobProvider(jobProvider || provider),
@@ -186,9 +211,9 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
 
         if (pollable) {
           const pollResult = await pollJob(jobId, jobProvider || provider, {
-            onTick: ({ attempt, maxAttempts }) => {
+            onTick: ({ attempt }) => {
               if (attempt === 0 || attempt % 3 === 0) {
-                addMsg('AI', `[ POLL ${attempt + 1}/${maxAttempts} ] Esperando señal de ${provider}...`);
+                addMsg('AI', `[ TIMER ${formatElapsed(Date.now() - startedAt)} ] ${provider} is rendering.`);
               }
             },
           });
@@ -198,29 +223,29 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
           if (pollResult.ok && pollResult.completed) {
             const videoUrl = extractVideoUrl(pollResult);
             if (videoUrl) {
-              addMsg('AI', `[ ÉXITO ] Archivo generado:\n${videoUrl}`);
+              addMsg('AI', `Completed. CDN asset ready:\n${videoUrl}`);
             } else {
-              addMsg('AI', '[ ÉXITO ] Job completado. Revisa Library para el asset.');
+              addMsg('AI', 'Completed. Check Library for the saved asset.');
             }
           } else {
             addMsg(
               'AI',
-              `[ ERROR ] ${readableStudioMessage(pollResult.message || 'La generación falló o expiró.')}`,
+              readableStudioMessage(pollResult.message || 'The generation failed or expired.'),
             );
           }
         } else {
-          addMsg('AI', `[ ENCOLADO ] Job ${jobId} enviado a ${provider}. Consultá /api/jobs/${jobId}.`);
+          addMsg('AI', `Render queued on ${provider}. You can keep working and check Library shortly.`);
         }
       } else if (immediateUrl) {
-        addMsg('AI', `[ ÉXITO ] Generación rápida:\n${immediateUrl}`);
+        addMsg('AI', `Generated:\n${immediateUrl}`);
       } else {
         addMsg(
           'AI',
-          `[ ÉXITO ] ${result.data?.success || result.data?.historyItem?.message || 'Secuencia registrada.'}`,
+          result.data?.success || result.data?.historyItem?.message || 'Sequence registered.',
         );
       }
     } catch (error) {
-      addMsg('AI', `[ FATAL ERROR ] ${error.message}`);
+      addMsg('AI', readableStudioMessage(error.message));
       await refreshLedger().catch(() => null);
     } finally {
       setStep('idle');
