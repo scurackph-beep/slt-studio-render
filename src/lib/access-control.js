@@ -1,14 +1,5 @@
 import { getSession, readStore, storageKeys, writeStore } from './storage';
 
-export const INVITE_CODES = [
-  'NICO.slt',
-  'VALE.slt',
-  'MIRIAM.slt',
-  'CUÑA.slt',
-  'SOFI.slt',
-  'GUS.slt',
-];
-
 export const GUEST_QUOTA_LIMITS = {
   video: 2,
   image: 2,
@@ -24,11 +15,6 @@ export const accessStorageKeys = {
 
 export function normalizeInviteCode(value = '') {
   return String(value || '').trim();
-}
-
-export function isValidInviteCode(value = '') {
-  const normalized = normalizeInviteCode(value);
-  return INVITE_CODES.some((code) => code.localeCompare(normalized, 'es', { sensitivity: 'accent' }) === 0);
 }
 
 export function isGuestSession(session = getSession()) {

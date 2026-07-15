@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { getApiBase } from '../lib/api-client';
-import { INVITE_CODES, isValidInviteCode, storeAccessSession } from '../lib/access-control';
+import { normalizeInviteCode, storeAccessSession } from '../lib/access-control';
 import { isSiteGateUnlocked, unlockSiteGate, unlockSiteGateFromUrl, SITE_GATE_KEY } from '../lib/site-gate';
 import BrandLogo from './BrandLogo';
 import './SiteGate.css';
@@ -115,13 +115,14 @@ export default function SiteGate({ children }) {
   };
 
   const handleInvite = async () => {
-    if (!isValidInviteCode(inviteCode)) {
-      setError('Guest code is not valid.');
+    const normalizedInviteCode = normalizeInviteCode(inviteCode);
+    if (!normalizedInviteCode) {
+      setError('Guest code is required.');
       return;
     }
     setBusy(true);
     setError('');
-    const result = await accessRequest('/api/login', { inviteCode });
+    const result = await accessRequest('/api/login', { inviteCode: normalizedInviteCode });
     setBusy(false);
     if (!result.ok || !result.data?.session) {
       setError(result.data?.readableError || result.data?.error || 'Guest code could not start.');
@@ -229,7 +230,7 @@ export default function SiteGate({ children }) {
             {busy ? 'Opening...' : mode === 'spy' ? 'Enter Spy Mode' : 'Enter Studio'}
           </button>
         </form>
-        {mode === 'invite' ? <p className="site-gate-codes">Valid guest passes: {INVITE_CODES.join(' / ')}</p> : null}
+        {mode === 'invite' ? <p className="site-gate-codes">Guest passes are private. Enter the code you received.</p> : null}
         {error ? <p className="site-gate-error">{error}</p> : null}
       </div>
     </section>

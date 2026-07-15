@@ -82,15 +82,37 @@ app.use((request, response, next) => {
 app.use(cors({ origin: "*" }));
 
 const SITE_GATE_KEY = String(process.env.SLT_SITE_GATE_KEY || "Dientito2032").trim();
-const INVITE_CODES = ["NICO.slt", "VALE.slt", "MIRIAM.slt", "CUÑA.slt", "SOFI.slt", "GUS.slt"];
+const INVITE_CODES = envList("SLT_INVITE_CODES").map((entry, index) => {
+  const separator = entry.indexOf(":");
+  if (separator === -1) {
+    return { username: `Guest ${index + 1}`, code: entry.trim() };
+  }
+  return {
+    username: entry.slice(0, separator).trim() || `Guest ${index + 1}`,
+    code: entry.slice(separator + 1).trim()
+  };
+}).filter((entry) => entry.code);
+
+function secureEqualText(a = "", b = "") {
+  const left = Buffer.from(String(a || "").trim().normalize("NFC"));
+  const right = Buffer.from(String(b || "").trim().normalize("NFC"));
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+function safeGuestSlug(value = "guest") {
+  return String(value || "guest")
+    .normalize("NFKD")
+    .replace(/[^\w.-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase() || "guest";
+}
 
 function inviteGuestProfile(code = "") {
   const normalized = String(code || "").trim();
-  const matched = INVITE_CODES.find((entry) => entry.localeCompare(normalized, "es", { sensitivity: "accent" }) === 0);
+  const matched = INVITE_CODES.find((entry) => secureEqualText(entry.code, normalized));
   if (!matched) return null;
   return {
-    code: matched,
-    username: matched.replace(/\.slt$/i, "")
+    username: matched.username
   };
 }
 
@@ -154,7 +176,6 @@ function strictAuthForRequest(request) {
       role: session.role,
       email: session.email,
       username: session.username,
-      inviteCode: session.inviteCode,
       token,
       message: session.role === "CEO" ? "CEO session accepted." : "Server session accepted."
     };
@@ -6144,15 +6165,15 @@ app.post("/api/login", async (request, response) => {
       response.status(401).json({ ok: false, code: "invalid_invite_code", error: "Invalid guest code.", readableError: "Código de invitado inválido." });
       return;
     }
+    const guestSlug = safeGuestSlug(inviteProfile.username);
     const token = requestId("guest_session");
     const session = {
       token,
-      userId: `guest-${inviteProfile.username.toLowerCase()}`,
-      tenantId: `guest-${inviteProfile.username.toLowerCase()}`,
+      userId: `guest-${guestSlug}`,
+      tenantId: `guest-${guestSlug}`,
       role: "GUEST",
-      email: `${inviteProfile.username.toLowerCase()}@guest.slt.local`,
+      email: `${guestSlug}@guest.slt.local`,
       username: inviteProfile.username,
-      inviteCode: inviteProfile.code,
       mode: "INVITED_GUEST",
       createdAt: new Date().toISOString()
     };
@@ -6163,12 +6184,11 @@ app.post("/api/login", async (request, response) => {
       email: session.email,
       username: session.username,
       role: session.role,
-      mode: session.mode,
-      inviteCode: session.inviteCode
+      mode: session.mode
     };
     response.json({
       ok: true,
-      session: { token, id: session.userId, tenantId: session.tenantId, email: session.email, username: session.username, role: session.role, mode: session.mode, inviteCode: session.inviteCode },
+      session: { token, id: session.userId, tenantId: session.tenantId, email: session.email, username: session.username, role: session.role, mode: session.mode },
       user,
       message: "Guest session started."
     });

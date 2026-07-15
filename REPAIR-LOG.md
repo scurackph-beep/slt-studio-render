@@ -2034,13 +2034,7 @@ La primera pantalla publica del dominio debe ofrecer entradas claras para crear 
   - Se versiono el storage del gate para evitar bypass por accesos viejos.
 - `server/api-proxy.js`:
   - Las sesiones locales del servidor ahora se validan antes del JWT de Supabase, permitiendo CEO e invitados en produccion.
-  - Se agregaron codigos de invitado:
-    - `NICO.slt`
-    - `VALE.slt`
-    - `MIRIAM.slt`
-    - `CUÑA.slt`
-    - `SOFI.slt`
-    - `GUS.slt`
+  - Los codigos de invitado se gestionan desde variables privadas de entorno y no deben documentarse ni exponerse en UI, repo o logs.
   - El invitado usa modo `INVITED_GUEST` sin cobro interno de creditos.
   - Engineering requiere sesion real para enviar formularios de proyecto.
 - `src/lib/access-control.js`:
