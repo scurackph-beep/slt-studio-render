@@ -68,10 +68,10 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
   const [selectedTool, setSelectedTool] = useState(null);
 
   const availableCredits = useMemo(() => {
-    if (isCEO) return '∞';
+    if (isCEO || isGuest) return 'API direct';
     if (typeof credits === 'number') return credits;
     return '--';
-  }, [credits, isCEO]);
+  }, [credits, isCEO, isGuest]);
 
   const addMsg = useCallback((sender, text) => {
     setMessages((prev) => [...prev, { sender, text }]);
@@ -122,9 +122,9 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
     setStep('await_provider');
     setTimeout(() => {
       const options = tool.providers
-        .map((name) => `- ${name} (${VIDEO_PROVIDER_COSTS[name] || 100} CR est.)`)
+        .map((name) => `- ${name} (${VIDEO_PROVIDER_COSTS[name] || 100} provider CR est.)`)
         .join('\n');
-      addMsg('AI', `Selecciona el proveedor. Costos estimados:\n${options}`);
+      addMsg('AI', `Selecciona el proveedor. CEO/Guest no factura en SLT, pero consume saldo directo del proveedor:\n${options}`);
     }, 300);
   };
 
@@ -242,5 +242,6 @@ export function useVideoChat({ initialPrompt = '' } = {}) {
     isCEO,
     tools: VIDEO_CHAT_TOOLS,
     providers: selectedTool?.providers || VIDEO_CHAT_TOOLS[0].providers,
+    isGuest,
   };
 }

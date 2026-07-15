@@ -32,7 +32,7 @@ export default function ProfilePage() {
 
   useEffect(() => {
     if (isCEO) {
-      setStatus('CEO mode active. Internal SLT credits are not charged.');
+      setStatus('CEO mode active. SLT internal billing is skipped; provider API credits may be consumed directly.');
       setShowLoginForm(false);
     } else if (isAuthenticated) {
       setStatus(`Session active as ${session?.email || session?.username || 'user'}.`);
@@ -68,7 +68,7 @@ export default function ProfilePage() {
     setShowLoginForm(false);
     await Promise.all([refresh(), refreshLedger().catch(() => null)]);
     setStatus(nextSession.role === 'CEO'
-      ? 'CEO mode active. Internal SLT credits are not charged.'
+      ? 'CEO mode active. SLT internal billing is skipped; provider API credits may be consumed directly.'
       : `Session started. ${typeof credits === 'number' ? `${credits} credits available.` : ''}`);
   };
 
@@ -178,8 +178,8 @@ export default function ProfilePage() {
         <h1 className="info-page-title">{isAuthenticated ? 'Account' : 'Sign in'}</h1>
         <p className="info-page-body">
           {isSupabase
-            ? 'Create an account or sign in with your Supabase credentials. CEO mode still uses your private key.'
-            : 'Standard login creates a local session with wallet credits. CEO mode uses your private key and skips internal billing.'}
+            ? 'Create an account or sign in with your Supabase credentials. CEO mode uses your private key and calls provider APIs directly.'
+            : 'Standard login creates a local session with wallet credits. CEO and guest access skip SLT billing but still consume provider API credits.'}
         </p>
 
         <div className={`profile-status ${isCEO ? 'is-ceo' : ''} ${isAuthenticated ? 'is-connected' : ''}`}>

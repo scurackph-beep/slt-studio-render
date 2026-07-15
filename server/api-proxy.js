@@ -1593,7 +1593,7 @@ function validatePlan(kind, request, auth) {
     return {
       ok: true,
       mode: "guest-limited-pass",
-      message: "Guest mode uses frontend category quotas and does not use plan limits."
+      message: "Guest mode uses category quotas. Generations call provider APIs directly and skip SLT internal billing."
     };
   }
   if (kind === "video" && !isOwnerAuth(auth)) {
@@ -1640,10 +1640,10 @@ function validateCredits(kind, auth = {}, payload = {}) {
       available: wallet.availableCredits,
       held: wallet.heldCredits,
       wallet,
-      mode: isOwnerAuth(auth) ? "ceo-unmetered" : "guest-limited-pass",
+      mode: isOwnerAuth(auth) ? "ceo-provider-direct" : "guest-provider-direct",
       message: isOwnerAuth(auth)
-        ? "CEO mode: internal SLT credits are not charged."
-        : "Guest mode: internal SLT credits are not charged."
+        ? "CEO mode: SLT internal billing is skipped; provider API credits may be consumed directly."
+        : "Guest mode: SLT internal billing is skipped; provider API credits may be consumed directly."
     };
   }
   if (wallet.availableCredits < cost) {

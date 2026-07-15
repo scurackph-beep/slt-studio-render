@@ -20,7 +20,13 @@ export default function SiteReport() {
   const [open, setOpen] = useState(false);
   const quota = useMemo(() => (isGuest ? guestQuotaSnapshot(session) : null), [isGuest, session]);
 
-  const accessLabel = isCEO ? 'CEO full access' : isGuest ? 'Guest limited access' : isSpy ? 'Spy read-only' : 'User access';
+  const accessLabel = isCEO
+    ? 'CEO direct API'
+    : isGuest
+      ? 'Guest direct API'
+      : isSpy
+        ? 'Spy read-only'
+        : 'User billing access';
 
   return (
     <>
@@ -48,6 +54,7 @@ export default function SiteReport() {
 
           {quota ? (
             <div className="site-report-quota">
+              <p>Guest quota. No SLT billing; provider API credits still apply.</p>
               {Object.entries(quota).map(([kind, item]) => (
                 <span key={kind}>
                   {kind}: {item.remaining}/{item.limit}

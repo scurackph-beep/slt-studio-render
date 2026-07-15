@@ -157,6 +157,14 @@
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
 }
 
+.site-report-quota p {
+  grid-column: 1 / -1;
+  margin: 0 0 2px;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
 .site-report-quota span {
   color: rgba(255, 255, 255, 0.72);
   font-size: 0.7rem;

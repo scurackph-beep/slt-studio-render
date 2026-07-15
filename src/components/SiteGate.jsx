@@ -214,7 +214,7 @@ export default function SiteGate({ children }) {
             <>
               <input value={inviteCode} onChange={(event) => setInviteCode(event.target.value)} placeholder="Guest code" autoComplete="one-time-code" autoFocus />
               <p className="site-gate-note">
-                Guest mode allows 2 videos, 2 images, 2 sound FX, 2 songs, 2 fashion requests and 2 engineering requests.
+                Guest mode allows 2 videos, 2 images, 2 sound FX, 2 songs, 2 fashion requests and 2 engineering requests. It skips SLT billing but consumes provider API credits directly.
               </p>
             </>
           ) : null}

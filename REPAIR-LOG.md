@@ -2087,3 +2087,20 @@ El health remoto confirmaba variables de Supabase presentes, pero `auth.supabase
 - `node --check server/api-proxy.js`: OK.
 - `npm run build`: OK.
 - `npm run lint`: OK con warnings no bloqueantes preexistentes.
+
+## Clarificacion CEO/Guest API direct - 2026-07-14
+
+### Aclaracion funcional
+
+CEO e invitados no deben consumir creditos facturados por SLT ni pasar por checkout interno, pero las generaciones reales si llaman a las APIs de proveedores y por lo tanto consumen saldo/creditos directamente en esas cuentas proveedoras.
+
+### Cambio aplicado
+
+- Se reemplazaron textos tipo `unlimited` o `not charged` por `API direct` y mensajes explicitos de "sin facturacion interna SLT, con consumo directo del proveedor".
+- El backend conserva costo interno `0` para CEO/Guest, pero sigue ejecutando los adaptadores reales de proveedores.
+
+### Verificacion
+
+- `node --check server/api-proxy.js`: OK.
+- `npm run build`: OK.
+- `npm run lint`: OK con warnings no bloqueantes preexistentes.

@@ -18,6 +18,7 @@ export default function VideoStudio() {
     selectProvider,
     isAuthenticated,
     isCEO,
+    isGuest,
     tools,
     providers,
   } = useVideoChat({ initialPrompt });
@@ -32,7 +33,9 @@ export default function VideoStudio() {
           <p>Conversational video generation · {isCEO ? 'CEO mode' : isAuthenticated ? 'Session active' : 'No session'}</p>
         </div>
         <div className="video-chat-meta">
-          <span className="video-chat-credits">{isCEO ? 'CEO · unlimited' : `${credits} CR`}</span>
+          <span className="video-chat-credits">
+            {isCEO ? 'CEO · API direct' : isGuest ? 'Guest · API direct' : `${credits} CR`}
+          </span>
           {!isAuthenticated ? (
             <Link to="/profile" className="video-secondary-button">Log in</Link>
           ) : null}
