@@ -5699,10 +5699,10 @@ app.get("/health", (_request, response) => {
     },
     dataStore: runtimeStoreStatus(),
     storage: {
-      kind: supabaseStorage.kind,
-      durable: supabaseStorage.durable,
-      configured: supabaseStorage.configured,
-      bucket: supabaseStorage.bucket || ""
+      kind: supabaseStorage.configured ? supabaseStorage.kind : "local",
+      durable: supabaseStorage.configured ? supabaseStorage.durable : Boolean(process.env.SLT_STORAGE_DIR),
+      configured: supabaseStorage.configured || Boolean(process.env.SLT_STORAGE_DIR),
+      bucket: supabaseStorage.bucket || "local-assets"
     },
     providersConnected: providers.filter((provider) => provider.connected).length,
     providersTotal: providers.length

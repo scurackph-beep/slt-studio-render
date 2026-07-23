@@ -55,16 +55,19 @@ export function getProductionReadinessReport(env = process.env) {
   const storageProvider = envValue(env, "STORAGE_PROVIDER") || "local";
   const storageKey = firstConfigured(env, ["STORAGE_ACCESS_KEY", "STORAGE_ACCESS_KEY_ID"]);
   const storageSecret = firstConfigured(env, ["STORAGE_SECRET_KEY", "STORAGE_SECRET_ACCESS_KEY"]);
+  const localStorageReady = storageProvider === "local" && hasValue(env, "SLT_STORAGE_DIR");
   const supabaseStorageReady = storageProvider === "supabase"
     ? hasValue(env, "SUPABASE_URL") && hasValue(env, "SUPABASE_SERVICE_ROLE_KEY") && hasValue(env, "STORAGE_BUCKET")
     : Boolean(storageKey) && Boolean(storageSecret);
   const storage = {
     ok:
-      storageProvider !== "local" &&
-      hasValue(env, "STORAGE_BUCKET") &&
-      (hasValue(env, "STORAGE_PUBLIC_BASE_URL") || storageProvider === "supabase") &&
-      supabaseStorageReady,
-    provider: storageProvider,
+      localStorageReady || (
+        storageProvider !== "local" &&
+        hasValue(env, "STORAGE_BUCKET") &&
+        (hasValue(env, "STORAGE_PUBLIC_BASE_URL") || storageProvider === "supabase") &&
+        supabaseStorageReady
+      ),
+    provider: localStorageReady ? "local-durable" : storageProvider,
     required: configuredOrMissing(env, [
       "STORAGE_PROVIDER",
       "STORAGE_BUCKET",
@@ -75,6 +78,7 @@ export function getProductionReadinessReport(env = process.env) {
       "STORAGE_ACCESS_KEY_ID",
       "STORAGE_SECRET_KEY",
       "STORAGE_SECRET_ACCESS_KEY",
+      "SLT_STORAGE_DIR",
       "SUPABASE_URL",
       "SUPABASE_SERVICE_ROLE_KEY"
     ])
