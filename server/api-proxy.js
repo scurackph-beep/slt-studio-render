@@ -671,26 +671,46 @@ function billableUnitCount(payload = {}, keys = ["count", "quantity"]) {
   return 1;
 }
 
+function billableOutputCount(payload = {}) {
+  const units = billableUnitCount(payload, [
+    "outputCount",
+    "outputs",
+    "variants",
+    "imageCount",
+    "videoCount",
+    "trackCount",
+    "songCount",
+    "assetCount",
+    "count",
+    "quantity"
+  ]);
+  return Math.min(8, Math.max(1, units));
+}
+
 function creditCostFor(kind = "assist", payload = {}) {
   const requestedProvider = payload.provider || payload.providerLabel || defaultProvider[kind] || "";
   const normalizedProvider = normalizeProviderName(String(requestedProvider));
   const config = providerCatalog[normalizedProvider];
   const pricing = providerPricingFor(config, payload);
+  const outputCount = ["image", "video", "music", "sound", "fashion"].includes(kind)
+    ? billableOutputCount(payload)
+    : 1;
   if (pricing?.chargeUnit === "second") {
     const seconds = billableVideoSeconds(payload);
-    return Math.max(pricing.minimumCredits || 0, Math.ceil(seconds * (pricing.creditsPerSecond || pricing.creditsPerUnit || 1)));
+    const perOutput = Math.max(pricing.minimumCredits || 0, Math.ceil(seconds * (pricing.creditsPerSecond || pricing.creditsPerUnit || 1)));
+    return perOutput * outputCount;
   }
   if (pricing?.chargeUnit === "character") {
     const unitSize = pricing.unitSize || 1;
     const units = Math.ceil(meteredTextLength(payload) / unitSize);
-    return Math.max(pricing.minimumCredits || 0, units * (pricing.creditsPerUnit || 1));
+    return Math.max(pricing.minimumCredits || 0, units * (pricing.creditsPerUnit || 1)) * outputCount;
   }
   if (["track", "song", "asset"].includes(pricing?.chargeUnit)) {
-    const units = billableUnitCount(payload, ["trackCount", "songCount", "assetCount", "count", "quantity"]);
+    const units = billableUnitCount(payload, ["trackCount", "songCount", "assetCount", "outputCount", "outputs", "count", "quantity"]);
     return Math.max(pricing.minimumCredits || 0, units * (pricing.creditsPerUnit || 1));
   }
-  const costByKind = { image: 10, video: 300, music: 150, sound: 25, assist: 5 };
-  return costByKind[kind] || 5;
+  const costByKind = { image: 10, video: 300, music: 150, sound: 25, fashion: 25, assist: 5 };
+  return (costByKind[kind] || 5) * outputCount;
 }
 
 function usageRulesForPlan(plan = "Free") {
@@ -1943,6 +1963,12 @@ function publicApiBaseUrl(request) {
 function webhookProviderForStatus(status = {}) {
   const adapter = String(status.adapter || "").toLowerCase();
   const name = String(status.name || "").toLowerCase();
+  if (adapter.includes("seedance") || name.includes("seedance") || adapter.includes("byteplus") || name.includes("byteplus") || name.includes("dreamina")) {
+    return "seedance";
+  }
+  if (adapter.includes("omnihuman") || name.includes("omnihuman") || name.includes("omni human")) {
+    return "omnihuman";
+  }
   if (adapter.includes("replicate") || name.includes("replicate") || name.includes("wan") || name.includes("riffusion") || name.includes("audiocraft")) {
     return "replicate";
   }
@@ -2013,7 +2039,7 @@ function safeStorageSegment(value = "tenant") {
 }
 
 async function storeAssetBytes({ bytes, contentType, fileName, request = null, tenantId = "" }) {
-  if (supabaseStorage.configured) {
+  if (supabaseStorage.configured && process.env.SLT_TEST_MODE !== "1") {
     const tenantPrefix = safeStorageSegment(tenantId || "tenant");
     const datePrefix = new Date().toISOString().slice(0, 10);
     const storageKey = `${tenantPrefix}/${datePrefix}/${fileName}`;
@@ -2167,7 +2193,7 @@ async function persistProviderAssets({ job, outputUrls = [], cdnBaseUrl, sourceH
 
 const uploadMimeGroups = {
   image: ["image/png", "image/jpeg", "image/webp", "image/gif"],
-  video: ["video/mp4", "video/webm", "video/quicktime"],
+  video: ["image/png", "image/jpeg", "image/webp", "image/gif", "video/mp4", "video/webm", "video/quicktime"],
   music: ["audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/ogg", "audio/webm", "audio/mp4", "text/plain"],
   sound: ["audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/ogg", "audio/webm", "audio/mp4", "video/mp4", "video/webm", "video/quicktime"],
   fashion: ["image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf"],
@@ -3771,52 +3797,64 @@ function extractProviderJobId(data = {}) {
   );
 }
 
+function parseEmbeddedJson(value) {
+  if (!value) return null;
+  if (typeof value === "object") return value;
+  if (typeof value !== "string") return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
 function normalizeSeedanceStatus(data = {}) {
+  const embedded = parseEmbeddedJson(data.resp_data || data.data?.resp_data || data.result?.resp_data) || {};
   const rawStatus = String(
     data.status ||
     data.data?.status ||
+    data.data?.task_status ||
+    data.data?.state ||
     data.result?.status ||
+    data.result?.task_status ||
     data.task_status ||
+    data.taskStatus ||
+    data.state ||
+    data.event ||
+    embedded.status ||
+    embedded.task_status ||
     ""
   ).toLowerCase();
-  if (["succeeded", "success", "completed", "complete", "done"].includes(rawStatus)) return "completed";
-  if (["failed", "error", "cancelled", "canceled"].includes(rawStatus)) return "failed";
+  if (["succeeded", "success", "completed", "complete", "done", "finished", "finish"].includes(rawStatus)) return "completed";
+  if (["failed", "failure", "error", "errored", "cancelled", "canceled", "rejected"].includes(rawStatus)) return "failed";
+  if (["queued", "queue", "pending", "starting", "in_queue"].includes(rawStatus)) return "queued";
+  if (data.code && Number(data.code) !== 10000 && !rawStatus) return "failed";
   return "processing";
 }
 
 function extractSeedanceOutputUrls(data = {}) {
-  const directUrls = [
-    data.video_url,
-    data.videoUrl,
-    data.output_url,
-    data.outputUrl,
-    data.url,
-    data.data?.video_url,
-    data.data?.videoUrl,
-    data.data?.output_url,
-    data.data?.outputUrl,
-    data.content?.video_url,
-    data.content?.videoUrl,
-    data.content?.output_url,
-    data.content?.outputUrl,
-    data.result?.video_url,
-    data.result?.videoUrl,
-    data.result?.output_url,
-    data.result?.outputUrl
-  ].filter(Boolean);
-  const nestedUrls = [
-    ...(Array.isArray(data.output) ? data.output : []),
-    ...(Array.isArray(data.outputs) ? data.outputs : []),
-    ...(Array.isArray(data.data?.output) ? data.data.output : []),
-    ...(Array.isArray(data.data?.outputs) ? data.data.outputs : []),
-    ...(Array.isArray(data.content?.output) ? data.content.output : []),
-    ...(Array.isArray(data.content?.outputs) ? data.content.outputs : []),
-    ...(Array.isArray(data.result?.output) ? data.result.output : []),
-    ...(Array.isArray(data.result?.outputs) ? data.result.outputs : [])
-  ]
-    .flatMap((item) => [item?.video_url, item?.videoUrl, item?.url, item?.output_url, item?.outputUrl])
-    .filter(Boolean);
-  return [...directUrls, ...nestedUrls];
+  const embedded = parseEmbeddedJson(data.resp_data || data.data?.resp_data || data.result?.resp_data) || {};
+  const sources = [data, data.data, data.content, data.result, embedded, embedded.data, embedded.result].filter(Boolean);
+  const directUrls = sources.flatMap((source) => [
+    source.video_url,
+    source.videoUrl,
+    source.output_url,
+    source.outputUrl,
+    source.result_url,
+    source.resultUrl,
+    source.url
+  ]).filter(Boolean);
+  const nestedUrls = sources.flatMap((source) => collectUrlCandidates([
+    source.output,
+    source.outputs,
+    source.result,
+    source.results,
+    source.video,
+    source.videos,
+    source.media,
+    source.assets
+  ])).filter(Boolean);
+  return [...new Set([...directUrls, ...nestedUrls])];
 }
 
 function extractProviderFailureMessage(data = {}, fallback = "Provider job failed.") {
@@ -5011,8 +5049,22 @@ async function completeAsyncJob({ job, providerRun, providerResult, message, req
     });
   } catch (error) {
     error.code = error.code || "asset_storage_failed";
-    appendJobEvent(job, { type: "asset_storage_failed", error: error.message });
-    return failAsyncJob({ job, error, providerRun });
+    appendJobEvent(job, { type: "asset_storage_failed", error: error.message, fallback: "provider_url" });
+    if (!providerOutputUrls.length) {
+      return failAsyncJob({ job, error, providerRun });
+    }
+    storageResult = {
+      assets: [],
+      outputUrls: providerOutputUrls,
+      outputUrl: providerOutputUrls[0] || null,
+      storage: {
+        status: "provider_url_fallback",
+        reason: error.code,
+        message: error.message,
+        providerUrlCount: providerOutputUrls.length,
+        storedAssetCount: 0
+      }
+    };
   }
 
   const outputUrls = storageResult.outputUrls.length ? storageResult.outputUrls : providerOutputUrls;
@@ -5792,24 +5844,43 @@ function normalizeWebhookStatus(value = "") {
 
 function normalizeProviderWebhookPayload(provider, body = {}) {
   const data = body.data || body.prediction || body;
+  const embedded = parseEmbeddedJson(body.resp_data || data.resp_data || body.data?.resp_data || body.result?.resp_data) || {};
+  const payloadData = provider === "seedance" || provider === "omnihuman"
+    ? { ...data, ...embedded, data: data.data || embedded.data, result: data.result || embedded.result || embedded }
+    : data;
   const requestId =
     body.request_id ||
     body.requestId ||
     body.jobId ||
     body.job_id ||
+    body.task_id ||
+    body.taskId ||
     body.metadata?.jobId ||
     body.metadata?.request_id ||
-    data.request_id ||
-    data.requestId ||
-    data.jobId ||
-    data.job_id ||
-    data.id ||
+    payloadData.request_id ||
+    payloadData.requestId ||
+    payloadData.jobId ||
+    payloadData.job_id ||
+    payloadData.task_id ||
+    payloadData.taskId ||
+    payloadData.data?.task_id ||
+    payloadData.data?.taskId ||
+    payloadData.result?.task_id ||
+    payloadData.id ||
     body.id ||
     "";
-  const providerJobId = data.id || body.id || data.prediction_id || body.prediction_id || requestId;
-  const status = normalizeWebhookStatus(body.status || data.status || body.event || body.type);
-  const outputUrls = [...new Set(collectUrlCandidates([data.output, data.outputs, data.urls, data.result, data.url, body.output, body.result]).filter(Boolean))];
-  const errorMessage = data.error?.message || data.error || body.error?.message || body.error || "";
+  const providerJobId = payloadData.task_id || payloadData.taskId || payloadData.data?.task_id || payloadData.data?.taskId || payloadData.id || body.id || payloadData.prediction_id || body.prediction_id || requestId;
+  const status = provider === "seedance" || provider === "omnihuman"
+    ? normalizeSeedanceStatus({ ...body, data: payloadData, result: payloadData.result })
+    : normalizeWebhookStatus(body.status || payloadData.status || body.event || body.type);
+  const providerUrls = provider === "seedance" || provider === "omnihuman"
+    ? extractSeedanceOutputUrls({ ...body, data: payloadData, result: payloadData.result })
+    : [];
+  const outputUrls = [...new Set([
+    ...providerUrls,
+    ...collectUrlCandidates([payloadData.output, payloadData.outputs, payloadData.urls, payloadData.result, payloadData.url, body.output, body.result]).filter(Boolean)
+  ])];
+  const errorMessage = payloadData.error?.message || payloadData.error || body.error?.message || body.error || payloadData.message || body.message || "";
   return {
     provider,
     eventId: body.event_id || body.eventId || body.id || providerJobId || requestId,
@@ -5909,6 +5980,8 @@ app.post("/api/generate/sound", handleGenerate("sound"));
 
 app.post("/api/webhooks/fal", handleProviderWebhook("fal"));
 app.post("/api/webhooks/replicate", handleProviderWebhook("replicate"));
+app.post("/api/webhooks/seedance", handleProviderWebhook("seedance"));
+app.post("/api/webhooks/omnihuman", handleProviderWebhook("omnihuman"));
 
 app.get("/api/jobs/:jobId", async (request, response) => {
   const auth = getAuth(request);

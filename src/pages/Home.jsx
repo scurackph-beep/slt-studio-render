@@ -107,10 +107,10 @@ const CATEGORY_ACTIONS = {
     { id: 'submit-idea', label: 'Submit Idea', copy: 'Send a product idea to the engineering queue.', providers: ['Intake', 'Review', 'Roadmap'] },
   ],
   assist: [
-    { id: 'plan-project', label: 'Plan Project', copy: 'Break down the idea into the right studio workflow.', providers: ['SLT Producer Agent', 'Film Director Agent', 'CEO Operations Agent'] },
-    { id: 'choose-studio', label: 'Choose Studio', copy: 'Find the best module for your goal.', providers: ['SLT Producer Agent', 'Studio Router Agent'] },
-    { id: 'provider-routing', label: 'Provider Routing', copy: 'Pick providers, credits and execution path.', providers: ['Studio Router Agent', 'CEO Operations Agent'] },
-    { id: 'production-brief', label: 'Production Brief', copy: 'Turn a loose idea into a production-ready brief.', providers: ['Film Director Agent', 'SLT Producer Agent'] },
+    { id: 'plan-project', label: 'Plan Project', copy: 'Break down the idea into the right studio workflow.', providers: ['OpenAI', 'Gemini', 'Meta Llama', 'Local model'] },
+    { id: 'choose-studio', label: 'Choose Studio', copy: 'Find the best module for your goal.', providers: ['OpenAI', 'Gemini', 'Hermes local'] },
+    { id: 'provider-routing', label: 'Provider Routing', copy: 'Pick providers, credits and execution path.', providers: ['OpenAI', 'Gemini', 'Local model'] },
+    { id: 'production-brief', label: 'Production Brief', copy: 'Turn a loose idea into a production-ready brief.', providers: ['OpenAI', 'Gemini', 'Meta Llama'] },
   ],
 };
 

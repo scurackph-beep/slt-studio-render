@@ -1,16 +1,6 @@
 import { NavLink, Link } from 'react-router-dom';
-import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useStudio } from '../context/StudioContext';
-import {
-  LANGUAGE_OPTIONS,
-  THEME_OPTIONS,
-  applyLanguage,
-  applyTheme,
-  openTranslatedPage,
-  storedLanguage,
-  storedTheme,
-} from '../lib/preferences';
 import BrandLogo from './BrandLogo';
 import './Navbar.css';
 
@@ -35,8 +25,6 @@ export default function Navbar({ links = [], activeId, onNavigate, mode = 'route
   const items = links.length ? links : DEFAULT_LINKS;
   const { credits, heldCredits } = useStudio();
   const { isAuthenticated, isCEO, session } = useAuth();
-  const [theme, setTheme] = useState(storedTheme);
-  const [language, setLanguage] = useState(storedLanguage);
 
   const accountLabel = isCEO
     ? 'CEO mode'
@@ -45,20 +33,6 @@ export default function Navbar({ links = [], activeId, onNavigate, mode = 'route
       : 'Sign in';
 
   const creditsLabel = formatCredits(credits);
-
-  useEffect(() => {
-    applyTheme(theme);
-  }, [theme]);
-
-  useEffect(() => {
-    applyLanguage(language);
-  }, [language]);
-
-  const handleLanguageChange = (event) => {
-    const nextLanguage = event.target.value;
-    setLanguage(nextLanguage);
-    if (nextLanguage !== 'en') openTranslatedPage(nextLanguage);
-  };
 
   return (
     <header className="navbar" role="banner">
@@ -98,24 +72,6 @@ export default function Navbar({ links = [], activeId, onNavigate, mode = 'route
         </nav>
 
         <div className="navbar-account" aria-label="Account status">
-          <div className="navbar-preferences" aria-label="Display preferences">
-            <label>
-              <span>Look</span>
-              <select value={theme} onChange={(event) => setTheme(event.target.value)}>
-                {THEME_OPTIONS.map((option) => (
-                  <option key={option.id} value={option.id}>{option.label}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>Language</span>
-              <select value={language} onChange={handleLanguageChange}>
-                {LANGUAGE_OPTIONS.map((option) => (
-                  <option key={option.id} value={option.id}>{option.label}</option>
-                ))}
-              </select>
-            </label>
-          </div>
           {creditsLabel ? (
             <span
               className="navbar-credits"

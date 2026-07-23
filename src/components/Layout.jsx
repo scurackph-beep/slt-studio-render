@@ -4,11 +4,12 @@ import SiteReport from './SiteReport';
 import './Layout.css';
 
 const NAV_LINKS = [
+  { path: '/', label: 'Home' },
   { path: '/about', label: 'About Us' },
-  { path: '/sitemap', label: 'Site Map' },
-  { path: '/subscription', label: 'Plans' },
+  { path: '/sitemap', label: 'Mapa del sitio' },
+  { path: '/subscription', label: 'Planes' },
   { path: '/careers', label: 'Careers' },
-  { path: '/help', label: 'Help' },
+  { path: '/help', label: 'Ayuda y soporte' },
 ];
 
 export default function Layout() {
