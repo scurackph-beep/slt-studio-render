@@ -1,13 +1,11 @@
 import { useMemo, useState } from 'react';
 import { getApiBase } from '../lib/api-client';
-import { INVITE_CODES, isValidInviteCode, storeAccessSession } from '../lib/access-control';
+import { storeAccessSession } from '../lib/access-control';
 import { isSiteGateUnlocked, unlockSiteGate, unlockSiteGateFromUrl, SITE_GATE_KEY } from '../lib/site-gate';
 import BrandLogo from './BrandLogo';
 import './SiteGate.css';
 
 const ACCESS_MODES = [
-  { id: 'signup', label: 'Create User' },
-  { id: 'login', label: 'Log In' },
   { id: 'ceo', label: 'CEO' },
   { id: 'invite', label: 'Guest Code' },
   { id: 'spy', label: 'Spy' },
@@ -31,7 +29,7 @@ async function accessRequest(path, body) {
 }
 
 export default function SiteGate({ children }) {
-  const [mode, setMode] = useState('login');
+  const [mode, setMode] = useState('ceo');
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -115,8 +113,8 @@ export default function SiteGate({ children }) {
   };
 
   const handleInvite = async () => {
-    if (!isValidInviteCode(inviteCode)) {
-      setError('Guest code is not valid.');
+    if (!inviteCode.trim()) {
+      setError('Guest code is required.');
       return;
     }
     setBusy(true);
@@ -171,7 +169,7 @@ export default function SiteGate({ children }) {
         <p className="site-gate-kicker">Private production access</p>
         <h1>{modeTitle}</h1>
         <p className="site-gate-copy">
-          Choose how you want to enter Sweet Little Trauma Studio.
+          Private access only. CEO, invited guests and read-only spy mode.
         </p>
 
         <div className="site-gate-tabs" role="tablist" aria-label="Access mode">
@@ -229,7 +227,6 @@ export default function SiteGate({ children }) {
             {busy ? 'Opening...' : mode === 'spy' ? 'Enter Spy Mode' : 'Enter Studio'}
           </button>
         </form>
-        {mode === 'invite' ? <p className="site-gate-codes">Valid guest passes: {INVITE_CODES.join(' / ')}</p> : null}
         {error ? <p className="site-gate-error">{error}</p> : null}
       </div>
     </section>
