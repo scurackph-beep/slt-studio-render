@@ -411,8 +411,13 @@ export function createRuntimeStore(env = process.env) {
   if (!env.DATABASE_URL || env.SLT_TEST_MODE === "1") {
     return new MemoryRuntimeStore();
   }
+  const migrations = ["migrations/001_production_schema.sql"];
+  const useSupabaseRls = env.ENABLE_SUPABASE_RLS === "1" || env.SUPABASE_RLS === "1" || env.DATABASE_PROVIDER === "supabase";
+  if (useSupabaseRls) {
+    migrations.push("migrations/002_supabase_rls.sql");
+  }
   return new PostgresRuntimeStore({
     databaseUrl: env.DATABASE_URL,
-    migrations: ["migrations/001_production_schema.sql", "migrations/002_supabase_rls.sql"]
+    migrations
   });
 }
