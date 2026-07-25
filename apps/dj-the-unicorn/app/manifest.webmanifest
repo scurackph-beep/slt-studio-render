@@ -1,0 +1,12 @@
+{
+  "name": "DJ The Unicorn",
+  "short_name": "DJ Unicorn",
+  "description": "DJ The Unicorn — By Sweet Little Trauma",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0b0d12",
+  "theme_color": "#0b0d12",
+  "icons": [
+    { "src": "logo.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
