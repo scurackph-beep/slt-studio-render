@@ -7,14 +7,11 @@ import json
 print(json.dumps({
   "additional_context": (
     "BRAND / LOGO RULES for the music player: "
-    "1) Never reuse or crop the old neon rainbow / Studio logo. "
-    "2) Redesign from scratch. "
-    "3) App name must not include Sweet, Little, or Trauma. "
-    "4) Credit only as 'By Sweet Little Trauma'. "
-    "5) Logo aesthetic board lives at "
-    "/home/ubuntu/.cursor/projects/workspace/canvases/logo-estetico.canvas.tsx "
-    "(or the workspace canvases/logo-estetico.canvas.tsx). "
-    "Update that canvas when iterating on logo/name."
+    "1) App name is LOCKED: DJ The Unicorn (from the unicorn avatar). "
+    "2) Credit only as 'By Sweet Little Trauma' — never put Sweet/Little/Trauma in the app title. "
+    "3) Never reuse or crop the old neon rainbow / Studio logo. "
+    "4) Prefer the unicorn-with-headphones mascot mark. "
+    "5) Logo board: canvases/logo-estetico.canvas.tsx ; PNG: public/assets/dj-the-unicorn-logo.png."
   )
 }))
 PY
