@@ -7256,10 +7256,27 @@ app.use("/cdn/assets", express.static(assetStorageDir, {
   }
 }));
 
+const djUnicornDir = resolve(projectDir, "../apps/dj-the-unicorn/app");
+const djUnicornPublicDir = resolve(projectDir, "../public/dj-the-unicorn");
+const djUnicornStaticDir = existsSync(djUnicornDir) ? djUnicornDir : djUnicornPublicDir;
+if (existsSync(djUnicornStaticDir)) {
+  app.use("/dj-the-unicorn", express.static(djUnicornStaticDir, {
+    index: "index.html",
+    dotfiles: "deny",
+    setHeaders: (response) => {
+      response.setHeader("Cache-Control", "no-cache");
+    }
+  }));
+}
+
 app.use(express.static(staticDir, { index: "index.html", dotfiles: "deny" }));
 
 app.get("*", (request, response, next) => {
   if (request.path.startsWith("/api/")) {
+    next();
+    return;
+  }
+  if (request.path === "/dj-the-unicorn" || request.path.startsWith("/dj-the-unicorn/")) {
     next();
     return;
   }
