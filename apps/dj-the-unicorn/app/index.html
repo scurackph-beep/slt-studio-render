@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="DJ The Unicorn" />
+  <meta name="theme-color" content="#0b0d12" />
+  <meta name="description" content="DJ The Unicorn — By Sweet Little Trauma. Demo limitada. Compra única Pro." />
+  <link rel="icon" href="logo.png" />
+  <link rel="apple-touch-icon" href="logo.png" />
+  <link rel="stylesheet" href="styles.css?v=1" />
+  <title>DJ The Unicorn · By Sweet Little Trauma</title>
+</head>
+<body>
+  <div id="gate" class="gate hidden">
+    <div class="panel gate-panel" id="gateNotice">
+      <img class="logo" src="logo.png" alt="DJ The Unicorn" />
+      <h1>DJ The Unicorn</h1>
+      <p class="credit">By Sweet Little Trauma</p>
+      <ul class="notice">
+        <li>No es suscripción.</li>
+        <li>DEMO: 3 canciones, reproducción en primer plano.</li>
+        <li>Pro: compra única. Primeros 50 a $5; después $10.</li>
+        <li>Tu biblioteca se guarda en este dispositivo.</li>
+      </ul>
+      <label class="check"><input id="noticeAccept" type="checkbox" /><span>Acepto el aviso</span></label>
+      <label class="check"><input id="termsAccept" type="checkbox" /><span>Acepto Bases y Condiciones</span></label>
+      <button id="btnNoticeContinue" class="btn solid" type="button" disabled>Continuar</button>
+      <button id="btnOwnerFromNotice" class="btn soft" type="button">Soy el dueño</button>
+    </div>
+
+    <div class="panel gate-panel hidden" id="gateAccount">
+      <h2>Crear cuenta</h2>
+      <div class="form-grid">
+        <label class="field"><span>Nombre</span><input id="accName" type="text" autocomplete="given-name" /></label>
+        <label class="field"><span>Apellido</span><input id="accLast" type="text" autocomplete="family-name" /></label>
+        <label class="field full"><span>Email</span><input id="accEmail" type="email" autocomplete="email" /></label>
+        <label class="field full"><span>PIN (4+)</span><input id="accPin" type="password" inputmode="numeric" /></label>
+      </div>
+      <button id="btnCreateAccount" class="btn solid" type="button">Crear y entrar</button>
+      <button id="btnBackNotice" class="btn soft" type="button">Volver</button>
+    </div>
+
+    <div class="panel gate-panel hidden" id="gateOwner">
+      <h2>Dueño</h2>
+      <label class="field"><span>Código</span><input id="ownerCode" type="password" /></label>
+      <button id="btnOwnerUnlock" class="btn solid" type="button">Entrar como dueño</button>
+      <button id="btnOwnerBack" class="btn soft" type="button">Volver</button>
+    </div>
+
+    <div class="panel gate-panel hidden" id="gateUnlock">
+      <h2>Desbloquear</h2>
+      <p class="hint" id="unlockEmail"></p>
+      <label class="field"><span>PIN</span><input id="unlockSecret" type="password" /></label>
+      <button id="btnUnlock" class="btn solid" type="button">Entrar</button>
+    </div>
+  </div>
+
+  <main class="app hidden" id="appRoot">
+    <header class="top">
+      <button id="btnMenu" class="icon" type="button" aria-label="Menú">☰</button>
+      <div class="brand">
+        <strong>DJ The Unicorn</strong>
+        <span>By Sweet Little Trauma</span>
+      </div>
+      <button id="btnLang" class="icon" type="button">ES</button>
+    </header>
+
+    <p id="demoBanner" class="banner"></p>
+    <p id="statusMsg" class="status hidden"></p>
+
+    <section class="panel stage">
+      <div class="turntable" id="art">
+        <div class="chassis">
+          <div class="platter-well">
+            <div class="platter-spin" id="platterSpin">
+              <div class="vinyl"></div>
+              <div class="label"><img src="logo.png" alt="" /></div>
+            </div>
+          </div>
+          <div class="tonearm" id="tonearm">
+            <div class="pivot"></div>
+            <div class="arm"></div>
+            <div class="headshell"></div>
+          </div>
+        </div>
+      </div>
+
+      <canvas id="vizCanvas" class="viz" width="720" height="140" aria-hidden="true"></canvas>
+
+      <div class="meta">
+        <h2 id="trackTitle">Sin reproducción</h2>
+        <p id="trackSub">Importá medios — se guardan solos</p>
+      </div>
+
+      <audio id="audio" playsinline webkit-playsinline preload="auto"></audio>
+
+      <div class="seek">
+        <input id="seek" type="range" min="0" max="1000" value="0" />
+        <div class="times"><span id="timeCurrent">0:00</span><span id="timeTotal">0:00</span></div>
+      </div>
+
+      <div class="transport">
+        <button id="btnPrev" class="chip" type="button">⏮</button>
+        <button id="btnPlay" class="play" type="button"><span id="iconPlay">▶</span><span id="iconPause" class="hidden">⏸</span></button>
+        <button id="btnNext" class="chip" type="button">⏭</button>
+      </div>
+
+      <div class="row">
+        <input id="fileInput" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg" multiple hidden />
+        <button id="btnImportFiles" class="btn solid" type="button">Añadir canciones</button>
+        <button id="btnClear" class="btn soft" type="button">Vaciar lista</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="block-head">
+        <h3>Biblioteca</h3>
+        <span id="trackCount" class="pill">0</span>
+      </div>
+      <p id="storageInfo" class="hint">Espacio: —</p>
+      <ul id="playlist" class="playlist"></ul>
+      <p id="emptyHint" class="hint">Vacía — las canciones quedan guardadas al importarlas.</p>
+    </section>
+  </main>
+
+  <aside id="menuDrawer" class="drawer hidden">
+    <div class="drawer-backdrop" id="menuBackdrop"></div>
+    <div class="drawer-panel panel">
+      <div class="block-head"><h3>Menú</h3><button id="btnCloseMenu" class="icon" type="button">✕</button></div>
+      <button class="menu-link" data-go="account" type="button">Cuenta</button>
+      <button class="menu-link hidden" data-go="admin" id="btnAdminMenu" type="button">Admin dueño</button>
+      <button class="menu-link" data-go="pro" id="btnMenuPro" type="button">Desbloquear Pro</button>
+      <button id="btnLockNow" class="menu-link" type="button">Bloquear</button>
+    </div>
+  </aside>
+
+  <dialog id="sheet" class="sheet">
+    <div class="sheet-body panel" id="sheetBody"></div>
+  </dialog>
+
+  <script src="app.js?v=1"></script>
+</body>
+</html>
