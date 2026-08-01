@@ -21,7 +21,7 @@ function formatCredits(value) {
   return `${new Intl.NumberFormat('en-US').format(value)} credits`;
 }
 
-export default function Navbar({ links = [], activeId, onNavigate, mode = 'route' }) {
+export default function Navbar({ links = [], activeId, onNavigate, mode = 'route', gala = false }) {
   const items = links.length ? links : DEFAULT_LINKS;
   const { credits, heldCredits } = useStudio();
   const { isAuthenticated, isCEO, session } = useAuth();
@@ -35,10 +35,18 @@ export default function Navbar({ links = [], activeId, onNavigate, mode = 'route
   const creditsLabel = formatCredits(credits);
 
   return (
-    <header className="navbar" role="banner">
+    <header className={`navbar ${gala ? 'navbar--gala' : ''}`} role="banner">
       <div className="navbar-inner">
         <Link to="/" className="navbar-brand" aria-label="Sweet Little Trauma Studio home">
-          <BrandLogo className="navbar-logo" variant="compact" />
+          {gala ? (
+            <img
+              className="navbar-gala-lockup"
+              src="/assets/home-gala/01-brand/brand-lockup-ai-no-screws-v2.png"
+              alt="Sweet Little Trauma Studio AI"
+            />
+          ) : (
+            <BrandLogo className="navbar-logo" variant="compact" />
+          )}
         </Link>
 
         <nav className="navbar-links" aria-label="Main navigation">
@@ -87,6 +95,14 @@ export default function Navbar({ links = [], activeId, onNavigate, mode = 'route
             title={accountLabel}
           >
             <span className="navbar-profile-dot" aria-hidden="true" />
+            {gala ? (
+              <img
+                className="navbar-gala-profile"
+                src="/assets/home-gala/04-effects/profile-glyph-white.png"
+                alt=""
+                aria-hidden="true"
+              />
+            ) : null}
             <span className="navbar-account-text">{accountLabel}</span>
           </Link>
         </div>

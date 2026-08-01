@@ -167,6 +167,217 @@
   border-bottom: 0;
 }
 
+.navbar--gala {
+  height: 108px;
+  border: 0;
+  background: rgba(249, 248, 245, 0.98);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.navbar--gala::before {
+  content: '';
+  position: absolute;
+  top: 42px;
+  right: 0;
+  left: 0;
+  height: 38px;
+  background: #202020;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.32), 0 8px 18px rgba(0, 0, 0, 0.06);
+}
+
+.navbar--gala .navbar-inner {
+  position: relative;
+  display: block;
+  height: 100%;
+  padding: 0;
+}
+
+.navbar--gala .navbar-brand {
+  position: absolute;
+  z-index: 3;
+  top: 8px;
+  left: 0;
+  display: block;
+  width: clamp(286px, 20.4vw, 368px);
+  height: 96px;
+}
+
+.navbar-gala-lockup {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+}
+
+.navbar--gala .navbar-links {
+  position: absolute;
+  z-index: 2;
+  top: 42px;
+  right: 66px;
+  left: clamp(298px, 21.5vw, 390px);
+  display: flex;
+  height: 38px;
+  flex-wrap: nowrap;
+  justify-content: space-evenly;
+  gap: 16px;
+  overflow: hidden;
+  padding: 0 12px;
+}
+
+.navbar--gala .navbar-link {
+  display: inline-flex;
+  align-items: center;
+  height: 38px;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.9);
+  font-family: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
+  font-size: clamp(9px, 0.72vw, 12px);
+  font-weight: 700;
+  letter-spacing: 0;
+  opacity: 1;
+}
+
+.navbar--gala .navbar-link::after {
+  position: absolute;
+  bottom: 2px;
+  left: 50%;
+  width: 0;
+  height: 2px;
+  content: '';
+  background: linear-gradient(90deg, #ed312c, #efb326, #16a879, #19a7d2, #305bd7, #b339c6);
+  transform: translateX(-50%);
+  transition: width 180ms ease;
+}
+
+.navbar--gala .navbar-link:hover,
+.navbar--gala .navbar-link.is-active {
+  color: #fff;
+  transform: none;
+}
+
+.navbar--gala .navbar-link:hover::after,
+.navbar--gala .navbar-link.is-active::after {
+  width: 28px;
+}
+
+.navbar--gala .navbar-account {
+  position: absolute;
+  z-index: 4;
+  top: 42px;
+  right: 10px;
+  height: 38px;
+  gap: 8px;
+}
+
+.navbar--gala .navbar-credits {
+  padding: 0;
+  color: rgba(255, 255, 255, 0.72);
+  background: transparent;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+}
+
+.navbar--gala .navbar-account-link {
+  width: 34px;
+  min-height: 34px;
+  height: 34px;
+  padding: 0;
+  justify-content: center;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.navbar--gala .navbar-profile-dot,
+.navbar--gala .navbar-account-text {
+  display: none;
+}
+
+.navbar-gala-profile {
+  display: block;
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+}
+
+.navbar--gala .navbar-account-link:hover {
+  transform: translateY(-1px);
+  border: 0;
+  box-shadow: none;
+}
+
+@media (max-width: 980px) {
+  .navbar--gala {
+    min-height: 126px;
+    height: 126px;
+  }
+
+  .navbar--gala::before,
+  .navbar--gala .navbar-links,
+  .navbar--gala .navbar-account {
+    top: 76px;
+  }
+
+  .navbar--gala .navbar-brand {
+    top: 5px;
+    width: min(300px, 62vw);
+    height: 78px;
+  }
+
+  .navbar--gala .navbar-links {
+    right: 54px;
+    left: min(318px, 34vw);
+    justify-content: flex-start;
+    gap: 28px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .navbar--gala .navbar-links::-webkit-scrollbar {
+    display: none;
+  }
+
+  .navbar--gala .navbar-link {
+    flex: 0 0 auto;
+    font-size: 10px;
+  }
+}
+
+@media (max-width: 640px) {
+  .navbar--gala {
+    min-height: 132px;
+    height: 132px;
+  }
+
+  .navbar--gala::before,
+  .navbar--gala .navbar-links,
+  .navbar--gala .navbar-account {
+    top: 88px;
+  }
+
+  .navbar--gala .navbar-brand {
+    width: min(310px, 82vw);
+    height: 82px;
+  }
+
+  .navbar--gala .navbar-inner {
+    display: block;
+  }
+
+  .navbar--gala .navbar-links {
+    right: 50px;
+    left: 12px;
+    grid-column: auto;
+    order: initial;
+  }
+
+  .navbar--gala .navbar-account {
+    justify-self: auto;
+  }
+}
+
 @media (max-width: 980px) {
   .navbar {
     height: auto;
@@ -205,5 +416,19 @@
 
   .navbar-account {
     justify-self: end;
+  }
+}
+
+@media (max-width: 980px) {
+  .navbar.navbar--gala {
+    height: 126px;
+    min-height: 126px;
+  }
+}
+
+@media (max-width: 640px) {
+  .navbar.navbar--gala {
+    height: 132px;
+    min-height: 132px;
   }
 }

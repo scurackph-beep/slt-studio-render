@@ -372,23 +372,84 @@ export default function Home() {
     event.target.value = '';
   };
 
+  const isEngaged = messages.length > 1 || isThinking;
+
   return (
     <section className="home-command">
       <div className="home-command-bg" aria-hidden="true" />
 
-      <div className="home-command-shell">
-        <div className="home-category-row" aria-label="Studios">
-          {CATEGORIES.map((category) => (
-            <button
-              key={category.id}
-              type="button"
-              className={`home-category ${activeCategory.id === category.id ? 'is-active' : ''}`}
-              onClick={() => handleCategorySelect(category)}
-            >
-              <span>{category.label}</span>
-            </button>
-          ))}
+      <div className="home-gala-visual home-gala-visual-left" aria-hidden="true">
+        <div className="home-gala-left-portrait-composite">
+          <img
+            className="home-gala-left-portrait"
+            src="/assets/home-gala/02-decorative/left-portrait-plate.png"
+            alt=""
+          />
+          <span className="home-gala-eye-video-window">
+            <video
+              className="home-gala-eye-video"
+              src="/assets/home-gala/motion/eye-panel-source.mp4"
+              autoPlay
+              muted
+              loop
+              playsInline
+              preload="auto"
+            />
+          </span>
         </div>
+        <img
+          className="home-gala-left-rails"
+          src="/assets/home-gala/02-decorative/left-acrylic-rails.png"
+          alt=""
+        />
+      </div>
+
+      <div className="home-gala-visual home-gala-visual-right" aria-hidden="true">
+        <div className="home-gala-right-portrait-composite">
+          <img
+            className="home-gala-right-portrait"
+            src="/assets/home-gala/02-decorative/right-fashion-plate.png"
+            alt=""
+          />
+          <span className="home-gala-woman-video-window">
+            <video
+              className="home-gala-woman-video"
+              src="/assets/home-gala/motion/woman-panel-static-frame.mp4"
+              autoPlay
+              muted
+              loop
+              playsInline
+              preload="auto"
+            />
+          </span>
+          <span className="home-gala-portrait-frame">
+            <i className="home-gala-bolt home-gala-bolt-tl" />
+            <i className="home-gala-bolt home-gala-bolt-tr" />
+            <i className="home-gala-bolt home-gala-bolt-bl" />
+            <i className="home-gala-bolt home-gala-bolt-br" />
+          </span>
+        </div>
+        <img
+          className="home-gala-right-towers"
+          src="/assets/home-gala/02-decorative/right-acrylic-towers.png"
+          alt=""
+        />
+      </div>
+
+      <div className="home-gala-pyramid" aria-hidden="true">
+        <span className="home-gala-pyramid-pane home-gala-pyramid-smoke" />
+        <span className="home-gala-pyramid-pane home-gala-pyramid-amber" />
+        <span className="home-gala-pyramid-pane home-gala-pyramid-cyan" />
+        <span className="home-gala-pyramid-core" />
+      </div>
+
+      <div className={`home-command-shell ${isEngaged ? 'is-engaged' : ''}`}>
+        <div className="home-gala-kicker">
+          <p>CREATE <span>•</span> HEAL <span>•</span> TRANSFORM</p>
+          <img src="/assets/home-gala/04-effects/rainbow-rule.png" alt="" aria-hidden="true" />
+        </div>
+
+        <h1 className="home-gala-title">WHAT DO YOU<br />WANT TO DO TODAY?</h1>
 
         <div className="home-intent-grid">
           <div className="home-chat-panel">
@@ -429,6 +490,12 @@ export default function Home() {
             ) : null}
 
             <form className="home-chat-composer" onSubmit={handleSubmit}>
+              <img
+                className="home-chat-composer-surface"
+                src="/assets/home-gala/03-ui-surfaces/chat-composer-surface.png"
+                alt=""
+                aria-hidden="true"
+              />
               <input
                 ref={fileInputRef}
                 type="file"
@@ -447,11 +514,15 @@ export default function Home() {
               />
               <div className="home-chat-composer-actions">
                 <button type="button" className="home-icon-button" aria-label="Attach file" onClick={handleAttach}>
-                  +
+                  ↑
                 </button>
-                <button type="submit" className="home-send-button" disabled={!input.trim() || isThinking}>
-                  Send
+                <button type="submit" className="home-send-button" aria-label="Send" disabled={!input.trim() || isThinking}>
+                  ➤
                 </button>
+              </div>
+              <div className="home-composer-meta">
+                <span>Tell us what you want to create with {activeCategory.label}.</span>
+                <span>{input.length}/500</span>
               </div>
             </form>
           </div>
@@ -488,6 +559,20 @@ export default function Home() {
               Open {activeCategory.label}
             </button>
           </div>
+        </div>
+
+        <div className="home-category-row" aria-label="Studios">
+          {CATEGORIES.map((category, index) => (
+            <button
+              key={category.id}
+              type="button"
+              className={`home-category ${activeCategory.id === category.id ? 'is-active' : ''}`}
+              style={{ '--category-color': ['#ef312f', '#f28b27', '#e7c51e', '#32a85d', '#22b7d0', '#405de6', '#b03acb'][index] }}
+              onClick={() => handleCategorySelect(category)}
+            >
+              <span>{category.label}</span>
+            </button>
+          ))}
         </div>
       </div>
     </section>

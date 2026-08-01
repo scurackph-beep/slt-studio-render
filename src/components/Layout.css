@@ -22,6 +22,22 @@
   min-height: calc(100vh - var(--navbar-height));
 }
 
+.layout--home-gala,
+.layout--home-gala .main-content,
+.layout--home-gala .page-container {
+  background: #f7f5f1;
+}
+
+.layout--home-gala .main-content {
+  padding-top: 0;
+}
+
+.layout--home-gala .page-container {
+  min-height: 100vh;
+  padding: 0;
+  animation: none;
+}
+
 .site-report-trigger {
   position: fixed;
   right: 22px;
