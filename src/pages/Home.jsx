@@ -55,6 +55,13 @@ const CATEGORIES = [
     prompt: 'Plan the project, choose the correct studio and prepare the next action.',
     keywords: ['assist', 'assistant', 'help', 'ayuda', 'plan', 'organize'],
   },
+  {
+    id: 'gallery',
+    label: 'GALLERY',
+    path: '/library',
+    prompt: 'Review your projects, generated assets, progress and institutional work.',
+    keywords: ['gallery', 'library', 'history', 'asset', 'project', 'galeria', 'biblioteca'],
+  },
 ];
 
 const CATEGORY_ACTIONS = {
@@ -112,6 +119,7 @@ const CATEGORY_ACTIONS = {
     { id: 'provider-routing', label: 'Provider Routing', copy: 'Pick providers, credits and execution path.', providers: ['OpenAI', 'Gemini', 'Local model'] },
     { id: 'production-brief', label: 'Production Brief', copy: 'Turn a loose idea into a production-ready brief.', providers: ['OpenAI', 'Gemini', 'Meta Llama'] },
   ],
+  gallery: [],
 };
 
 const CATEGORY_QUICK_PROMPTS = {
@@ -157,6 +165,7 @@ const CATEGORY_QUICK_PROMPTS = {
     'Which provider should I use?',
     'Turn my idea into a production brief',
   ],
+  gallery: [],
 };
 
 const CATEGORY_ASSISTANT_INTRO = {
@@ -167,6 +176,7 @@ const CATEGORY_ASSISTANT_INTRO = {
   fashion: 'Fashion mode active. Define the look, textile, try-on or editorial direction.',
   engineering: 'Engineering mode active. Send a brief for apps, automations or prototypes.',
   assist: 'Virtual Assist active. I can help route you to the right studio and provider.',
+  gallery: 'Gallery active. Review projects, generated assets and production history.',
 };
 
 function classifyIntent(text) {
@@ -233,17 +243,6 @@ export default function Home() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isThinking]);
-
-  const handleCategorySelect = (category) => {
-    const actions = CATEGORY_ACTIONS[category.id] || [];
-    setActiveCategory(category);
-    setActiveAction(actions[0] || null);
-    setMessages((current) => [
-      ...current,
-      { sender: 'studio', text: CATEGORY_ASSISTANT_INTRO[category.id] || `Switched to ${category.label}.` },
-    ]);
-    setAssistantState(`${category.label} selected`);
-  };
 
   const openStudio = (category = activeCategory, action = activeAction, prompt = input) => {
     const params = new URLSearchParams();
@@ -506,7 +505,7 @@ export default function Home() {
               <textarea
                 ref={chatInputRef}
                 value={input}
-                onChange={(event) => setInput(event.target.value.slice(0, 500))}
+                onChange={(event) => setInput(event.target.value.slice(0, 250))}
                 onKeyDown={handleChatKeyDown}
                 placeholder="Message the assistant..."
                 rows={2}
@@ -522,7 +521,7 @@ export default function Home() {
               </div>
               <div className="home-composer-meta">
                 <span>Tell us what you want to create with {activeCategory.label}.</span>
-                <span>{input.length}/500</span>
+                <span>{input.length}/250</span>
               </div>
             </form>
           </div>
@@ -567,8 +566,8 @@ export default function Home() {
               key={category.id}
               type="button"
               className={`home-category ${activeCategory.id === category.id ? 'is-active' : ''}`}
-              style={{ '--category-color': ['#ef312f', '#f28b27', '#e7c51e', '#32a85d', '#22b7d0', '#405de6', '#b03acb'][index] }}
-              onClick={() => handleCategorySelect(category)}
+              style={{ '--category-color': ['#ef312f', '#f28b27', '#e7c51e', '#32a85d', '#22b7d0', '#405de6', '#b03acb', '#d14b78'][index] }}
+              onClick={() => navigate(category.path)}
             >
               <span>{category.label}</span>
             </button>

@@ -41,8 +41,8 @@ export default function Navbar({ links = [], activeId, onNavigate, mode = 'route
           {gala ? (
             <img
               className="navbar-gala-lockup"
-              src="/assets/home-gala/01-brand/brand-lockup-ai-no-screws-v2.png"
-              alt="Sweet Little Trauma Studio AI"
+              src="/assets/home-gala/01-brand/logo-static-final.png"
+              alt="Sweet Little Trauma Studio. Create, Heal, Transform."
             />
           ) : (
             <BrandLogo className="navbar-logo" variant="compact" />
