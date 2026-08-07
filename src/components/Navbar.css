@@ -376,18 +376,43 @@
 @media (max-width: 640px) {
   .navbar-inner {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 14px;
+    width: 100%;
+    padding: 14px 20px 10px;
   }
 
   .navbar-links {
     grid-column: 1 / -1;
     justify-content: flex-start;
+    flex-wrap: nowrap;
     order: 3;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    padding: 0;
+    scrollbar-width: none;
+  }
+
+  .navbar-links::-webkit-scrollbar {
+    display: none;
   }
 
   .navbar-account {
     justify-self: end;
+    min-width: 0;
+    gap: 8px;
+  }
+
+  .navbar-account-link {
+    width: 38px;
+    flex: 0 0 38px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .navbar-account-text {
+    display: none;
   }
 }
 

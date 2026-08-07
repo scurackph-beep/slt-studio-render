@@ -1,0 +1,227 @@
+.character-lab {
+  min-height: 100vh;
+  padding: 40px clamp(20px, 4vw, 72px) 72px;
+  color: var(--studio-text, #f4f1ea);
+  background: var(--studio-bg, #090909);
+}
+
+.character-lab-header,
+.character-lab-identity,
+.character-lab-section-head,
+.character-lab-consent {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.character-lab-header {
+  padding-bottom: 28px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.character-lab-status {
+  max-width: 420px;
+  margin: 0;
+  color: rgba(255, 255, 255, 0.72);
+  text-align: right;
+}
+
+.character-lab-shell {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  min-height: 680px;
+}
+
+.character-lab-list {
+  padding: 28px 24px 28px 0;
+  border-right: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.character-lab-create {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 32px;
+}
+
+.character-lab-character {
+  display: grid;
+  width: 100%;
+  min-height: 58px;
+  padding: 12px 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+}
+
+.character-lab-character span {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 12px;
+}
+
+.character-lab-character.is-active {
+  border-bottom-color: #d6b77a;
+}
+
+.character-lab-main {
+  display: grid;
+  align-content: start;
+  gap: 0;
+  min-width: 0;
+  padding-left: clamp(24px, 4vw, 64px);
+}
+
+.character-lab-main > section {
+  padding: 30px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.character-lab-identity h2,
+.character-lab-empty h2 {
+  margin: 5px 0 8px;
+  font-size: clamp(28px, 4vw, 54px);
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.character-lab-identity p,
+.character-lab-empty p,
+.character-lab-section-head p,
+.character-lab-plan p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.character-lab-consent {
+  flex-wrap: wrap;
+}
+
+.character-lab-consent .studio-field {
+  min-width: 220px;
+  flex: 1;
+}
+
+.character-lab-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 40px;
+}
+
+.character-lab-meters {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(110px, 1fr));
+  gap: 18px;
+  margin-top: 24px;
+}
+
+.character-lab-meter {
+  display: grid;
+  gap: 8px;
+  text-transform: capitalize;
+}
+
+.character-lab-meter progress {
+  width: 100%;
+  height: 3px;
+  accent-color: #d6b77a;
+}
+
+.character-lab-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  gap: 18px;
+  margin: 24px 0;
+}
+
+.character-lab-drop {
+  display: grid;
+  place-items: center;
+  min-height: 170px;
+  padding: 24px;
+  text-align: center;
+  border: 1px dashed rgba(255, 255, 255, 0.34);
+  cursor: pointer;
+}
+
+.character-lab-drop input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+}
+
+.character-lab-drop span {
+  max-width: 620px;
+  margin-top: 9px;
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.character-lab-drop.is-busy {
+  cursor: wait;
+  opacity: 0.68;
+}
+
+.character-lab-plan article {
+  padding: 18px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.character-lab-plan article header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
+.character-lab-plan article span {
+  color: #d6b77a;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+@media (max-width: 980px) {
+  .character-lab-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .character-lab-list {
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.16);
+  }
+
+  .character-lab-main {
+    padding-left: 0;
+  }
+
+  .character-lab-meters {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .character-lab {
+    padding: 24px 18px 48px;
+  }
+
+  .character-lab-header,
+  .character-lab-identity,
+  .character-lab-section-head,
+  .character-lab-consent {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .character-lab-status {
+    text-align: left;
+  }
+
+  .character-lab-fields,
+  .character-lab-meters {
+    grid-template-columns: 1fr;
+  }
+}

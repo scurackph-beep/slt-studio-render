@@ -1,0 +1,65 @@
+.video-next .video-next-media {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #050505;
+}
+
+.video-next-monitor-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  padding: 48px;
+  color: rgba(255, 255, 255, 0.82);
+  text-align: center;
+}
+
+.video-next-monitor-empty strong {
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 18px;
+  font-weight: 400;
+}
+
+.video-next-monitor-empty span,
+.video-next-empty-list,
+.video-next-track-empty {
+  color: var(--v2-muted);
+  font-size: 10px;
+}
+
+.video-next-empty-list {
+  padding: 18px 14px;
+}
+
+.video-next-system-list {
+  display: grid;
+  border-top: 1px solid var(--v2-line);
+}
+
+.video-next-system-list p {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--v2-line);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.video-next-system-list span {
+  color: var(--v2-muted);
+}
+
+.video-next-track-empty {
+  display: grid;
+  place-items: center;
+  width: 100%;
+}
+
+.video-next button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}

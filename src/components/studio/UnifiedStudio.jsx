@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import ReferenceUploader from '../ReferenceUploader';
-import { assetDownloadUrl, fetchAssets } from '../../lib/api-client';
+import { assetDownloadUrl, estimateGenerationCost, fetchAssets } from '../../lib/api-client';
 import { useStudioGenerate } from '../../hooks/useStudioGenerate';
 import { useSubscription } from '../../hooks/useSubscription';
 import { useStudio } from '../../context/StudioContext';
@@ -120,6 +120,7 @@ export default function UnifiedStudio({
   const [assets, setAssets] = useState([]);
   const [libraryStatus, setLibraryStatus] = useState('Loading library...');
   const [localError, setLocalError] = useState('');
+  const [estimatedCredits, setEstimatedCredits] = useState(null);
 
   const providerOptions = useMemo(() => {
     const names = activeTool?.providers?.length
@@ -127,6 +128,10 @@ export default function UnifiedStudio({
       : providers.map((provider) => (typeof provider === 'string' ? { name: provider, status: 'Available' } : provider));
     return names.filter((provider) => provider?.name);
   }, [activeTool, providers]);
+  const visibleSettings = useMemo(
+    () => settings.filter((setting) => !setting.tools?.length || setting.tools.includes(activeTool?.id)),
+    [activeTool?.id, settings],
+  );
 
   useEffect(() => {
     if (!providerOptions.length) return;
@@ -135,7 +140,7 @@ export default function UnifiedStudio({
     }
   }, [activeProvider, providerOptions]);
 
-  const refreshLibrary = async () => {
+  const refreshLibrary = useCallback(async () => {
     const result = await fetchAssets();
     if (!result.ok) {
       setAssets([]);
@@ -147,11 +152,35 @@ export default function UnifiedStudio({
       .slice(0, 6);
     setAssets(items);
     setLibraryStatus(items.length ? 'Recent library ready.' : 'No saved assets yet.');
-  };
+  }, [kind, module]);
 
   useEffect(() => {
     refreshLibrary();
-  }, []);
+  }, [refreshLibrary]);
+
+  useEffect(() => {
+    let active = true;
+    const timer = window.setTimeout(async () => {
+      const result = await estimateGenerationCost(kind, {
+        provider: activeProvider,
+        providerLabel: activeProvider,
+        tool: activeTool?.apiTool || activeTool?.label,
+        actionId: activeTool?.apiTool || activeTool?.id,
+        model: activeTool?.id === 'reality-transform'
+          ? (activeProvider === 'Runway' ? 'aleph2' : 'luma/modify-video')
+          : settingValues.model,
+        outputCount: clampOutputCount(outputCount),
+        ...settingValues,
+        durationSeconds: Number(settingValues.duration) || undefined,
+        videoDurationSeconds: Number(settingValues.duration) || undefined,
+      });
+      if (active) setEstimatedCredits(result.ok ? result.data?.estimatedCredits ?? null : null);
+    }, 250);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [activeProvider, activeTool, kind, outputCount, settingValues]);
 
   const updateSetting = (key, value) => {
     setSettingValues((current) => ({ ...current, [key]: value }));
@@ -165,6 +194,19 @@ export default function UnifiedStudio({
     }
     if (!prompt.trim()) {
       setLocalError('Write what you want to create first.');
+      return;
+    }
+    if (activeTool?.requiresVideoReference && !referenceAsset) {
+      setLocalError('Upload the source performance video for Reality Transform.');
+      return;
+    }
+    if (activeTool?.requiresVideoReference && !referenceAsset?.contentType?.startsWith('video/')) {
+      setLocalError('Reality Transform needs a video reference. Remove this file and upload an MP4, MOV or WebM video.');
+      return;
+    }
+    const sourceDuration = Number(referenceAsset?.metadata?.durationSeconds || 0);
+    if (activeTool?.requiresVideoReference && sourceDuration && (sourceDuration < 2 || sourceDuration > 30)) {
+      setLocalError('Reality Transform accepts source videos from 2 to 30 seconds. Trim this clip and upload it again.');
       return;
     }
     if (!hasCredits && !isCEO) {
@@ -294,6 +336,9 @@ export default function UnifiedStudio({
                 disabled={generating}
               />
             </label>
+            <span className="studio-meta">
+              Estimated cost: {estimatedCredits ?? '—'} credits · reserved before generation
+            </span>
           </div>
         </section>
 
@@ -304,6 +349,9 @@ export default function UnifiedStudio({
           note={activeProvider}
           onAsset={setReferenceAsset}
         />
+        {activeTool?.requiresVideoReference ? (
+          <p className="studio-meta">Source video required · 2–30 seconds · MP4, MOV or WebM · up to 200MB</p>
+        ) : null}
 
         <section className="studio-glass-panel studio-creator-settings">
           <p className="studio-rail-label">Options</p>
@@ -320,7 +368,7 @@ export default function UnifiedStudio({
                 {providerOptions.map((provider) => <option key={provider.name}>{provider.name}</option>)}
               </select>
             </label>
-            {settings.map((setting) => (
+            {visibleSettings.map((setting) => (
               <label key={setting.key} className="studio-field">
                 <span>{setting.label}</span>
                 {setting.type === 'text' ? (

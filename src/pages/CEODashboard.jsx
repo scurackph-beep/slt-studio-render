@@ -19,7 +19,7 @@ const NAV_ITEMS = [
   { label: 'Messaging', path: '/contact' },
   { label: 'Calendar', path: '/ceo' },
   { label: 'Clients', path: '/contact' },
-  { label: 'Reports', path: '/ceo' },
+  { label: 'Errors', path: '/ceo/errors' },
   { label: 'Settings', path: '/settings' },
 ];
 

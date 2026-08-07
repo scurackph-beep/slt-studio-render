@@ -58,19 +58,21 @@ export function guestQuotaSnapshot(session = getSession()) {
   );
 }
 
-export function canUseGuestQuota(kind, session = getSession()) {
+export function canUseGuestQuota(kind, session = getSession(), requested = 1) {
   if (!isGuestSession(session)) return true;
   const quotaKind = quotaKindFor(kind);
   const usage = guestUsageFor(session);
   const limit = GUEST_QUOTA_LIMITS[quotaKind];
   if (!limit) return true;
-  return Number(usage[quotaKind] || 0) < limit;
+  const count = Math.max(1, Number.parseInt(String(requested || 1), 10) || 1);
+  return Number(usage[quotaKind] || 0) + count <= limit;
 }
 
-export function consumeGuestQuota(kind, session = getSession()) {
+export function consumeGuestQuota(kind, session = getSession(), consumed = 1) {
   if (!isGuestSession(session)) return guestQuotaSnapshot(session);
   const quotaKind = quotaKindFor(kind);
   if (!GUEST_QUOTA_LIMITS[quotaKind]) return guestQuotaSnapshot(session);
+  const count = Math.max(1, Number.parseInt(String(consumed || 1), 10) || 1);
   const allUsage = readGuestUsage();
   const owner = usageOwner(session);
   const current = allUsage[owner] || {};
@@ -78,7 +80,7 @@ export function consumeGuestQuota(kind, session = getSession()) {
     ...allUsage,
     [owner]: {
       ...current,
-      [quotaKind]: Math.min(GUEST_QUOTA_LIMITS[quotaKind], Number(current[quotaKind] || 0) + 1),
+      [quotaKind]: Math.min(GUEST_QUOTA_LIMITS[quotaKind], Number(current[quotaKind] || 0) + count),
     },
   };
   writeGuestUsage(next);

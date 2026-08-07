@@ -1,0 +1,334 @@
+.scene-builder-page {
+  min-height: 100vh;
+  background: #090909;
+  color: #f3f1ec;
+  font-family: Montserrat, Arial, sans-serif;
+}
+
+.scene-builder-page > header {
+  min-height: 72px;
+  padding: 18px 26px;
+  border-bottom: 1px solid #343434;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.scene-builder-page > header p,
+.scene-builder-page > header h1,
+.scene-builder-page > header span {
+  margin: 0;
+}
+
+.scene-builder-page > header p {
+  color: #9f9991;
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.scene-builder-page > header h1 {
+  margin: 4px 0;
+  font-family: Cinzel, Georgia, serif;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.scene-builder-page > header span {
+  color: #817c75;
+  font-size: 10px;
+}
+
+.scene-builder-page > header nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+}
+
+.scene-builder-page a {
+  color: inherit;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+
+.scene-builder-layout {
+  display: grid;
+  grid-template-columns: minmax(210px, 260px) minmax(440px, 1fr) minmax(280px, 340px);
+  min-height: 720px;
+}
+
+.scene-builder-layout > aside,
+.scene-builder-stage {
+  min-width: 0;
+  padding: 22px;
+}
+
+.scene-builder-layout > aside:first-child {
+  border-right: 1px solid #303030;
+}
+
+.scene-builder-inspector {
+  border-left: 1px solid #303030;
+}
+
+.scene-builder-page h2 {
+  margin: 0 0 12px;
+  color: #b5afa7;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.scene-builder-page button,
+.scene-builder-page input,
+.scene-builder-page select,
+.scene-builder-page textarea {
+  border: 1px solid #444;
+  border-radius: 2px;
+  background: #0d0d0d;
+  color: #f3f1ec;
+  font: inherit;
+}
+
+.scene-builder-page button {
+  cursor: pointer;
+  padding: 8px 10px;
+}
+
+.scene-builder-page button:hover:not(:disabled),
+.scene-builder-page a:hover {
+  border-color: #ba9c61;
+  color: #fff;
+}
+
+.scene-builder-page button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.scene-builder-page label {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-bottom: 16px;
+  color: #a39d95;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.scene-builder-page input,
+.scene-builder-page select,
+.scene-builder-page textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.scene-builder-list {
+  display: flex;
+  max-height: 240px;
+  flex-direction: column;
+  gap: 5px;
+  margin: 10px 0 24px;
+  overflow: auto;
+}
+
+.scene-builder-list button {
+  text-align: left;
+}
+
+.scene-builder-list button.is-active {
+  border-color: #b99858;
+  background: #17140f;
+}
+
+.scene-builder-list strong,
+.scene-builder-list small {
+  display: block;
+}
+
+.scene-builder-list small {
+  margin-top: 4px;
+  color: #827c75;
+}
+
+.scene-builder-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.scene-builder-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.scene-builder-preview-grid article {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border: 1px solid #383838;
+  background: #030303;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.scene-builder-preview-grid article p {
+  position: absolute;
+  z-index: 2;
+  top: 10px;
+  left: 12px;
+  margin: 0;
+  padding: 4px 6px;
+  background: rgba(0, 0, 0, 0.72);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.scene-builder-preview-grid article img,
+.scene-builder-preview-grid article video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.scene-builder-preview-grid article > span {
+  color: #77716a;
+  font-size: 11px;
+}
+
+.scene-builder-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.scene-builder-actions a {
+  padding: 9px 11px;
+  border: 1px solid #444;
+}
+
+.scene-builder-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: auto;
+}
+
+.scene-builder-steps article {
+  min-height: 90px;
+  padding: 16px;
+  border: 1px solid #343434;
+  display: flex;
+  gap: 12px;
+}
+
+.scene-builder-steps article.is-done {
+  border-color: #758d67;
+  background: #0e120d;
+}
+
+.scene-builder-steps article > b {
+  color: #b69b64;
+  font-family: Cinzel, Georgia, serif;
+  font-size: 22px;
+}
+
+.scene-builder-steps strong,
+.scene-builder-steps small {
+  display: block;
+}
+
+.scene-builder-steps small {
+  margin-top: 7px;
+  color: #827d76;
+  line-height: 1.45;
+}
+
+.scene-builder-identifiers {
+  margin-top: 25px;
+  padding-top: 15px;
+  border-top: 1px solid #333;
+}
+
+.scene-builder-identifiers span,
+.scene-builder-identifiers code {
+  display: block;
+}
+
+.scene-builder-identifiers span {
+  margin-top: 10px;
+  color: #7d776f;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.scene-builder-identifiers code {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  color: #aaa39a;
+  font-size: 9px;
+}
+
+.scene-builder-page > footer {
+  min-height: 42px;
+  padding: 0 22px;
+  border-top: 1px solid #303030;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: #8b857e;
+  font-size: 10px;
+}
+
+@media (max-width: 1000px) {
+  .scene-builder-layout {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .scene-builder-inspector {
+    grid-column: 1 / -1;
+    border-top: 1px solid #303030;
+    border-left: 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .scene-builder-page > header,
+  .scene-builder-layout,
+  .scene-builder-preview-grid,
+  .scene-builder-steps {
+    display: block;
+  }
+
+  .scene-builder-page > header nav {
+    margin-top: 16px;
+  }
+
+  .scene-builder-layout > aside,
+  .scene-builder-stage {
+    border: 0;
+    border-bottom: 1px solid #303030;
+  }
+
+  .scene-builder-preview-grid article,
+  .scene-builder-steps article {
+    margin-bottom: 10px;
+  }
+
+  .scene-builder-page > footer {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 12px 20px;
+  }
+}

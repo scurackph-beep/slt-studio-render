@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { openAsBlob } from "node:fs";
 import { createClient } from "@supabase/supabase-js";
 
 function envValue(env, key) {
@@ -132,6 +133,72 @@ export function createSupabaseStorageService(env = process.env) {
         provider: "supabase",
         bucket
       };
+    },
+    async uploadFile({ key, filePath, contentType = "application/octet-stream", upsert = true }) {
+      if (!configured) {
+        const error = new Error("Supabase Storage is not configured.");
+        error.code = "supabase_storage_not_configured";
+        throw error;
+      }
+      const storageKey = safeStorageKey(key);
+      const fileBlob = await openAsBlob(filePath, { type: contentType });
+      const { error } = await client.storage.from(bucket).upload(storageKey, fileBlob, {
+        contentType,
+        upsert
+      });
+      if (error) {
+        const uploadError = new Error(error.message || "Supabase Storage upload failed.");
+        uploadError.code = "supabase_storage_upload_failed";
+        throw uploadError;
+      }
+      const { data } = client.storage.from(bucket).getPublicUrl(storageKey);
+      return {
+        storageKey,
+        publicUrl: data.publicUrl,
+        provider: "supabase",
+        bucket
+      };
+    },
+    async createSignedUpload({ key, upsert = false }) {
+      if (!configured) {
+        const error = new Error("Supabase Storage is not configured.");
+        error.code = "supabase_storage_not_configured";
+        throw error;
+      }
+      const storageKey = safeStorageKey(key);
+      const { data, error } = await client.storage.from(bucket).createSignedUploadUrl(storageKey, { upsert });
+      if (error || !data?.signedUrl || !data?.token) {
+        const uploadError = new Error(error?.message || "Supabase Storage did not create a signed upload URL.");
+        uploadError.code = "supabase_signed_upload_failed";
+        throw uploadError;
+      }
+      return {
+        storageKey,
+        signedUrl: data.signedUrl,
+        token: data.token,
+        provider: "supabase",
+        bucket
+      };
+    },
+    async createSignedDownload({ key, expiresIn = 120 }) {
+      if (!configured) {
+        const error = new Error("Supabase Storage is not configured.");
+        error.code = "supabase_storage_not_configured";
+        throw error;
+      }
+      const storageKey = safeStorageKey(key);
+      const { data, error } = await client.storage.from(bucket).createSignedUrl(storageKey, expiresIn);
+      if (error || !data?.signedUrl) {
+        const downloadError = new Error(error?.message || "Supabase Storage did not create a signed download URL.");
+        downloadError.code = "supabase_signed_download_failed";
+        throw downloadError;
+      }
+      return { storageKey, signedUrl: data.signedUrl, provider: "supabase", bucket };
+    },
+    publicUrl(key) {
+      if (!configured) return "";
+      const storageKey = safeStorageKey(key);
+      return client.storage.from(bucket).getPublicUrl(storageKey).data.publicUrl;
     },
     async remove(key) {
       if (!configured || !key) return { ok: false, skipped: true };

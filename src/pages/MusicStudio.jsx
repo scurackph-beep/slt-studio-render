@@ -1,4 +1,5 @@
 import UnifiedStudio from '../components/studio/UnifiedStudio';
+import AudioStudioV2 from '../components/studio/AudioStudioV2';
 import './StudioLayout.css';
 
 const TOOLS = [
@@ -31,6 +32,9 @@ const SETTINGS = [
 ];
 
 export default function MusicStudio() {
+  const studioMode = new URLSearchParams(window.location.search).get('studio');
+  if (studioMode !== 'original') return <AudioStudioV2 modality="music" />;
+
   return (
     <UnifiedStudio
       kind="music"

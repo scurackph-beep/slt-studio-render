@@ -23,6 +23,23 @@ function previewFor(asset) {
   return <p className="studio-meta">{asset.originalName || 'Reference uploaded'}</p>;
 }
 
+function videoDurationFor(file) {
+  if (!file?.type?.startsWith('video/')) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const objectUrl = URL.createObjectURL(file);
+    const video = document.createElement('video');
+    const finish = (value) => {
+      URL.revokeObjectURL(objectUrl);
+      video.removeAttribute('src');
+      resolve(Number.isFinite(value) ? Number(value.toFixed(3)) : null);
+    };
+    video.preload = 'metadata';
+    video.onloadedmetadata = () => finish(video.duration);
+    video.onerror = () => finish(null);
+    video.src = objectUrl;
+  });
+}
+
 export default function ReferenceUploader({
   kind = 'image',
   label = 'Reference',
@@ -45,7 +62,8 @@ export default function ReferenceUploader({
     setBusy(true);
     setError('');
     setStatus('Validating and uploading...');
-    const result = await uploadReferenceAsset({ file, kind, module: kind, role, note });
+    const durationSeconds = await videoDurationFor(file);
+    const result = await uploadReferenceAsset({ file, kind, module: kind, role, note, durationSeconds });
     if (!result.ok || !result.data?.asset) {
       const message = result.status === 401
         ? 'Log in from Profile before uploading references.'

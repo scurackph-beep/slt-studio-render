@@ -5,11 +5,12 @@ import './Layout.css';
 
 const NAV_LINKS = [
   { path: '/', label: 'Home' },
+  { path: '/projects', label: 'Studio' },
+  { path: '/scene-builder', label: 'Scene Builder' },
+  { path: '/library', label: 'Library' },
   { path: '/about', label: 'About Us' },
-  { path: '/sitemap', label: 'Mapa del sitio' },
-  { path: '/subscription', label: 'Planes' },
-  { path: '/careers', label: 'Careers' },
-  { path: '/help', label: 'Ayuda y soporte' },
+  { path: '/subscription', label: 'Plans' },
+  { path: '/help', label: 'Help' },
 ];
 
 const HOME_GALA_NAV_LINKS = [

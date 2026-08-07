@@ -11,13 +11,25 @@
 import express from "express";
 import cors from "cors";
 import crypto from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { createReadStream, createWriteStream, existsSync, openAsBlob, readFileSync } from "node:fs";
+import { mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { Readable, Transform, Writable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { assertProductionInfrastructureReady, getProductionReadinessReport } from "./production-infrastructure.js";
 import { createRuntimeStore } from "./postgres-store.js";
 import { createSupabaseAdminClient, createSupabaseStorageService, createSupabaseUserClient, verifySupabaseJwt } from "./supabase-service.js";
+import { assertMediaSignature, assertRealityTransformMedia, extractVideoFrame, validateMediaFile } from "./media-validation.js";
+import {
+  SLT_ERROR_BY_NAME,
+  SLT_ERROR_REGISTRY,
+  classifySltError,
+  createIncidentId,
+  publicErrorPayload,
+  registrySummary,
+  sanitizeDiagnosticText
+} from "./error-registry.js";
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -209,11 +221,16 @@ function rateLimitForPath(path = "") {
 }
 
 function authFailurePayload(code = "auth_required") {
+  const definition = code === "forbidden" ? SLT_ERROR_BY_NAME.PERMISSION_DENIED : SLT_ERROR_BY_NAME.SESSION_EXPIRED;
   return {
     ok: false,
     code,
+    errorCode: definition.code,
+    errorName: definition.name,
     error: code === "forbidden" ? "Forbidden." : "Authentication required.",
-    readableError: code === "forbidden" ? "This action needs a higher access level." : "Please log in before using this action."
+    readableError: code === "forbidden" ? "This action needs a higher access level." : "Please log in before using this action.",
+    customerMessage: definition.customerMessage,
+    retryable: definition.retryable
   };
 }
 
@@ -221,12 +238,23 @@ function requiresServerAuth(path = "") {
   return [
     "/api/generate/",
     "/api/assist",
-    "/api/jobs/",
+    "/api/jobs",
+    "/api/batches",
+    "/api/generation-sessions",
     "/api/ledger",
     "/api/assets",
+    "/api/characters",
+    "/api/references",
+    "/api/scenes",
+    "/api/timeline",
+    "/api/workflows",
+    "/api/applications",
+    "/api/versions",
+    "/api/provider-status",
     "/api/uploads",
     "/api/projects",
     "/api/history",
+    "/api/model-router",
     "/api/billing",
     "/api/subscription",
     "/api/user",
@@ -234,6 +262,8 @@ function requiresServerAuth(path = "") {
     "/api/stripe/checkout",
     "/api/stripe/credits/checkout",
     "/api/stripe/portal",
+    "/api/support/incidents",
+    "/api/compensation",
     "/api/db/status",
     "/api/ceo/provider-credits"
   ].some((prefix) => path === prefix || path.startsWith(prefix));
@@ -285,6 +315,8 @@ function rateLimitMiddleware(request, response, next) {
     response.status(429).json({
       ok: false,
       code: "rate_limit_exceeded",
+      errorCode: SLT_ERROR_BY_NAME.PROVIDER_RATE_LIMIT.code,
+      errorName: SLT_ERROR_BY_NAME.PROVIDER_RATE_LIMIT.name,
       error: "Too many requests. Wait a minute and try again.",
       retryAfterSeconds: Math.ceil((bucket.resetAt - now) / 1000)
     });
@@ -294,15 +326,15 @@ function rateLimitMiddleware(request, response, next) {
 }
 
 app.post(["/api/stripe/webhook", "/api/webhooks/stripe"], express.raw({ type: "application/json" }), handleStripeWebhook);
-
+app.use(rateLimitMiddleware);
+app.use(authProtectionMiddleware);
+app.post(["/api/assets/upload-binary", "/api/uploads/file"], handleStreamingReferenceUpload);
 app.use(express.json({
   limit: "50mb",
   verify: (request, _response, buffer) => {
     request.rawBody = Buffer.from(buffer || "");
   }
 }));
-app.use(rateLimitMiddleware);
-app.use(authProtectionMiddleware);
 app.use((request, response, next) => {
   const mutates = ["POST", "PUT", "PATCH", "DELETE"].includes(request.method);
   if (mutates && request.path.startsWith("/api/")) {
@@ -325,7 +357,7 @@ const mockModeMessage = "Mock mode — provider not connected yet.";
 
 const providerKeys = {
   image: ["OPENAI_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY", "XAI_API", "LEONARDO_API_KEY", "RECRAFT_API_KEY", "REPLICATE_API_TOKEN", "COMFYUI_API_URL"],
-  video: ["GEMINI_API_KEY", "SEEDANCE_API_KEY", "BYTEPLUS_API_KEY", "BYTEPLUS_VISION_AK", "WAN_API_KEY", "HAILUO_API_KEY", "MINIMAX_API_KEY", "PIXVERSE_API_KEY", "TENCENTCLOUD_SECRET_ID"],
+  video: ["GEMINI_API_KEY", "SEEDANCE_API_KEY", "BYTEPLUS_API_KEY", "BYTEPLUS_VISION_AK", "RUNWAY_API_KEY", "LUMA_API_KEY", "REPLICATE_API_TOKEN", "WAN_API_KEY", "HAILUO_API_KEY", "MINIMAX_API_KEY", "PIXVERSE_API_KEY", "TENCENTCLOUD_SECRET_ID"],
   music: ["SUNO_API_KEY", "UDIO_API_KEY", "MINIMAX_API_KEY", "HAILUO_API_KEY", "REPLICATE_API_TOKEN"],
   sound: ["ELEVENLABS_API_KEY", "OPENAI_API_KEY", "MINIMAX_API_KEY", "HAILUO_API_KEY"],
   assist: ["OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "LOCAL_MODEL_API_URL"],
@@ -377,6 +409,7 @@ const providerCatalog = {
     envKey: "RUNWAY_API_KEY",
     adapter: "runway-video",
     endpointEnv: "RUNWAY_API_URL",
+    defaultEndpoint: "https://api.dev.runwayml.com/v1",
     execution: "async",
     supportsWebhook: true,
     defaultModel: "gen4_turbo",
@@ -391,6 +424,11 @@ const providerCatalog = {
         id: "gen4.5",
         label: "Gen-4.5",
         pricing: { chargeUnit: "second", creditsPerSecond: 12, minimumCredits: 60, source: "runway_official_api_pricing" }
+      },
+      {
+        id: "aleph2",
+        label: "Aleph 2.0 · Reality Transform",
+        pricing: { chargeUnit: "second", creditsPerSecond: 28, minimumCredits: 56, source: "runway_official_api_pricing" }
       }
     ],
     pricing: { chargeUnit: "second", creditsPerSecond: 5, minimumCredits: 25, source: "runway_official_api_pricing" }
@@ -422,6 +460,15 @@ const providerCatalog = {
   },
   Hailuo: { kind: "video", envKey: "HAILUO_API_KEY", alternateEnvKeys: ["MINIMAX_API_KEY"], adapter: "minimax-video", endpointEnv: "HAILUO_API_URL", alternateEndpointEnvKeys: ["MINIMAX_API_URL"] },
   Luma: { kind: "video", envKey: "LUMA_API_KEY", adapter: "luma-video", endpointEnv: "LUMA_API_URL" },
+  "Luma Modify": {
+    kind: "video",
+    envKey: "REPLICATE_API_TOKEN",
+    adapter: "replicate-luma-modify",
+    execution: "async",
+    supportsWebhook: true,
+    defaultModel: "luma/modify-video",
+    pricing: { chargeUnit: "second", creditsPerSecond: 42, minimumCredits: 84, source: "replicate_luma_pixel_pricing_720p_estimate" }
+  },
   PixVerse: { kind: "video", envKey: "PIXVERSE_API_KEY", adapter: "pixverse-video", endpointEnv: "PIXVERSE_API_URL" },
   Pika: { kind: "video", envKey: "PIKA_API_KEY", adapter: "generic-endpoint", endpointEnv: "PIKA_API_URL", disabledByPreference: true },
   Hunyuan: { kind: "video", envKey: "TENCENTCLOUD_SECRET_ID", adapter: "generic-endpoint", endpointEnv: "HUNYUAN_API_URL", configEnvKeys: ["TENCENTCLOUD_SECRET_KEY"], needsConfirmation: true },
@@ -448,11 +495,19 @@ const providerCatalog = {
     envKey: "",
     adapter: "slt-composer",
     localProvider: true,
+    preparedOnly: true,
     execution: "sync",
     defaultModel: "slt-local-composer-plan",
     pricing: { chargeUnit: "track", creditsPerUnit: 75, minimumCredits: 75, source: "internal_local_planning" }
   },
-  "Stable Audio": { kind: "music", envKey: "STABLE_AUDIO_API_KEY", adapter: "stability-audio", endpointEnv: "STABLE_AUDIO_API_URL" },
+  "Stable Audio": {
+    kind: "music",
+    envKey: "STABLE_AUDIO_API_KEY",
+    alternateEnvKeys: ["STABILITY_AUDIO_API_KEY", "STABILITY_API_KEY"],
+    adapter: "stability-audio",
+    endpointEnv: "STABLE_AUDIO_API_URL",
+    alternateEndpointEnvKeys: ["STABILITY_AUDIO_API_URL", "STABILITY_API_URL"]
+  },
   "ElevenLabs Music": {
     kind: "music",
     envKey: "ELEVENLABS_API_KEY",
@@ -534,6 +589,435 @@ const providerCatalog = {
 
   Stripe: { kind: "billing", envKey: "STRIPE_SECRET_KEY", adapter: "stripe-status" }
 };
+
+const multimodalOperations = {
+  image: [
+    ["text_to_image", "Text to Image"],
+    ["image_to_image", "Image to Image"],
+    ["references_to_image", "References to Image"],
+    ["character_image", "Character Image"],
+    ["product_image", "Product Image"],
+    ["style_transfer", "Style Transfer"],
+    ["inpaint", "Inpaint"],
+    ["outpaint", "Outpaint"],
+    ["remove_object", "Remove Object"],
+    ["background_replacement", "Background Replacement"],
+    ["product_reshoot", "Product Reshoot"],
+    ["mockup", "Mockup"],
+    ["create_ad", "Create Ad"],
+    ["vary_ad", "Vary Ad"],
+    ["ad_concepter", "Ad Concepter"],
+    ["ad_localization", "Ad Localization"],
+    ["generative_expand", "Generative Expand"],
+    ["upscale", "Upscale"]
+  ],
+  video: [
+    ["text_to_video", "Text to Video"],
+    ["image_to_video", "Image to Video"],
+    ["references_to_video", "References to Video"],
+    ["video_to_video", "Video to Video"],
+    ["reality_transform", "Reality Transform"],
+    ["scene_builder", "Scene Builder"],
+    ["first_last_frame", "First Frame / Last Frame"],
+    ["keyframes", "Keyframes"],
+    ["character_performance", "Character Performance"],
+    ["lip_sync", "Lip Sync"],
+    ["stylize", "Stylize"],
+    ["background_replacement", "Background Replacement"],
+    ["remove_object", "Remove Object"],
+    ["color_grade", "Color Grade"],
+    ["lighting", "Lighting"],
+    ["weather", "Weather"],
+    ["time_of_day", "Time of Day"],
+    ["seamless_loop", "Seamless Loop"],
+    ["stitch", "Stitch"],
+    ["upscale", "Upscale"],
+    ["frame_extraction", "Frame Extraction"]
+  ],
+  music: [
+    ["text_to_music", "Text to Music"],
+    ["lyrics_to_song", "Lyrics to Song"],
+    ["instrumental", "Instrumental"],
+    ["vocal_song", "Vocal Song"],
+    ["background_score", "Background Score"],
+    ["film_score", "Film Score"],
+    ["trailer_music", "Trailer Music"],
+    ["jingle", "Jingle"],
+    ["ad_music", "Ad Music"],
+    ["loop", "Loop"],
+    ["remix", "Remix"],
+    ["extend_song", "Extend Song"],
+    ["variation", "Variation"],
+    ["style_transfer", "Style Transfer"],
+    ["reference_to_music", "Reference to Music"],
+    ["vocal_replacement", "Vocal Replacement"],
+    ["stem_generation", "Stem Generation"],
+    ["stem_separation", "Stem Separation"],
+    ["mastering", "Mastering"],
+    ["audio_enhance", "Upscale / Enhance Audio"]
+  ],
+  sound: [
+    ["text_to_sfx", "Text to SFX"],
+    ["foley", "Foley"],
+    ["ambience", "Ambience"],
+    ["room_tone", "Room Tone"],
+    ["weather", "Weather"],
+    ["impact", "Impact"],
+    ["whoosh", "Whoosh"],
+    ["riser", "Riser"],
+    ["transition", "Transition"],
+    ["creature_sound", "Creature Sound"],
+    ["cinematic_sound", "Cinematic Sound"],
+    ["ui_sound", "UI Sound"],
+    ["game_sound", "Game Sound"],
+    ["background_atmosphere", "Background Atmosphere"],
+    ["text_to_speech", "Text to Speech"],
+    ["speech_to_speech", "Speech to Speech"],
+    ["voice_isolation", "Voice Isolation"],
+    ["voice_cleanup", "Voice Cleanup"],
+    ["voice_dubbing", "Voice Dubbing"],
+    ["voice_cloning", "Voice Cloning"],
+    ["lip_sync_audio", "Lip Sync Audio"],
+    ["audio_extend", "Audio Extend"],
+    ["audio_remix", "Audio Remix"],
+    ["audio_enhance", "Audio Enhance"]
+  ],
+  voice: [
+    ["text_to_speech", "Text to Speech"],
+    ["speech_to_speech", "Speech to Speech"],
+    ["voice_dubbing", "Voice Dubbing"],
+    ["voice_cloning", "Voice Cloning"]
+  ]
+};
+
+const multimodalModelRegistry = [
+  {
+    id: "openai-image-default",
+    provider: "OpenAI Images",
+    model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-1",
+    label: "OpenAI Images",
+    modality: "image",
+    operations: ["text_to_image"],
+    outputs: { aspectRatios: ["1:1", "3:2", "2:3"], maxNativeResolution: "provider-managed" },
+    ratings: { quality: 5, speed: 3, cost: 2 }
+  },
+  {
+    id: "gemini-image-default",
+    provider: "Gemini Image",
+    model: process.env.GEMINI_IMAGE_MODEL || "gemini-image",
+    label: "Gemini Image",
+    modality: "image",
+    operations: ["text_to_image", "image_to_image", "references_to_image", "character_image", "style_transfer"],
+    inputs: { imageReference: true, videoReference: false, maxReferences: 4 },
+    outputs: { aspectRatios: ["1:1", "4:5", "16:9", "9:16"], maxNativeResolution: "provider-managed" },
+    ratings: { quality: 4, speed: 4, cost: 3 }
+  },
+  {
+    id: "grok-image-default",
+    provider: "Grok Image",
+    model: process.env.XAI_IMAGE_MODEL || "grok-image",
+    label: "Grok Image",
+    modality: "image",
+    operations: ["text_to_image"],
+    outputs: { aspectRatios: ["1:1", "16:9", "9:16"], maxNativeResolution: "provider-managed" },
+    ratings: { quality: 4, speed: 4, cost: 3 }
+  },
+  {
+    id: "replicate-flux",
+    provider: "Replicate",
+    model: process.env.REPLICATE_IMAGE_MODEL || "black-forest-labs/flux-schnell",
+    label: "FLUX via Replicate",
+    modality: "image",
+    operations: ["text_to_image"],
+    outputs: { aspectRatios: ["1:1", "4:5", "16:9", "9:16", "3:2", "2:3"], maxNativeResolution: "provider-managed" },
+    ratings: { quality: 4, speed: 5, cost: 4 }
+  },
+  {
+    id: "seedance-2",
+    provider: "Seedance",
+    model: process.env.SEEDANCE_MODEL_ID || "dreamina-seedance-2-0-260128",
+    label: "Seedance 2.0",
+    modality: "video",
+    operations: ["text_to_video", "image_to_video"],
+    inputs: { imageReference: true, videoReference: false, maxReferences: 1 },
+    outputs: { durations: [5, 10], resolutions: ["720p", "1080p"], aspectRatios: ["16:9", "9:16", "1:1"], nativeAudio: false },
+    ratings: { quality: 4, speed: 4, cost: 3 }
+  },
+  {
+    id: "runway-gen4-turbo",
+    provider: "Runway",
+    model: "gen4_turbo",
+    label: "Runway Gen-4 Turbo",
+    modality: "video",
+    operations: ["text_to_video", "image_to_video", "references_to_video", "first_last_frame", "keyframes"],
+    inputs: { imageReference: true, videoReference: false, maxReferences: 5 },
+    outputs: { durations: [5, 10], resolutions: ["720p", "1080p"], aspectRatios: ["16:9", "9:16", "1:1"], nativeAudio: false },
+    ratings: { quality: 4, speed: 4, cost: 3 }
+  },
+  {
+    id: "runway-gen45",
+    provider: "Runway",
+    model: "gen4.5",
+    label: "Runway Gen-4.5",
+    modality: "video",
+    operations: ["text_to_video", "image_to_video", "references_to_video", "first_last_frame", "keyframes"],
+    inputs: { imageReference: true, videoReference: false, maxReferences: 5 },
+    outputs: { durations: [5, 10], resolutions: ["720p", "1080p"], aspectRatios: ["16:9", "9:16", "1:1"], nativeAudio: false },
+    ratings: { quality: 5, speed: 2, cost: 1 }
+  },
+  {
+    id: "runway-aleph2",
+    provider: "Runway",
+    model: "aleph2",
+    label: "Runway Aleph 2 · Reality Transform",
+    modality: "video",
+    operations: ["video_to_video", "reality_transform", "stylize", "background_replacement", "color_grade", "lighting", "weather", "time_of_day"],
+    inputs: { imageReference: true, videoReference: true, minDurationSeconds: 2, maxDurationSeconds: 30, maxInputFps: 30, maxReferences: 5 },
+    outputs: { durations: { min: 2, max: 30 }, resolutions: ["1080p"], maxNativeResolution: "1080p", nativeAudio: false, upscaleIsPostProcess: true },
+    ratings: { quality: 5, speed: 2, cost: 1 }
+  },
+  {
+    id: "luma-modify",
+    provider: "Luma Modify",
+    model: "luma/modify-video",
+    label: "Luma Modify",
+    modality: "video",
+    operations: ["video_to_video", "reality_transform", "stylize", "background_replacement"],
+    inputs: { imageReference: false, videoReference: true, maxReferences: 1 },
+    outputs: { resolutions: ["720p"], nativeAudio: false, upscaleIsPostProcess: true },
+    ratings: { quality: 4, speed: 2, cost: 1 }
+  },
+  {
+    id: "minimax-music-default",
+    provider: "MiniMax Music",
+    model: process.env.MINIMAX_MUSIC_MODEL || "music-2.0",
+    label: "MiniMax Music",
+    modality: "music",
+    operations: ["text_to_music", "lyrics_to_song", "instrumental", "vocal_song", "background_score", "film_score", "trailer_music", "jingle", "ad_music", "loop", "variation"],
+    inputs: { audioReference: false, lyrics: true },
+    outputs: { durations: { min: 10, max: 240 }, formats: ["mp3", "wav"] },
+    ratings: { quality: 4, speed: 3, cost: 3 }
+  },
+  {
+    id: "stable-audio-default",
+    provider: "Stable Audio",
+    model: process.env.STABLE_AUDIO_MODEL || "stable-audio-2",
+    label: "Stable Audio",
+    modality: "music",
+    operations: ["text_to_music", "instrumental", "background_score", "film_score", "trailer_music", "jingle", "ad_music", "loop", "variation"],
+    inputs: { audioReference: false, lyrics: false },
+    outputs: { durations: { min: 1, max: 180 }, formats: ["mp3", "wav"] },
+    ratings: { quality: 4, speed: 3, cost: 3 }
+  },
+  {
+    id: "audiocraft-musicgen",
+    provider: "AudioCraft local",
+    model: process.env.AUDIOCRAFT_REPLICATE_MODEL || "meta/musicgen",
+    label: "MusicGen via Replicate",
+    modality: "music",
+    operations: ["text_to_music", "instrumental", "background_score", "loop", "variation"],
+    inputs: { audioReference: false, lyrics: false },
+    outputs: { durations: { min: 1, max: 30 }, formats: ["wav"] },
+    ratings: { quality: 3, speed: 4, cost: 4 }
+  },
+  {
+    id: "elevenlabs-tts",
+    provider: "ElevenLabs",
+    model: process.env.ELEVENLABS_MODEL_ID || "eleven_flash_v2_5",
+    label: "ElevenLabs Voice",
+    modality: "sound",
+    operations: ["text_to_speech"],
+    inputs: { audioReference: false, text: true },
+    outputs: { formats: ["mp3"] },
+    ratings: { quality: 5, speed: 5, cost: 4 }
+  },
+  {
+    id: "openai-speech",
+    provider: "OpenAI Audio",
+    model: process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts",
+    label: "OpenAI Speech",
+    modality: "sound",
+    operations: ["text_to_speech"],
+    inputs: { audioReference: false, text: true },
+    outputs: { formats: ["mp3"] },
+    ratings: { quality: 4, speed: 5, cost: 4 }
+  },
+  {
+    id: "minimax-speech-default",
+    provider: "MiniMax Speech",
+    model: process.env.MINIMAX_SPEECH_MODEL || "speech-02-hd",
+    label: "MiniMax Speech",
+    modality: "sound",
+    operations: ["text_to_speech"],
+    inputs: { audioReference: false, text: true },
+    outputs: { formats: ["mp3"] },
+    ratings: { quality: 4, speed: 4, cost: 3 }
+  },
+  {
+    id: "stability-audio-sfx",
+    provider: "Stability Audio",
+    model: process.env.STABILITY_AUDIO_MODEL || "stable-audio-2",
+    label: "Stability Audio",
+    modality: "sound",
+    operations: ["text_to_sfx", "foley", "ambience", "room_tone", "weather", "impact", "whoosh", "riser", "transition", "creature_sound", "cinematic_sound", "ui_sound", "game_sound", "background_atmosphere"],
+    inputs: { audioReference: false, text: true },
+    outputs: { durations: { min: 1, max: 180 }, formats: ["mp3", "wav"] },
+    ratings: { quality: 4, speed: 3, cost: 3 }
+  },
+  {
+    id: "moises-processing",
+    provider: "Moises",
+    model: "workflow",
+    label: "Moises Audio Processing",
+    modality: "sound",
+    operations: ["voice_isolation", "voice_cleanup", "stem_separation", "audio_enhance"],
+    inputs: { audioReference: true, text: false },
+    outputs: { formats: ["wav", "mp3"] },
+    ratings: { quality: 4, speed: 2, cost: 2 }
+  },
+  {
+    id: "elevenlabs-voice",
+    provider: "ElevenLabs",
+    model: process.env.ELEVENLABS_MODEL_ID || "eleven_flash_v2_5",
+    label: "ElevenLabs Voice",
+    modality: "voice",
+    operations: ["text_to_speech"],
+    inputs: { audioReference: false, text: true },
+    outputs: { formats: ["mp3"] },
+    ratings: { quality: 5, speed: 5, cost: 4 }
+  },
+  {
+    id: "openai-voice",
+    provider: "OpenAI Audio",
+    model: process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts",
+    label: "OpenAI Voice",
+    modality: "voice",
+    operations: ["text_to_speech"],
+    inputs: { audioReference: false, text: true },
+    outputs: { formats: ["mp3"] },
+    ratings: { quality: 4, speed: 5, cost: 4 }
+  },
+  {
+    id: "minimax-voice",
+    provider: "MiniMax Speech",
+    model: process.env.MINIMAX_SPEECH_MODEL || "speech-02-hd",
+    label: "MiniMax Voice",
+    modality: "voice",
+    operations: ["text_to_speech"],
+    inputs: { audioReference: false, text: true },
+    outputs: { formats: ["mp3"] },
+    ratings: { quality: 4, speed: 4, cost: 3 }
+  }
+];
+
+function normalizeMultimodalOperation(value = "", modality = "") {
+  const normalized = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const aliases = {
+    text2video: "text_to_video",
+    text2image: "text_to_image",
+    image2video: "image_to_video",
+    image2image: "image_to_image",
+    video2video: "video_to_video",
+    realitytransform: "reality_transform",
+    video_to_video: "video_to_video",
+    scene_transfer: "reality_transform",
+    background_styling: "reality_transform"
+  };
+  if (aliases[normalized]) return aliases[normalized];
+  if (normalized) return normalized;
+  if (modality === "video") return "text_to_video";
+  if (modality === "music") return "text_to_music";
+  if (["sound", "voice"].includes(modality)) return modality === "voice" ? "text_to_speech" : "text_to_sfx";
+  return "text_to_image";
+}
+
+function modelAvailability(model) {
+  const provider = providerStatus(model.provider);
+  return {
+    ...model,
+    connected: provider.connected,
+    providerStatus: provider.status,
+    canGenerate: provider.canGenerate,
+    message: provider.message,
+    pricing: providerModelConfig(providerCatalog[model.provider] || {}, { model: model.model })?.pricing || provider.pricing || null
+  };
+}
+
+function operationCatalog(modality = "") {
+  const models = multimodalModelRegistry.filter((model) => model.modality === modality).map(modelAvailability);
+  return (multimodalOperations[modality] || []).map(([id, label]) => {
+    const candidates = models.filter((model) => model.operations.includes(id));
+    return {
+      id,
+      label,
+      implemented: candidates.length > 0,
+      available: candidates.some((model) => model.connected),
+      status: candidates.some((model) => model.connected) ? "available" : candidates.length ? "provider_not_connected" : "coming_soon",
+      providers: [...new Set(candidates.map((model) => model.provider))],
+      models: candidates.map((model) => model.id)
+    };
+  });
+}
+
+function supportsRouterRequest(model, request = {}) {
+  if (model.modality !== request.modality || !model.operations.includes(request.operation)) return false;
+  const references = Array.isArray(request.references) ? request.references : [];
+  if (references.some((reference) => reference.kind === "video") && !model.inputs?.videoReference) return false;
+  if (references.some((reference) => reference.kind === "image") && !model.inputs?.imageReference) return false;
+  if (references.some((reference) => reference.kind === "audio") && !model.inputs?.audioReference) return false;
+  const duration = Number(request.durationSeconds || 0);
+  if (duration && model.inputs?.minDurationSeconds && duration < model.inputs.minDurationSeconds) return false;
+  if (duration && model.inputs?.maxDurationSeconds && duration > model.inputs.maxDurationSeconds) return false;
+  const resolutions = model.outputs?.resolutions || [];
+  if (request.resolution && resolutions.length && !resolutions.includes(request.resolution)) return false;
+  if (request.audio === true && model.outputs?.nativeAudio === false) return false;
+  return true;
+}
+
+function routeMultimodalModel(payload = {}) {
+  const modality = String(payload.modality || payload.kind || "image").toLowerCase();
+  const operation = normalizeMultimodalOperation(payload.operation || payload.actionId || payload.tool, modality);
+  const priority = ["speed", "cost", "quality"].includes(String(payload.priority || "quality").toLowerCase())
+    ? String(payload.priority || "quality").toLowerCase()
+    : "quality";
+  const references = (payload.referenceAssetIds || []).map((id) => {
+    const asset = state.assets.find((item) => item.id === id);
+    const contentType = String(asset?.contentType || "");
+    return { id, kind: contentType.startsWith("video/") ? "video" : contentType.startsWith("audio/") ? "audio" : "image" };
+  });
+  const request = {
+    modality,
+    operation,
+    priority,
+    references,
+    durationSeconds: Number(payload.durationSeconds || payload.videoDurationSeconds || 0) || null,
+    resolution: payload.resolution || payload.outputResolution || null,
+    audio: payload.audio === true || payload.generateAudio === true
+  };
+  let candidates = multimodalModelRegistry.map(modelAvailability).filter((model) => supportsRouterRequest(model, request));
+  const manualProvider = normalizeProviderName(payload.provider || payload.providerLabel || "");
+  const manualModel = String(payload.model || payload.modelId || "").trim();
+  if (manualProvider && !["auto", "slt auto"].includes(manualProvider.toLowerCase())) candidates = candidates.filter((model) => model.provider === manualProvider);
+  if (manualModel && manualModel.toLowerCase() !== "auto") candidates = candidates.filter((model) => model.model === manualModel || model.id === manualModel);
+  const ratingKey = priority;
+  candidates.sort((left, right) => {
+    if (left.connected !== right.connected) return left.connected ? -1 : 1;
+    return Number(right.ratings?.[ratingKey] || 0) - Number(left.ratings?.[ratingKey] || 0);
+  });
+  const selected = candidates.find((model) => model.connected) || candidates[0] || null;
+  return {
+    ok: Boolean(selected?.connected),
+    request,
+    selected,
+    candidates,
+    comingSoon: !candidates.length,
+    message: selected?.connected
+      ? `${selected.label} selected for ${operation}.`
+      : candidates.length
+        ? "A compatible route exists, but no provider is connected."
+        : "Coming Soon: no real provider route implements this operation yet."
+  };
+}
 
 const defaultProvider = {
   image: "OpenAI Images",
@@ -759,18 +1243,63 @@ const state = {
     }
   },
   projects: [],
+  generationSessions: [],
+  generationBatches: [],
   history: [],
   jobs: [],
   assets: [],
   forms: [],
+  characters: [],
+  characterConsents: [],
+  characterCaptureSessions: [],
+  characterAssets: [],
+  characterVersions: [],
+  creativeReferences: [],
+  scenes: [],
+  sceneItems: [],
+  timelineItems: [],
+  workflows: [],
+  workflowNodes: [],
+  workflowEdges: [],
+  appInstances: [],
   webhookEvents: [],
   paymentEvents: [],
+  errorIncidents: [],
+  compensationCoupons: [],
+  providerDiagnostics: [
+    {
+      provider: "Runway",
+      status: "PROVIDER_NO_CREDITS",
+      errorName: "PROVIDER_NO_CREDITS",
+      errorCode: "SLT-1002",
+      customerMessage: "Temporarily unavailable — provider balance required.",
+      checkedAt: new Date().toISOString(),
+      metadata: { source: "verified_external_balance" }
+    },
+    {
+      provider: "Replicate",
+      status: "PROVIDER_BILLING_REQUIRED",
+      errorName: "PROVIDER_BILLING_REQUIRED",
+      errorCode: "SLT-1003",
+      customerMessage: "Temporarily unavailable — provider billing required.",
+      checkedAt: new Date().toISOString(),
+      metadata: { source: "verified_external_billing" }
+    }
+  ],
   wallet: {
     tenantId: "demo-user",
     availableCredits: creditsForPlan("Free"),
     heldCredits: 0,
     capturedCredits: 0
   },
+  wallets: [
+    {
+      tenantId: "demo-user",
+      availableCredits: creditsForPlan("Free"),
+      heldCredits: 0,
+      capturedCredits: 0
+    }
+  ],
   creditReservations: [],
   creditTransactions: [
     {
@@ -800,9 +1329,12 @@ const state = {
 
 const sessions = new Map();
 const processedWebhookEvents = new Set();
+const generationExecutionQueue = [];
+let activeGenerationExecutions = 0;
 const runtimeStore = createRuntimeStore(process.env);
 let runtimeStoreInitialized = false;
 let runtimeStoreLastError = null;
+let runtimePersistChain = Promise.resolve();
 
 function hydrateRuntimeState(persisted = {}) {
   for (const key of ["user", "subscription", "billing", "wallet"]) {
@@ -812,17 +1344,72 @@ function hydrateRuntimeState(persisted = {}) {
   }
   for (const key of [
     "projects",
+    "generationSessions",
+    "generationBatches",
     "history",
     "jobs",
     "assets",
     "forms",
+    "characters",
+    "characterConsents",
+    "characterCaptureSessions",
+    "characterAssets",
+    "characterVersions",
+    "creativeReferences",
+    "scenes",
+    "sceneItems",
+    "timelineItems",
+    "workflows",
+    "workflowNodes",
+    "workflowEdges",
+    "appInstances",
     "webhookEvents",
     "paymentEvents",
+    "errorIncidents",
+    "compensationCoupons",
+    "providerDiagnostics",
     "creditReservations",
     "creditTransactions"
   ]) {
     if (Array.isArray(persisted[key])) {
       state[key] = persisted[key];
+    }
+  }
+  if (Array.isArray(persisted.wallets)) {
+    state.wallets = persisted.wallets;
+  } else if (persisted.wallet?.tenantId) {
+    state.wallets = [{ ...persisted.wallet }];
+  }
+  if (!state.providerDiagnostics.some((item) => item.provider === "Runway")) {
+    state.providerDiagnostics.push({
+      provider: "Runway",
+      status: "PROVIDER_NO_CREDITS",
+      errorName: "PROVIDER_NO_CREDITS",
+      errorCode: "SLT-1002",
+      customerMessage: "Temporarily unavailable — provider balance required.",
+      checkedAt: new Date().toISOString(),
+      metadata: { source: "verified_external_balance" }
+    });
+  }
+  if (!state.providerDiagnostics.some((item) => item.provider === "Replicate")) {
+    state.providerDiagnostics.push({
+      provider: "Replicate",
+      status: "PROVIDER_BILLING_REQUIRED",
+      errorName: "PROVIDER_BILLING_REQUIRED",
+      errorCode: "SLT-1003",
+      customerMessage: "Temporarily unavailable — provider billing required.",
+      checkedAt: new Date().toISOString(),
+      metadata: { source: "verified_external_billing" }
+    });
+  }
+  for (const paymentEvent of state.paymentEvents) {
+    if (paymentEvent.eventKey || paymentEvent.eventId || paymentEvent.id) {
+      processedWebhookEvents.add(paymentEvent.eventKey || paymentEvent.eventId || paymentEvent.id);
+    }
+  }
+  for (const webhookEvent of state.webhookEvents) {
+    if (webhookEvent.eventKey || webhookEvent.eventId || webhookEvent.id) {
+      processedWebhookEvents.add(webhookEvent.eventKey || webhookEvent.eventId || webhookEvent.id);
     }
   }
   syncCreditViews();
@@ -848,15 +1435,20 @@ async function persistRuntimeState(reason = "mutation") {
   if (!runtimeStore.durable || !runtimeStoreInitialized) {
     return { ok: true, skipped: true, reason: "non_durable_runtime_store" };
   }
-  try {
-    const result = await runtimeStore.saveState({ state, sessions, reason });
-    runtimeStoreLastError = null;
-    return result;
-  } catch (error) {
-    runtimeStoreLastError = error.message;
-    console.error("[SLT] Failed to persist runtime state:", error.message);
-    return { ok: false, error: error.message };
-  }
+  const persist = async () => {
+    try {
+      const result = await runtimeStore.saveState({ state, sessions, reason });
+      runtimeStoreLastError = null;
+      return result;
+    } catch (error) {
+      runtimeStoreLastError = error.message;
+      console.error("[SLT] Failed to persist runtime state:", error.message);
+      return { ok: false, error: error.message };
+    }
+  };
+  const result = runtimePersistChain.then(persist, persist);
+  runtimePersistChain = result.then(() => undefined, () => undefined);
+  return result;
 }
 
 function runtimeStoreStatus() {
@@ -880,7 +1472,7 @@ function providerApiKey(config = {}) {
 }
 
 function providerEndpoint(config = {}) {
-  return firstEnvValue([config.endpointEnv, ...(config.alternateEndpointEnvKeys || [])].filter(Boolean));
+  return firstEnvValue([config.endpointEnv, ...(config.alternateEndpointEnvKeys || [])].filter(Boolean)) || config.defaultEndpoint || "";
 }
 
 function envNumber(key, fallback) {
@@ -933,27 +1525,296 @@ function requestId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
 }
 
+function incidentHttpStatus(classification = {}) {
+  if (classification.code === "SLT-1001") return 402;
+  if (["SLT-1101", "SLT-1102", "SLT-1103"].includes(classification.code)) return 401;
+  if (classification.code === "SLT-1104") return 403;
+  if (["MODEL", "INPUT", "MODERATION"].includes(classification.category)) return 400;
+  if (classification.code === "SLT-1503") return 429;
+  if (["SLT-1002", "SLT-1003", "SLT-1202", "SLT-1205", "SLT-1504", "SLT-1701", "SLT-1801", "SLT-1802"].includes(classification.code)) return 503;
+  return 502;
+}
+
+function incidentForId(incidentId = "") {
+  return state.errorIncidents.find((item) => item.incidentId === incidentId || item.id === incidentId) || null;
+}
+
+function couponForIncident(incidentId = "") {
+  return state.compensationCoupons.find((item) => item.incidentId === incidentId) || null;
+}
+
+function incidentDedupeCandidate({ tenantId, jobId, errorCode, provider, route } = {}) {
+  const cutoff = Date.now() - envNumber("INCIDENT_DEDUPE_MINUTES", 15) * 60_000;
+  return state.errorIncidents.find((incident) => {
+    if (incident.tenantId !== tenantId || incident.errorCode !== errorCode) return false;
+    if (jobId) return incident.jobId === jobId;
+    return incident.provider === provider
+      && incident.route === route
+      && new Date(incident.createdAt || 0).getTime() >= cutoff
+      && !["RESOLVED", "IGNORED"].includes(incident.status);
+  }) || null;
+}
+
+function compensationAllowed(classification = {}, context = {}) {
+  if (!classification.compensationEligible) return false;
+  if (["INPUT", "MODERATION"].includes(classification.category)) return false;
+  if (["USER_INSUFFICIENT_CREDITS", "PERMISSION_DENIED", "SESSION_EXPIRED", "MODEL_NOT_FOUND", "MODEL_PARAMETER_UNSUPPORTED"].includes(classification.name)) return false;
+  if (context.cancelled || context.deliberateInvalid || context.abuse || context.fraud) return false;
+  return true;
+}
+
+function compensationExpiry() {
+  const days = Math.max(1, envNumber("COMPENSATION_COUPON_EXPIRY_DAYS", 30));
+  return new Date(Date.now() + days * 86_400_000).toISOString();
+}
+
+function createCompensationCoupon({ incident, userId, tenantId } = {}) {
+  if (!incident?.incidentId) return null;
+  const existing = couponForIncident(incident.incidentId);
+  if (existing) return existing;
+  const coupon = {
+    id: requestId("compensation_coupon"),
+    tenantId,
+    userId: userId || null,
+    incidentId: incident.incidentId,
+    code: `SLT-SORRY-${crypto.randomBytes(4).toString("hex").toUpperCase()}`,
+    discountPercent: 5,
+    status: "ACTIVE",
+    stripeCouponId: null,
+    promotionCodeId: null,
+    createdAt: new Date().toISOString(),
+    expiresAt: compensationExpiry(),
+    redeemedAt: null,
+    metadata: { oneUse: true, transferable: false, source: "automatic_incident_compensation" }
+  };
+  state.compensationCoupons.unshift(coupon);
+  state.compensationCoupons = state.compensationCoupons.slice(0, 10_000);
+  if (hasEnvValue("STRIPE_SECRET_KEY") && process.env.SLT_TEST_MODE !== "1" && envFlag("STRIPE_COMPENSATION_ENABLED", true)) {
+    void syncCompensationCouponWithStripe(coupon);
+  }
+  return coupon;
+}
+
+async function syncCompensationCouponWithStripe(coupon) {
+  if (!coupon || coupon.promotionCodeId || coupon.status !== "ACTIVE") return coupon;
+  try {
+    const stripeCoupon = await stripeRequest("/v1/coupons", {
+      percent_off: coupon.discountPercent,
+      duration: "once",
+      name: `SLT incident ${coupon.incidentId}`,
+      metadata: { incidentId: coupon.incidentId, tenantId: coupon.tenantId, userId: coupon.userId || "" }
+    });
+    const customer = currentStripeCustomerId();
+    const promotion = await stripeRequest("/v1/promotion_codes", {
+      coupon: stripeCoupon.id,
+      code: coupon.code,
+      max_redemptions: 1,
+      expires_at: Math.floor(new Date(coupon.expiresAt).getTime() / 1000),
+      customer: customer || undefined,
+      metadata: { incidentId: coupon.incidentId, tenantId: coupon.tenantId, userId: coupon.userId || "" }
+    });
+    coupon.stripeCouponId = stripeCoupon.id;
+    coupon.promotionCodeId = promotion.id;
+    coupon.metadata = { ...coupon.metadata, stripeSyncedAt: new Date().toISOString() };
+  } catch (error) {
+    coupon.metadata = {
+      ...coupon.metadata,
+      stripeSyncError: sanitizeDiagnosticText(error.message),
+      stripeSyncFailedAt: new Date().toISOString()
+    };
+  }
+  await persistRuntimeState(`compensation_coupon_stripe_sync:${coupon.incidentId}`);
+  return coupon;
+}
+
+function createSltIncident({ request = null, auth = {}, job = null, error = {}, classification, ledgerResolution = null, context = {} } = {}) {
+  const resolvedAuth = auth?.ok ? auth : request ? getAuth(request) : auth;
+  const tenantId = context.tenantId || job?.tenantId || resolvedAuth?.tenantId || resolvedAuth?.userId || state.wallet.tenantId;
+  const walletAfter = ledgerResolution?.wallet || ledgerSnapshot(tenantId);
+  const reservedCredits = Number(context.creditsReserved ?? job?.creditCost ?? 0);
+  const creditsAfter = Number(context.creditsAfter ?? walletAfter?.availableCredits ?? 0);
+  const creditsBefore = Number(context.creditsBefore ?? job?.checks?.credits?.available ?? (creditsAfter + (ledgerResolution?.reservation?.status === "released" ? 0 : reservedCredits)));
+  const route = sanitizeDiagnosticText(context.route || request?.originalUrl || request?.path || "", { maxLength: 300 });
+  const provider = context.provider || job?.provider || null;
+  const existing = incidentDedupeCandidate({ tenantId, jobId: job?.id || context.jobId || null, errorCode: classification.code, provider, route });
+  if (existing) return existing;
+  const incidentId = createIncidentId();
+  const clientMessage = sanitizeDiagnosticText(context.customerMessage || classification.customerMessage, { maxLength: 500 });
+  const incident = {
+    id: incidentId,
+    incidentId,
+    errorCode: classification.code,
+    errorName: classification.name,
+    category: classification.category,
+    tenantId,
+    userId: context.userId || job?.userId || resolvedAuth?.userId || null,
+    projectId: context.projectId || job?.projectId || null,
+    sessionId: context.sessionId || job?.sessionId || null,
+    batchId: context.batchId || job?.batchId || null,
+    jobId: context.jobId || job?.id || null,
+    reservationId: context.reservationId || job?.reservationId || ledgerResolution?.reservation?.id || null,
+    assetId: context.assetId || job?.assetId || null,
+    modality: context.modality || job?.modality || String(job?.kind || context.kind || "").toUpperCase() || null,
+    provider,
+    model: context.model || job?.parameters?.model || job?.payload?.model || null,
+    operation: context.operation || job?.operation || generationAction(job?.parameters || {}),
+    httpStatus: Number(error.statusCode || context.httpStatus || incidentHttpStatus(classification)),
+    sanitizedProviderError: sanitizeDiagnosticText(error.providerBody?.error?.message || error.providerBody?.message || error.message || ""),
+    clientVisibleMessage: clientMessage,
+    technicalMessage: sanitizeDiagnosticText(`${classification.technicalMessage}${error.message ? ` Provider detail: ${error.message}` : ""}`),
+    browser: sanitizeDiagnosticText(request?.header?.("user-agent") || context.browser || "", { maxLength: 500 }),
+    route,
+    retryable: Boolean(classification.retryable),
+    creditsBefore,
+    creditsReserved: reservedCredits,
+    creditsAfter,
+    reservationReleased: Boolean(context.reservationReleased ?? ledgerResolution?.reservation?.status === "released"),
+    compensationEligible: compensationAllowed(classification, context),
+    reported: false,
+    reportedAt: null,
+    status: "OPEN",
+    metadata: {
+      originalErrorCode: sanitizeDiagnosticText(error.code || "", { maxLength: 120 }),
+      providerRoute: Array.isArray(context.providerRoute || error.route)
+        ? (context.providerRoute || error.route).map((item) => ({ provider: item.provider || null, status: item.status || null, code: item.code || null, ok: Boolean(item.ok) })).slice(0, 10)
+        : [],
+      retryOfJobId: job?.retryOfJobId || null,
+      source: context.source || "generation"
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    resolvedAt: null
+  };
+  state.errorIncidents.unshift(incident);
+  state.errorIncidents = state.errorIncidents.slice(0, 10_000);
+  return incident;
+}
+
+function incidentForClient(incident) {
+  if (!incident) return null;
+  return {
+    incidentId: incident.incidentId,
+    errorCode: incident.errorCode,
+    errorName: incident.errorName,
+    category: incident.category,
+    jobId: incident.jobId || null,
+    batchId: incident.batchId || null,
+    projectId: incident.projectId || null,
+    sessionId: incident.sessionId || null,
+    provider: incident.provider || null,
+    model: incident.model || null,
+    customerMessage: incident.clientVisibleMessage,
+    retryable: Boolean(incident.retryable),
+    reservationReleased: Boolean(incident.reservationReleased),
+    reported: Boolean(incident.reported),
+    status: incident.status,
+    createdAt: incident.createdAt
+  };
+}
+
+async function recordSltFailure({ request = null, auth = {}, job = null, error = {}, ledgerResolution = null, context = {} } = {}) {
+  const classification = classifySltError(error, {
+    provider: context.provider || job?.provider,
+    operation: context.operation || job?.operation,
+    httpStatus: context.httpStatus || error.statusCode,
+    jobId: context.jobId || job?.id,
+    system: context.system
+  });
+  const incident = createSltIncident({ request, auth, job, error, classification, ledgerResolution, context });
+  const provider = context.provider || job?.provider || null;
+  if (provider && ["PROVIDER_NO_CREDITS", "PROVIDER_BILLING_REQUIRED", "PROVIDER_AUTH_FAILED"].includes(classification.name)) {
+    setProviderDiagnostic(providerDiagnosticKey(normalizeProviderName(provider), providerCatalog[normalizeProviderName(provider)] || {}), {
+      status: classification.name,
+      errorName: classification.name,
+      errorCode: classification.code,
+      customerMessage: classification.name === "PROVIDER_NO_CREDITS"
+        ? "Temporarily unavailable — provider balance required."
+        : classification.name === "PROVIDER_BILLING_REQUIRED"
+        ? "Temporarily unavailable — provider billing required."
+        : classification.customerMessage,
+      metadata: { source: "classified_provider_failure", incidentId: incident.incidentId }
+    });
+  }
+  const coupon = incident.compensationEligible
+    ? createCompensationCoupon({ incident, userId: incident.userId, tenantId: incident.tenantId })
+    : null;
+  await persistRuntimeState(`error_incident:${incident.incidentId}`);
+  return {
+    classification,
+    incident,
+    coupon,
+    publicError: publicErrorPayload({ classification, incident, coupon, credits: {
+      before: incident.creditsBefore,
+      reserved: incident.creditsReserved,
+      after: incident.creditsAfter
+    } })
+  };
+}
+
+function sltErrorResponsePayload(failure, extras = {}) {
+  const message = failure.incident?.clientVisibleMessage || failure.classification.customerMessage;
+  return {
+    ok: false,
+    code: failure.classification.name,
+    errorCode: failure.classification.code,
+    incidentId: failure.incident?.incidentId || null,
+    error: message,
+    readableError: message,
+    customerMessage: message,
+    retryable: Boolean(failure.classification.retryable),
+    reservationReleased: Boolean(failure.incident?.reservationReleased),
+    creditsReturned: Boolean(failure.incident?.reservationReleased),
+    incident: incidentForClient(failure.incident),
+    compensation: failure.publicError.compensation,
+    ...extras
+  };
+}
+
 function creditAccount(name) {
   return `Tenant.${name}`;
 }
 
-function ledgerSnapshot() {
+function walletForTenant(tenantId = state.wallet.tenantId, { create = true, initialCredits = 0 } = {}) {
+  const normalizedTenantId = String(tenantId || state.wallet.tenantId || "demo-user");
+  let wallet = state.wallets.find((item) => item.tenantId === normalizedTenantId) || null;
+  if (!wallet && state.wallet?.tenantId === normalizedTenantId) {
+    wallet = state.wallet;
+    state.wallets.push(wallet);
+  }
+  if (!wallet && create) {
+    wallet = {
+      tenantId: normalizedTenantId,
+      availableCredits: Math.max(0, Number(initialCredits) || 0),
+      heldCredits: 0,
+      capturedCredits: 0
+    };
+    state.wallets.push(wallet);
+  }
+  return wallet;
+}
+
+function ledgerSnapshot(tenantId = state.wallet.tenantId) {
+  const wallet = walletForTenant(tenantId, { create: true });
   return {
-    tenantId: state.wallet.tenantId,
-    availableCredits: state.wallet.availableCredits,
-    heldCredits: state.wallet.heldCredits,
-    capturedCredits: state.wallet.capturedCredits,
-    transactionCount: state.creditTransactions.length,
-    reservationCount: state.creditReservations.length
+    tenantId: wallet.tenantId,
+    availableCredits: wallet.availableCredits,
+    heldCredits: wallet.heldCredits,
+    capturedCredits: wallet.capturedCredits,
+    transactionCount: state.creditTransactions.filter((item) => item.tenantId === wallet.tenantId).length,
+    reservationCount: state.creditReservations.filter((item) => item.tenantId === wallet.tenantId).length
   };
 }
 
-function syncCreditViews() {
-  state.subscription.credits = state.wallet.availableCredits;
-  state.subscription.heldCredits = state.wallet.heldCredits;
-  state.subscription.capturedCredits = state.wallet.capturedCredits;
-  state.user.credits = state.wallet.availableCredits;
-  return ledgerSnapshot();
+function syncCreditViews(tenantId = state.wallet.tenantId) {
+  const wallet = walletForTenant(tenantId, { create: true });
+  if (state.wallet.tenantId === wallet.tenantId) {
+    state.wallet = wallet;
+    state.subscription.credits = wallet.availableCredits;
+    state.subscription.heldCredits = wallet.heldCredits;
+    state.subscription.capturedCredits = wallet.capturedCredits;
+    state.user.credits = wallet.availableCredits;
+  }
+  return ledgerSnapshot(wallet.tenantId);
 }
 
 function findCreditTransactionByIdempotency(idempotencyKey = "") {
@@ -976,7 +1837,8 @@ function appendCreditTransaction({
   capturedDelta = 0
 }) {
   const existing = findCreditTransactionByIdempotency(idempotencyKey);
-  if (existing) return { transaction: existing, idempotent: true, wallet: ledgerSnapshot() };
+  if (existing) return { transaction: existing, idempotent: true, wallet: ledgerSnapshot(existing.tenantId || tenantId) };
+  const wallet = walletForTenant(tenantId, { create: true });
 
   const transaction = {
     id: requestId("credit_tx"),
@@ -1001,13 +1863,13 @@ function appendCreditTransaction({
     createdAt: new Date().toISOString()
   };
 
-  state.wallet.availableCredits += availableDelta;
-  state.wallet.heldCredits += heldDelta;
-  state.wallet.capturedCredits += capturedDelta;
-  if (state.wallet.availableCredits < 0 || state.wallet.heldCredits < 0) {
-    state.wallet.availableCredits -= availableDelta;
-    state.wallet.heldCredits -= heldDelta;
-    state.wallet.capturedCredits -= capturedDelta;
+  wallet.availableCredits += availableDelta;
+  wallet.heldCredits += heldDelta;
+  wallet.capturedCredits += capturedDelta;
+  if (wallet.availableCredits < 0 || wallet.heldCredits < 0) {
+    wallet.availableCredits -= availableDelta;
+    wallet.heldCredits -= heldDelta;
+    wallet.capturedCredits -= capturedDelta;
     const error = new Error("Credit ledger would produce a negative balance.");
     error.code = "negative_ledger_balance";
     error.statusCode = 409;
@@ -1016,30 +1878,32 @@ function appendCreditTransaction({
 
   state.creditTransactions.unshift(transaction);
   state.creditTransactions = state.creditTransactions.slice(0, 500);
-  syncCreditViews();
-  return { transaction, idempotent: false, wallet: ledgerSnapshot() };
+  syncCreditViews(tenantId);
+  return { transaction, idempotent: false, wallet: ledgerSnapshot(tenantId) };
 }
 
-function grantCredits({ amount, idempotencyKey, reason = "credit_grant", metadata = {} }) {
-  if (!amount) return { transaction: null, wallet: ledgerSnapshot(), skipped: true };
+function grantCredits({ amount, idempotencyKey, reason = "credit_grant", metadata = {}, tenantId = state.wallet.tenantId }) {
+  if (!amount) return { transaction: null, wallet: ledgerSnapshot(tenantId), skipped: true };
   return appendCreditTransaction({
     type: reason,
     amount: Math.abs(amount),
     debitAccount: "SLT.CreditIssuer",
     creditAccount: creditAccount("Available"),
     idempotencyKey,
+    tenantId,
     status: "posted",
     metadata,
     availableDelta: Math.abs(amount)
   });
 }
 
-function adjustAvailableCredits({ targetAmount, idempotencyKey, reason = "plan_credit_adjustment", metadata = {} }) {
+function adjustAvailableCredits({ targetAmount, idempotencyKey, reason = "plan_credit_adjustment", metadata = {}, tenantId = state.wallet.tenantId }) {
   const target = Math.max(0, Number(targetAmount) || 0);
-  const delta = target - state.wallet.availableCredits;
-  if (delta === 0) return { transaction: null, wallet: ledgerSnapshot(), skipped: true };
+  const wallet = walletForTenant(tenantId, { create: true });
+  const delta = target - wallet.availableCredits;
+  if (delta === 0) return { transaction: null, wallet: ledgerSnapshot(tenantId), skipped: true };
   if (delta > 0) {
-    return grantCredits({ amount: delta, idempotencyKey, reason, metadata });
+    return grantCredits({ amount: delta, idempotencyKey, reason, metadata, tenantId });
   }
   return appendCreditTransaction({
     type: reason,
@@ -1047,6 +1911,7 @@ function adjustAvailableCredits({ targetAmount, idempotencyKey, reason = "plan_c
     debitAccount: creditAccount("Available"),
     creditAccount: "SLT.CreditExpiry",
     idempotencyKey,
+    tenantId,
     status: "posted",
     metadata,
     availableDelta: delta
@@ -1057,14 +1922,15 @@ function findCreditReservation(reservationId = "") {
   return state.creditReservations.find((reservation) => reservation.id === reservationId) || null;
 }
 
-function reserveCredits({ amount, kind, auth, request, idempotencyKey, metadata = {} }) {
+function reserveCredits({ amount, kind, auth, request, idempotencyKey, metadata = {}, initialCredits = 0 }) {
   const cost = Math.max(0, Number(amount) || 0);
   const tenantId = requestIdentity(request, auth);
+  const wallet = walletForTenant(tenantId, { create: true, initialCredits });
   if (!cost) {
     return {
       reservation: null,
       transaction: null,
-      wallet: ledgerSnapshot(),
+      wallet: ledgerSnapshot(tenantId),
       skipped: true,
       message: "No reservation needed for zero-credit operation."
     };
@@ -1075,12 +1941,12 @@ function reserveCredits({ amount, kind, auth, request, idempotencyKey, metadata 
     return {
       reservation: findCreditReservation(existingTransaction.reservationId),
       transaction: existingTransaction,
-      wallet: ledgerSnapshot(),
+      wallet: ledgerSnapshot(tenantId),
       idempotent: true
     };
   }
 
-  if (state.wallet.availableCredits < cost) {
+  if (wallet.availableCredits < cost) {
     const error = new Error("Insufficient Credits");
     error.code = "insufficient_credits";
     error.statusCode = 402;
@@ -1126,10 +1992,10 @@ function reserveCredits({ amount, kind, auth, request, idempotencyKey, metadata 
 function resolveReservation({ reservationId, outcome, jobId = null, idempotencyKey, reason = "" }) {
   const reservation = findCreditReservation(reservationId);
   if (!reservation) {
-    return { reservation: null, transaction: null, wallet: ledgerSnapshot(), skipped: true, reason: "reservation_not_found" };
+    return { reservation: null, transaction: null, wallet: null, skipped: true, reason: "reservation_not_found" };
   }
   if (["captured", "released"].includes(reservation.status)) {
-    return { reservation, transaction: findCreditTransactionByIdempotency(idempotencyKey), wallet: ledgerSnapshot(), idempotent: true };
+    return { reservation, transaction: findCreditTransactionByIdempotency(idempotencyKey), wallet: ledgerSnapshot(reservation.tenantId), idempotent: true };
   }
 
   const capture = outcome === "capture";
@@ -1155,6 +2021,99 @@ function resolveReservation({ reservationId, outcome, jobId = null, idempotencyK
   if (capture) reservation.capturedAt = reservation.updatedAt;
   else reservation.releasedAt = reservation.updatedAt;
   return { reservation, transaction: transaction.transaction, wallet: transaction.wallet, idempotent: transaction.idempotent };
+}
+
+function initialCreditsForAuth(auth = {}) {
+  if (isOwnerAuth(auth)) return envNumber("CEO_INTERNAL_CREDITS", 1_000_000);
+  if (isGuestAuth(auth)) return envNumber("GUEST_INTERNAL_CREDITS", 10_000);
+  if (auth.userId === state.wallet.tenantId || auth.tenantId === state.wallet.tenantId) {
+    return state.wallet.availableCredits;
+  }
+  return envNumber("NEW_TENANT_STARTING_CREDITS", 0);
+}
+
+function mirrorLedgerResult(result = {}) {
+  const reservation = result.reservation;
+  const transaction = result.transaction;
+  const wallet = result.wallet;
+  if (reservation?.id) {
+    const index = state.creditReservations.findIndex((item) => item.id === reservation.id);
+    if (index === -1) state.creditReservations.unshift(reservation);
+    else state.creditReservations[index] = { ...state.creditReservations[index], ...reservation };
+  }
+  if (transaction?.id) {
+    const index = state.creditTransactions.findIndex((item) => item.id === transaction.id || item.idempotencyKey === transaction.idempotencyKey);
+    if (index === -1) state.creditTransactions.unshift(transaction);
+    else state.creditTransactions[index] = { ...state.creditTransactions[index], ...transaction };
+  }
+  if (wallet?.tenantId) {
+    const target = walletForTenant(wallet.tenantId, { create: true });
+    Object.assign(target, wallet);
+    syncCreditViews(wallet.tenantId);
+  }
+  return result;
+}
+
+async function reserveCreditsTransactional(args) {
+  const auth = args.auth || getAuth(args.request);
+  const tenantId = requestIdentity(args.request, auth);
+  const reservationId = args.reservationId || requestId("reservation");
+  const initialCredits = initialCreditsForAuth(auth);
+  if (runtimeStore.durable && typeof runtimeStore.reserveCredits === "function") {
+    const result = await runtimeStore.reserveCredits({
+      reservationId,
+      tenantId,
+      userId: auth.userId || null,
+      amount: args.amount,
+      kind: args.kind,
+      idempotencyKey: args.idempotencyKey,
+      jobId: args.metadata?.jobId || null,
+      metadata: args.metadata || {},
+      initialCredits
+    });
+    return mirrorLedgerResult(result);
+  }
+  return reserveCredits({ ...args, initialCredits });
+}
+
+async function resolveReservationTransactional(args) {
+  if (runtimeStore.durable && typeof runtimeStore.resolveReservation === "function") {
+    const result = await runtimeStore.resolveReservation(args);
+    return mirrorLedgerResult(result);
+  }
+  return resolveReservation(args);
+}
+
+async function grantCreditsTransactional({ tenantId, userId = null, amount, idempotencyKey, reason = "credit_grant", metadata = {}, initialCredits = 0 } = {}) {
+  if (runtimeStore.durable && typeof runtimeStore.grantCredits === "function") {
+    const result = await runtimeStore.grantCredits({
+      tenantId,
+      userId,
+      amount,
+      idempotencyKey,
+      type: reason,
+      metadata,
+      initialCredits
+    });
+    return mirrorLedgerResult(result);
+  }
+  return grantCredits({ amount, idempotencyKey, reason, metadata, tenantId });
+}
+
+async function adjustAvailableCreditsTransactional({ tenantId, userId = null, targetAmount, idempotencyKey, reason = "plan_credit_adjustment", metadata = {}, initialCredits = 0 } = {}) {
+  if (runtimeStore.durable && typeof runtimeStore.adjustAvailableCredits === "function") {
+    const result = await runtimeStore.adjustAvailableCredits({
+      tenantId,
+      userId,
+      targetAmount,
+      idempotencyKey,
+      type: reason,
+      metadata,
+      initialCredits
+    });
+    return mirrorLedgerResult(result);
+  }
+  return adjustAvailableCredits({ targetAmount, idempotencyKey, reason, metadata, tenantId });
 }
 
 function generationIdempotencyKey(request, kind, phase) {
@@ -1402,7 +2361,7 @@ function canAccessRecord(record = {}, auth = {}) {
   if (isOwnerAuth(auth)) return true;
   const tenantId = recordTenantId(record);
   const authTenants = [auth.tenantId, auth.userId].filter(Boolean);
-  if (!tenantId) return Boolean(auth.ok && authTenants.includes(state.wallet.tenantId));
+  if (!tenantId) return isOwnerAuth(auth);
   return authTenants.includes(tenantId);
 }
 
@@ -1449,6 +2408,57 @@ function normalizeProviderName(name = "") {
   if (lower.includes("claude")) return "Claude";
   if (lower.includes("gemini")) return "Gemini";
   return name;
+}
+
+function providerDiagnosticKey(normalized = "", config = {}) {
+  if (normalized === "Runway") return "Runway";
+  if (normalized === "Replicate" || String(config.adapter || "").startsWith("replicate-")) return "Replicate";
+  return normalized;
+}
+
+function providerDiagnosticFor(normalized = "", config = {}) {
+  const key = providerDiagnosticKey(normalized, config);
+  const forcedAvailable = key === "Runway"
+    ? envFlag("RUNWAY_PROVIDER_AVAILABLE", false) || envFlag("RUNWAY_PROVIDER_BALANCE_OK", false)
+    : key === "Replicate"
+    ? envFlag("REPLICATE_PROVIDER_AVAILABLE", false) || envFlag("REPLICATE_BILLING_ACTIVE", false)
+    : false;
+  if (forcedAvailable) {
+    return {
+      provider: key,
+      status: "AVAILABLE",
+      errorName: null,
+      errorCode: null,
+      customerMessage: "Provider available.",
+      checkedAt: new Date().toISOString(),
+      metadata: { source: "environment_override" }
+    };
+  }
+  const current = state.providerDiagnostics.find((item) => item.provider === key) || null;
+  if (!current || ["AVAILABLE", "HEALTHY", "CONNECTED"].includes(current.status)) return current;
+  return current;
+}
+
+function setProviderDiagnostic(provider, patch = {}) {
+  const normalized = provider === "Replicate" ? "Replicate" : normalizeProviderName(provider);
+  const index = state.providerDiagnostics.findIndex((item) => item.provider === normalized);
+  const diagnostic = {
+    provider: normalized,
+    status: "UNKNOWN",
+    errorName: null,
+    errorCode: null,
+    customerMessage: "Provider status has not been verified.",
+    ...(index >= 0 ? state.providerDiagnostics[index] : {}),
+    ...patch,
+    checkedAt: patch.checkedAt || new Date().toISOString(),
+    metadata: {
+      ...(index >= 0 ? state.providerDiagnostics[index]?.metadata : {}),
+      ...(patch.metadata || {})
+    }
+  };
+  if (index >= 0) state.providerDiagnostics[index] = diagnostic;
+  else state.providerDiagnostics.push(diagnostic);
+  return diagnostic;
 }
 
 function providerStatus(name) {
@@ -1504,6 +2514,12 @@ function providerStatus(name) {
 
   const selectedModel = providerModelConfig(config);
   const pricing = providerPricingFor(config);
+  const diagnostic = providerDiagnosticFor(normalized, config);
+  if (diagnostic && !["AVAILABLE", "HEALTHY", "CONNECTED"].includes(diagnostic.status)) {
+    status = diagnostic.status;
+    message = diagnostic.customerMessage || message;
+    connected = false;
+  }
 
   return {
     name: normalized,
@@ -1534,7 +2550,16 @@ function providerStatus(name) {
     })),
     pricing,
     canGenerate: connected,
-    message
+    message,
+    diagnostic: diagnostic ? {
+      provider: diagnostic.provider,
+      status: diagnostic.status,
+      errorName: diagnostic.errorName || null,
+      errorCode: diagnostic.errorCode || null,
+      checkedAt: diagnostic.checkedAt || null
+    } : null,
+    errorName: diagnostic?.errorName || null,
+    errorCode: diagnostic?.errorCode || null
   };
 }
 
@@ -1555,12 +2580,34 @@ function uniqueProviders(names = []) {
     });
 }
 
-function providerFallbackChain(kind, requestedProvider = "") {
+const realityTransformActions = new Set([
+  "REALITY_TRANSFORM",
+  "VIDEO2VIDEO",
+  "VIDEO_TO_VIDEO",
+  "SCENE_TRANSFER",
+  "BACKGROUND_STYLING"
+]);
+
+function generationAction(payload = {}) {
+  return String(payload.actionId || payload.tool || payload.mode || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+}
+
+function isRealityTransformPayload(payload = {}) {
+  return payload.realityTransform === true || realityTransformActions.has(generationAction(payload));
+}
+
+function providerFallbackChain(kind, requestedProvider = "", payload = {}) {
+  const configured = isRealityTransformPayload(payload)
+    ? ["Runway", "Luma Modify"]
+    : providerFallbackChains[kind] || [];
   return uniqueProviders([
     requestedProvider,
-    ...(providerFallbackChains[kind] || []),
+    ...configured,
     defaultProvider[kind]
-  ]).filter((name) => providerCatalog[name]?.kind === kind);
+  ]).filter((name) => providerCatalog[name]?.kind === kind && (!isRealityTransformPayload(payload) || ["Runway", "Luma Modify"].includes(name)));
 }
 
 function providerFallbacksEnabled(payload = {}) {
@@ -1671,7 +2718,8 @@ function validatePlan(kind, request, auth) {
 
 function validateCredits(kind, auth = {}, payload = {}) {
   const cost = creditCostFor(kind, payload);
-  const wallet = ledgerSnapshot();
+  const tenantId = auth.tenantId || auth.userId || state.wallet.tenantId;
+  const wallet = ledgerSnapshot(tenantId);
   if (isOwnerAuth(auth) || isGuestAuth(auth)) {
     return {
       ok: true,
@@ -1813,6 +2861,37 @@ function saveHistory(entry) {
   state.history = state.history.slice(0, 50);
 }
 
+function retainProjectsWithActiveRelations(limit = 2000) {
+  const referencedProjectIds = new Set();
+  const relationalCollections = [
+    state.generationSessions,
+    state.generationBatches,
+    state.jobs,
+    state.assets,
+    state.creativeReferences,
+    state.scenes,
+    state.timelineItems,
+    state.workflows,
+    state.appInstances
+  ];
+  for (const collection of relationalCollections) {
+    for (const record of Array.isArray(collection) ? collection : []) {
+      if (record?.projectId) referencedProjectIds.add(record.projectId);
+    }
+  }
+  const retained = [];
+  const retainedIds = new Set();
+  for (const project of state.projects) {
+    if (retained.length < limit || referencedProjectIds.has(project.id)) {
+      if (!retainedIds.has(project.id)) {
+        retained.push(project);
+        retainedIds.add(project.id);
+      }
+    }
+  }
+  state.projects = retained;
+}
+
 function saveProjectFromEntry(entry) {
   const project = {
     id: requestId("project"),
@@ -1826,59 +2905,219 @@ function saveProjectFromEntry(entry) {
     exports: []
   };
   state.projects.unshift(project);
-  state.projects = state.projects.slice(0, 30);
+  retainProjectsWithActiveRelations();
   return project;
 }
 
 const jobStates = {
-  queued: "IN_QUEUE",
-  processing: "IN_PROGRESS",
+  pending: "PENDING",
+  queued: "PENDING",
+  throttled: "THROTTLED",
+  processing: "PROCESSING",
   completed: "COMPLETED",
-  failed: "FAILED"
+  failed: "FAILED",
+  cancelled: "CANCELLED"
 };
 
 function clientJobStatus(stateValue = jobStates.processing) {
   if (stateValue === jobStates.completed) return "completed";
   if (stateValue === jobStates.failed) return "failed";
-  if (stateValue === jobStates.queued) return "queued";
+  if (stateValue === jobStates.cancelled) return "cancelled";
+  if (stateValue === jobStates.throttled) return "throttled";
+  if ([jobStates.pending, "IN_QUEUE"].includes(stateValue)) return "pending";
+  if (stateValue === "IN_PROGRESS") return "processing";
   return "processing";
 }
 
 function isAsyncGenerationKind(kind = "") {
-  return ["video", "music"].includes(kind);
+  return ["image", "video", "music", "sound"].includes(kind);
 }
 
 function shouldQueueGeneration(kind = "", providerStatus = {}, payload = {}) {
   if (payload.sync === true) return false;
+  if (["image", "video", "music", "sound"].includes(kind)) return true;
+  if (billableOutputCount(payload) > 1) return true;
   if (providerStatus?.execution === "async") return true;
   if (isAsyncGenerationKind(kind)) return true;
   return kind === "image" && providerStatus?.adapter === "replicate-image";
 }
 
-function createJob({ kind, title, providerName, prompt, payload, checks, request }) {
+function createGenerationProject({ tenantId, userId, title, kind, requestedProjectId = null }) {
+  if (requestedProjectId) {
+    const existing = state.projects.find((item) => item.id === requestedProjectId && item.tenantId === tenantId);
+    if (existing) return existing;
+  }
+  const now = new Date().toISOString();
+  const project = {
+    id: requestId("project"),
+    tenantId,
+    userId: userId || null,
+    title,
+    kind,
+    status: "PROCESSING",
+    thumbnail: null,
+    createdAt: now,
+    updatedAt: now,
+    exports: [],
+    metadata: { source: "generation" }
+  };
+  state.projects.unshift(project);
+  retainProjectsWithActiveRelations();
+  return project;
+}
+
+function createGenerationSession({ tenantId, userId, projectId, title, kind, requestedSessionId = null }) {
+  if (requestedSessionId) {
+    const existing = state.generationSessions.find((item) => item.id === requestedSessionId && item.tenantId === tenantId);
+    if (existing) return existing;
+  }
+  const now = new Date().toISOString();
+  const session = {
+    id: requestId("generation_session"),
+    tenantId,
+    userId: userId || null,
+    projectId,
+    title,
+    kind,
+    status: "ACTIVE",
+    createdAt: now,
+    updatedAt: now,
+    metadata: { source: "generation" }
+  };
+  state.generationSessions.unshift(session);
+  state.generationSessions = state.generationSessions.slice(0, 500);
+  return session;
+}
+
+function createGenerationBatch({
+  tenantId,
+  userId,
+  projectId,
+  sessionId,
+  kind,
+  payload,
+  providerName,
+  outputCount,
+  idempotencyKey,
+  totalCredits
+}) {
+  const existing = state.generationBatches.find((item) => item.idempotencyKey === idempotencyKey);
+  if (existing) return existing;
+  const now = new Date().toISOString();
+  const batch = {
+    id: requestId("generation_batch"),
+    tenantId,
+    userId: userId || null,
+    projectId,
+    sessionId,
+    modality: String(kind || "").toUpperCase(),
+    kind,
+    operation: generationAction(payload),
+    provider: providerName,
+    model: payload.model || payload.modelId || null,
+    status: jobStates.pending,
+    requestedOutputs: outputCount,
+    completedOutputs: 0,
+    failedOutputs: 0,
+    cancelledOutputs: 0,
+    reservedCredits: totalCredits,
+    capturedCredits: 0,
+    releasedCredits: 0,
+    idempotencyKey,
+    parameters: { ...payload, outputCount },
+    createdAt: now,
+    updatedAt: now,
+    completedAt: null
+  };
+  state.generationBatches.unshift(batch);
+  state.generationBatches = state.generationBatches.slice(0, 300);
+  return batch;
+}
+
+function findGenerationBatch(batchId = "") {
+  return state.generationBatches.find((item) => item.id === batchId) || null;
+}
+
+function recomputeGenerationBatch(batchId = "") {
+  const batch = findGenerationBatch(batchId);
+  if (!batch) return null;
+  const jobs = state.jobs.filter((item) => item.batchId === batch.id);
+  const completed = jobs.filter((item) => item.status === jobStates.completed);
+  const failed = jobs.filter((item) => item.status === jobStates.failed);
+  const cancelled = jobs.filter((item) => item.status === jobStates.cancelled);
+  const processing = jobs.filter((item) => [jobStates.processing, "IN_PROGRESS"].includes(item.status));
+  const throttled = jobs.filter((item) => item.status === jobStates.throttled);
+  const terminalCount = completed.length + failed.length + cancelled.length;
+  let status = jobStates.pending;
+  if (terminalCount === jobs.length && jobs.length) {
+    status = completed.length ? jobStates.completed : failed.length ? jobStates.failed : jobStates.cancelled;
+  } else if (processing.length) {
+    status = jobStates.processing;
+  } else if (throttled.length && throttled.length === jobs.length) {
+    status = jobStates.throttled;
+  }
+  batch.status = status;
+  batch.completedOutputs = completed.length;
+  batch.failedOutputs = failed.length;
+  batch.cancelledOutputs = cancelled.length;
+  batch.capturedCredits = completed.reduce((total, item) => total + Number(item.creditCost || 0), 0);
+  batch.releasedCredits = [...failed, ...cancelled].reduce((total, item) => total + Number(item.creditCost || 0), 0);
+  batch.partial = terminalCount === jobs.length && completed.length > 0 && terminalCount > completed.length;
+  batch.updatedAt = new Date().toISOString();
+  if (terminalCount === jobs.length && jobs.length) batch.completedAt = batch.updatedAt;
+  const project = state.projects.find((item) => item.id === batch.projectId);
+  if (project) {
+    project.status = status;
+    project.updatedAt = batch.updatedAt;
+  }
+  return batch;
+}
+
+function serializeGenerationBatch(batch) {
+  if (!batch) return null;
+  const jobs = state.jobs.filter((item) => item.batchId === batch.id).sort((a, b) => a.batchIndex - b.batchIndex);
+  return {
+    ...batch,
+    status: clientJobStatus(batch.status),
+    state: batch.status,
+    jobs: jobs.map(serializeJob),
+    jobIds: jobs.map((job) => job.id)
+  };
+}
+
+function createJob({ jobId = null, kind, title, providerName, prompt, payload, checks, request, batch = null, batchIndex = 1, projectId = null, sessionId = null }) {
   const now = new Date().toISOString();
   const job = {
-    id: requestId("job"),
+    id: jobId || requestId("job"),
     requestId: null,
     tenantId: requestIdentity(request, checks.auth),
     userId: checks.auth?.userId || null,
     kind,
+    modality: String(kind || "").toUpperCase(),
+    operation: generationAction(payload),
+    batchId: batch?.id || payload.batchId || null,
+    batchIndex,
+    sessionId: sessionId || payload.sessionId || null,
     title,
     provider: providerName,
     requestedProvider: checks.provider?.name || providerName,
     prompt,
-    status: jobStates.queued,
+    status: jobStates.pending,
+    progress: 0,
     createdAt: now,
     updatedAt: now,
     providerJobId: null,
     historyItemId: null,
-    projectId: null,
+    projectId: projectId || payload.projectId || null,
     reservationId: checks.credits?.reservation?.id || null,
     reservationStatus: checks.credits?.reservation?.status || null,
     outputUrl: null,
     outputUrls: [],
     providerOutputUrls: [],
     assets: [],
+    assetId: null,
+    retryOfJobId: payload.retryOfJobId || null,
+    incidentId: null,
     storage: null,
     error: null,
     payload: {
@@ -1887,8 +3126,15 @@ function createJob({ kind, title, providerName, prompt, payload, checks, request
       tool: payload.tool,
       actionId: payload.actionId,
       duration: payload.duration,
-      videoPlan: payload.videoPlan || null
+      model: payload.model || payload.modelId || null,
+      videoPlan: payload.videoPlan || null,
+      realityTransform: Boolean(payload.realityTransform),
+      sourceAssetId: payload.sourceAssetId || null,
+      sourceDurationSeconds: payload.sourceDurationSeconds || null,
+      transformStrength: payload.transformStrength || null,
+      preservationMode: payload.preservationMode || null
     },
+    parameters: { ...payload, outputCount: 1 },
     checks: {
       auth: checks.auth,
       plan: checks.plan,
@@ -1916,6 +3162,7 @@ function updateJob(jobId, patch = {}) {
   const job = findJob(jobId);
   if (!job) return null;
   Object.assign(job, patch, { updatedAt: new Date().toISOString() });
+  if (job.batchId) recomputeGenerationBatch(job.batchId);
   return job;
 }
 
@@ -1927,12 +3174,17 @@ function serializeJob(job) {
     jobId: job.id,
     providerJobId: job.providerJobId,
     providerRequestId: job.providerJobId,
+    batchId: job.batchId || null,
+    batchIndex: job.batchIndex || 1,
+    projectId: job.projectId || null,
+    sessionId: job.sessionId || null,
     kind: job.kind,
     mediaType: job.kind,
     provider: job.provider,
     requestedProvider: job.requestedProvider,
     status: clientJobStatus(job.status),
     state: job.status,
+    progress: Number(job.progress || 0),
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     outputUrl: job.outputUrl || null,
@@ -1940,6 +3192,11 @@ function serializeJob(job) {
     providerOutputUrls: job.providerOutputUrls || [],
     previewUrl: job.outputUrl || null,
     assets: job.assets || [],
+    assetId: job.assetId || job.assets?.[0]?.id || null,
+    retryOfJobId: job.retryOfJobId || null,
+    incidentId: job.incidentId || job.error?.incidentId || null,
+    parameters: job.parameters || job.payload || {},
+    creditCost: Number(job.creditCost || 0),
     storage: job.storage || null,
     needs_review: Boolean(job.needs_review),
     needsReview: Boolean(job.needsReview),
@@ -2012,12 +3269,16 @@ function extensionFromContentType(contentType = "", sourceUrl = "") {
     "image/webp": "webp",
     "image/gif": "gif",
     "video/mp4": "mp4",
+    "video/quicktime": "mov",
     "video/webm": "webm",
     "audio/mpeg": "mp3",
     "audio/mp3": "mp3",
     "audio/wav": "wav",
     "audio/x-wav": "wav",
     "audio/ogg": "ogg",
+    "audio/webm": "webm",
+    "audio/mp4": "m4a",
+    "application/pdf": "pdf",
     "application/json": "json"
   };
   if (byType[normalized]) return byType[normalized];
@@ -2055,6 +3316,99 @@ async function storeAssetBytes({ bytes, contentType, fileName, request = null, t
     storagePath,
     publicUrl: `${storagePublicBaseUrl(request).replace(/\/$/, "")}/${fileName}`
   };
+}
+
+async function hashFile(filePath) {
+  const digest = crypto.createHash("sha256");
+  await pipeline(createReadStream(filePath), new Writable({
+    write(chunk, _encoding, callback) {
+      digest.update(chunk);
+      callback();
+    }
+  }));
+  return digest.digest("hex");
+}
+
+async function moveFile(sourcePath, destinationPath) {
+  try {
+    await rename(sourcePath, destinationPath);
+  } catch (error) {
+    if (error.code !== "EXDEV") throw error;
+    await pipeline(createReadStream(sourcePath), createWriteStream(destinationPath, { flags: "wx" }));
+    await rm(sourcePath, { force: true });
+  }
+}
+
+async function storeAssetFile({ filePath, contentType, fileName, request = null, tenantId = "", move = true }) {
+  const fileStats = await stat(filePath);
+  if (supabaseStorage.configured && process.env.SLT_TEST_MODE !== "1") {
+    const tenantPrefix = safeStorageSegment(tenantId || "tenant");
+    const datePrefix = new Date().toISOString().slice(0, 10);
+    const storageKey = `${tenantPrefix}/${datePrefix}/${fileName}`;
+    const stored = await supabaseStorage.uploadFile({ key: storageKey, filePath, contentType });
+    if (move) await rm(filePath, { force: true });
+    return { ...stored, bytes: fileStats.size };
+  }
+
+  await mkdir(assetStorageDir, { recursive: true });
+  const storagePath = resolve(assetStorageDir, fileName);
+  if (move) await moveFile(filePath, storagePath);
+  else await pipeline(createReadStream(filePath), createWriteStream(storagePath, { flags: "wx" }));
+  return {
+    provider: "local",
+    storageKey: fileName,
+    storagePath,
+    publicUrl: `${storagePublicBaseUrl(request).replace(/\/$/, "")}/${fileName}`,
+    bytes: fileStats.size
+  };
+}
+
+async function temporaryUploadPath(prefix = "upload", extension = "bin") {
+  const incomingDir = resolve(assetStorageDir, ".incoming");
+  await mkdir(incomingDir, { recursive: true });
+  return resolve(incomingDir, `${safeStorageSegment(prefix)}_${requestId("tmp")}.${safeStorageSegment(extension)}`);
+}
+
+async function streamToFile(readable, filePath, maxBytes) {
+  let bytes = 0;
+  const limiter = new Transform({
+    transform(chunk, _encoding, callback) {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        const error = new Error(`Upload exceeds ${Math.round(maxBytes / 1024 / 1024)}MB limit.`);
+        error.code = "upload_too_large";
+        error.statusCode = 413;
+        callback(error);
+        return;
+      }
+      callback(null, chunk);
+    }
+  });
+  await pipeline(readable, limiter, createWriteStream(filePath, { flags: "wx" }));
+  return bytes;
+}
+
+async function downloadUrlToFile(url, filePath, { headers = {}, maxBytes = envNumber("MAX_PROVIDER_ASSET_BYTES", 1024 * 1024 * 1024) } = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), envNumber("ASSET_DOWNLOAD_TIMEOUT_MS", 120000));
+  try {
+    const response = await fetch(url, { headers, signal: controller.signal });
+    if (!response.ok || !response.body) {
+      const error = new Error(`Asset download failed with HTTP ${response.status}.`);
+      error.code = "asset_download_failed";
+      throw error;
+    }
+    const bytes = await streamToFile(Readable.fromWeb(response.body), filePath, maxBytes);
+    return {
+      bytes,
+      contentType: response.headers.get("content-type") || "application/octet-stream"
+    };
+  } catch (error) {
+    if (!error.code) error.code = "asset_download_failed";
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function parseDataUrl(dataUrl = "") {
@@ -2122,11 +3476,87 @@ async function downloadProviderAsset(url, { headers = {} } = {}) {
 }
 
 async function storeProviderAsset({ job, sourceUrl, cdnBaseUrl, sourceHeaders = {} }) {
+  const assetTenantId = job.tenantId || recordTenantId(job) || state.wallet.tenantId;
+  const lineage = assetLineage({
+    tenantId: assetTenantId,
+    parentVersionId: job.parameters?.parentVersionId,
+    parentAssetId: job.parameters?.parentAssetId,
+    versionType: job.parameters?.versionType || (job.retryOfJobId ? "RETRY" : "GENERATION")
+  });
+  if (/^https?:\/\//i.test(String(sourceUrl || "")) && !isPlatformAssetUrl(sourceUrl)) {
+    let tempPath = await temporaryUploadPath(`${job.kind}-${job.id}`, extensionFromContentType("", sourceUrl));
+    try {
+      const downloaded = await downloadUrlToFile(sourceUrl, tempPath, { headers: sourceHeaders });
+      const validation = await validateMediaFile({
+        filePath: tempPath,
+        declaredMime: downloaded.contentType,
+        kind: job.kind,
+        maxBytes: envNumber("MAX_PROVIDER_ASSET_BYTES", 1024 * 1024 * 1024),
+        skipProbe: process.env.SLT_TEST_MODE === "1",
+        probeLimits: {
+          maxDuration: envNumber("MAX_VIDEO_DURATION_SECONDS", 3600),
+          maxWidth: envNumber("MAX_VIDEO_WIDTH", 8192),
+          maxHeight: envNumber("MAX_VIDEO_HEIGHT", 8192),
+          maxFps: envNumber("MAX_VIDEO_FPS", 120)
+        }
+      });
+      const contentType = validation.detectedMime;
+      const extension = extensionFromContentType(contentType, sourceUrl);
+      const digest = (await hashFile(tempPath)).slice(0, 12);
+      const fileName = `${job.kind}_${job.id}_${digest}.${extension}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
+      const stored = await storeAssetFile({ filePath: tempPath, contentType, fileName, tenantId: assetTenantId, move: true });
+      tempPath = "";
+      const asset = {
+        id: requestId("asset"),
+        tenantId: assetTenantId,
+        userId: job.userId || null,
+        jobId: job.id,
+        batchId: job.batchId || null,
+        projectId: job.projectId || null,
+        sessionId: job.sessionId || null,
+        ...lineage,
+        displayName: job.title || `${job.kind} generation`,
+        kind: job.kind,
+        provider: job.provider,
+        originalUrl: sourceUrl,
+        publicUrl: stored.publicUrl || `${cdnBaseUrl.replace(/\/$/, "")}/${fileName}`,
+        storageKey: stored.storageKey || fileName,
+        storageProvider: stored.provider || "local",
+        storagePath: stored.storagePath || null,
+        contentType,
+        bytes: validation.bytes,
+        status: "stored",
+        metadata: {
+          media: validation.media,
+          signatureMime: validation.detectedMime,
+          serverValidated: process.env.SLT_TEST_MODE !== "1",
+          operation: job.operation || job.parameters?.operation || null,
+          prompt: job.prompt || "",
+          referenceAssetIds: job.parameters?.referenceAssetIds || []
+        },
+        createdAt: new Date().toISOString()
+      };
+      state.assets.unshift(asset);
+      state.assets = state.assets.slice(0, 200);
+      return asset;
+    } catch (error) {
+      if (tempPath) await rm(tempPath, { force: true }).catch(() => {});
+      throw error;
+    }
+  }
+
   const downloaded = await downloadProviderAsset(sourceUrl, { headers: sourceHeaders });
   if (downloaded.alreadyStored) {
-    return {
+    const asset = {
       id: requestId("asset"),
+      tenantId: assetTenantId,
+      userId: job.userId || null,
       jobId: job.id,
+      batchId: job.batchId || null,
+      projectId: job.projectId || null,
+      sessionId: job.sessionId || null,
+      ...lineage,
+      displayName: job.title || `${job.kind} generation`,
       kind: job.kind,
       provider: job.provider,
       originalUrl: sourceUrl,
@@ -2136,19 +3566,27 @@ async function storeProviderAsset({ job, sourceUrl, cdnBaseUrl, sourceHeaders = 
       status: "already_stored",
       createdAt: new Date().toISOString()
     };
+    state.assets.unshift(asset);
+    state.assets = state.assets.slice(0, 300);
+    return asset;
   }
 
   const contentType = downloaded.contentType || "application/octet-stream";
   const extension = extensionFromContentType(contentType, sourceUrl);
   const digest = crypto.createHash("sha256").update(String(sourceUrl)).update(downloaded.bytes).digest("hex").slice(0, 12);
   const fileName = `${job.kind}_${job.id}_${digest}.${extension}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
-  const assetTenantId = job.tenantId || recordTenantId(job) || state.wallet.tenantId;
   const stored = await storeAssetBytes({ bytes: downloaded.bytes, contentType, fileName, tenantId: assetTenantId });
 
   const asset = {
     id: requestId("asset"),
     tenantId: assetTenantId,
+    userId: job.userId || null,
     jobId: job.id,
+    batchId: job.batchId || null,
+    projectId: job.projectId || null,
+    sessionId: job.sessionId || null,
+    ...lineage,
+    displayName: job.title || `${job.kind} generation`,
     kind: job.kind,
     provider: job.provider,
     originalUrl: sourceUrl.startsWith("data:") ? "data-url" : sourceUrl,
@@ -2159,6 +3597,11 @@ async function storeProviderAsset({ job, sourceUrl, cdnBaseUrl, sourceHeaders = 
     contentType,
     bytes: downloaded.bytes.length,
     status: downloaded.placeholder ? "placeholder_stored" : "stored",
+    metadata: {
+      operation: job.operation || job.parameters?.operation || null,
+      prompt: job.prompt || "",
+      referenceAssetIds: job.parameters?.referenceAssetIds || []
+    },
     createdAt: new Date().toISOString()
   };
   state.assets.unshift(asset);
@@ -2228,42 +3671,73 @@ function parseUploadedBytes({ dataUrl = "", base64 = "" } = {}) {
   };
 }
 
-async function storeUploadedReferenceAsset({ request, auth, payload = {} }) {
-  const uploadKind = normalizeUploadKind(payload.kind || payload.module || payload.studio);
-  const parsed = parseUploadedBytes(payload);
-  const contentType = String(payload.contentType || parsed.contentType || "application/octet-stream").split(";")[0].trim().toLowerCase();
+function maxUploadBytesFor(uploadKind = "reference") {
+  if (uploadKind === "video") return envNumber("MAX_VIDEO_UPLOAD_BYTES", 200 * 1024 * 1024);
+  if (["music", "sound"].includes(uploadKind)) return envNumber("MAX_AUDIO_UPLOAD_BYTES", 100 * 1024 * 1024);
+  return envNumber("MAX_UPLOAD_BYTES", 25 * 1024 * 1024);
+}
+
+function validateDeclaredUpload({ uploadKind, contentType, bytes = null }) {
   const accepted = allowedUploadMimes(uploadKind);
-  const maxBytes = envNumber("MAX_UPLOAD_BYTES", 25 * 1024 * 1024);
   if (!accepted.includes(contentType)) {
     const error = new Error(`Unsupported upload type ${contentType || "unknown"} for ${uploadKind}.`);
     error.code = "upload_invalid_mime";
     error.statusCode = 400;
     throw error;
   }
-  if (!parsed.bytes?.length) {
-    const error = new Error("Upload file is empty.");
-    error.code = "upload_empty";
-    error.statusCode = 400;
-    throw error;
-  }
-  if (parsed.bytes.length > maxBytes) {
+  const maxBytes = maxUploadBytesFor(uploadKind);
+  if (Number.isFinite(bytes) && bytes > maxBytes) {
     const error = new Error(`Upload exceeds ${Math.round(maxBytes / 1024 / 1024)}MB limit.`);
     error.code = "upload_too_large";
     error.statusCode = 413;
     throw error;
   }
+  return { accepted, maxBytes };
+}
 
+const assetVersionTypes = new Set(["GENERATION", "VARIATION", "REMIX", "RETRY", "CONTINUATION", "EDIT", "EXTENSION"]);
+
+function normalizeAssetVersionType(value = "GENERATION") {
+  const normalized = String(value || "GENERATION").trim().toUpperCase();
+  return assetVersionTypes.has(normalized) ? normalized : "GENERATION";
+}
+
+function assetLineage({ tenantId, parentVersionId = null, parentAssetId = null, versionType = "GENERATION" } = {}) {
+  const immediateParentId = parentVersionId || parentAssetId || null;
+  const immediateParent = immediateParentId
+    ? state.assets.find((item) => item.id === immediateParentId && item.tenantId === tenantId)
+    : null;
+  if (!immediateParent) {
+    return { parentAssetId: null, parentVersionId: null, version: 1, versionType: normalizeAssetVersionType(versionType) };
+  }
+  const rootAssetId = immediateParent.parentAssetId || immediateParent.id;
+  const lineage = state.assets.filter((item) => item.tenantId === tenantId && (item.id === rootAssetId || item.parentAssetId === rootAssetId));
+  const version = Math.max(1, ...lineage.map((item) => Number(item.version || 1))) + 1;
+  return {
+    parentAssetId: rootAssetId,
+    parentVersionId: immediateParent.id,
+    version,
+    versionType: normalizeAssetVersionType(versionType)
+  };
+}
+
+function registerUploadedAsset({ request, auth, payload, uploadKind, contentType, detectedContentType, bytes, stored, media = null }) {
   const tenantId = requestIdentity(request, auth);
-  const extension = extensionFromContentType(contentType, payload.fileName || "");
-  const digest = crypto.createHash("sha256").update(parsed.bytes).digest("hex").slice(0, 12);
-  const fileName = `${uploadKind}_${tenantId}_${Date.now()}_${digest}.${extension}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
-  const stored = await storeAssetBytes({ bytes: parsed.bytes, contentType, fileName, request, tenantId });
-
+  const lineage = assetLineage({
+    tenantId,
+    parentVersionId: payload.parentVersionId,
+    parentAssetId: payload.parentAssetId,
+    versionType: payload.versionType || "GENERATION"
+  });
   const asset = {
     id: requestId("asset"),
     tenantId,
+    userId: auth?.userId || null,
     projectId: payload.projectId || null,
+    sessionId: payload.sessionId || null,
     jobId: payload.jobId || null,
+    ...lineage,
+    displayName: String(payload.displayName || payload.fileName || "Uploaded asset").slice(0, 180),
     kind: uploadKind,
     module: payload.module || uploadKind,
     provider: "user-upload",
@@ -2271,21 +3745,182 @@ async function storeUploadedReferenceAsset({ request, auth, payload = {} }) {
     originalName: safeUploadName(payload.fileName),
     originalUrl: "user-upload",
     publicUrl: stored.publicUrl,
-    storageKey: stored.storageKey || fileName,
+    storageKey: stored.storageKey,
     storageProvider: stored.provider || "local",
     storagePath: stored.storagePath || null,
-    contentType,
-    bytes: parsed.bytes.length,
+    contentType: detectedContentType || contentType,
+    bytes,
     status: "stored",
     metadata: {
       promptRole: payload.promptRole || "",
-      note: payload.note || ""
+      note: payload.note || "",
+      signatureMime: detectedContentType || contentType,
+      durationSeconds: media?.durationSeconds ?? (process.env.SLT_TEST_MODE === "1" && Number.isFinite(Number(payload.durationSeconds)) ? Number(payload.durationSeconds) : null),
+      width: media?.width || null,
+      height: media?.height || null,
+      frameRate: media?.frameRate || null,
+      codec: media?.codec || null,
+      videoTracks: media?.videoTracks ?? null,
+      audioTracks: media?.audioTracks ?? null,
+      audioCodecs: media?.audioCodecs || [],
+      serverValidated: process.env.SLT_TEST_MODE !== "1"
     },
     createdAt: new Date().toISOString()
   };
   state.assets.unshift(asset);
   state.assets = state.assets.slice(0, 300);
   return asset;
+}
+
+async function storeUploadedReferenceFile({ request, auth, payload = {}, filePath }) {
+  const uploadKind = normalizeUploadKind(payload.kind || payload.module || payload.studio);
+  const declaredContentType = String(payload.contentType || "application/octet-stream").split(";")[0].trim().toLowerCase();
+  const { accepted, maxBytes } = validateDeclaredUpload({ uploadKind, contentType: declaredContentType });
+  let validation;
+  try {
+    validation = await validateMediaFile({
+      filePath,
+      declaredMime: declaredContentType,
+      kind: uploadKind,
+      maxBytes,
+      skipProbe: process.env.SLT_TEST_MODE === "1",
+      probeLimits: {
+        maxDuration: envNumber("MAX_VIDEO_DURATION_SECONDS", 3600),
+        maxWidth: envNumber("MAX_VIDEO_WIDTH", 8192),
+        maxHeight: envNumber("MAX_VIDEO_HEIGHT", 8192),
+        maxFps: envNumber("MAX_VIDEO_FPS", 120)
+      }
+    });
+    if (!accepted.includes(validation.detectedMime) && !(validation.detectedMime === "video/webm" && accepted.includes("audio/webm"))) {
+      const error = new Error(`Detected media type ${validation.detectedMime} is not accepted for ${uploadKind}.`);
+      error.code = "upload_invalid_mime";
+      error.statusCode = 400;
+      throw error;
+    }
+    const tenantId = requestIdentity(request, auth);
+    const extension = extensionFromContentType(validation.detectedMime, payload.fileName || "");
+    const digest = (await hashFile(filePath)).slice(0, 12);
+    const fileName = `${uploadKind}_${safeStorageSegment(tenantId)}_${Date.now()}_${digest}.${extension}`;
+    const stored = await storeAssetFile({ filePath, contentType: validation.detectedMime, fileName, request, tenantId, move: true });
+    return registerUploadedAsset({
+      request,
+      auth,
+      payload,
+      uploadKind,
+      contentType: declaredContentType,
+      detectedContentType: validation.detectedMime,
+      bytes: validation.bytes,
+      stored,
+      media: validation.media
+    });
+  } catch (error) {
+    await rm(filePath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function handleStreamingReferenceUpload(request, response) {
+  const auth = request.sltAuth || getAuth(request);
+  const payload = {
+    kind: request.query.kind,
+    module: request.query.module,
+    role: request.query.role,
+    projectId: request.query.projectId || null,
+    sessionId: request.query.sessionId || null,
+    note: request.query.note || "",
+    fileName: request.query.fileName || "upload.bin",
+    contentType: String(request.headers["content-type"] || "application/octet-stream").split(";")[0].trim().toLowerCase(),
+    durationSeconds: request.query.durationSeconds || null
+  };
+  const uploadKind = normalizeUploadKind(payload.kind || payload.module);
+  let tempPath = "";
+  try {
+    if (supabaseStorage.configured && process.env.SLT_TEST_MODE !== "1") {
+      response.status(409).json({
+        ok: false,
+        code: "signed_upload_required",
+        error: "Use the signed upload preflight for durable cloud storage.",
+        uploadIntentEndpoint: "/api/uploads/signed"
+      });
+      return;
+    }
+    const contentLength = Number(request.headers["content-length"] || 0);
+    const { maxBytes } = validateDeclaredUpload({ uploadKind, contentType: payload.contentType, bytes: contentLength || null });
+    tempPath = await temporaryUploadPath(uploadKind, extensionFromContentType(payload.contentType, payload.fileName));
+    await streamToFile(request, tempPath, maxBytes);
+    const asset = await storeUploadedReferenceFile({ request, auth, payload, filePath: tempPath });
+    tempPath = "";
+    response.status(201).json({
+      ok: true,
+      auth,
+      asset: serializeAssetForClient(asset),
+      cdnBaseUrl: storagePublicBaseUrl(request),
+      message: "Reference asset streamed, validated and stored."
+    });
+  } catch (error) {
+    if (tempPath) await rm(tempPath, { force: true }).catch(() => {});
+    response.status(error.statusCode || 400).json({
+      ok: false,
+      auth,
+      code: error.code || "upload_failed",
+      error: error.message,
+      readableError: error.message,
+      details: error.details || null
+    });
+  }
+}
+
+async function storeUploadedReferenceBytes({ request, auth, payload = {}, bytes, detectedContentType = "" }) {
+  const uploadKind = normalizeUploadKind(payload.kind || payload.module || payload.studio);
+  const contentType = String(payload.contentType || detectedContentType || "application/octet-stream").split(";")[0].trim().toLowerCase();
+  const { accepted } = validateDeclaredUpload({ uploadKind, contentType, bytes: bytes?.length || 0 });
+  if (!bytes?.length) {
+    const error = new Error("Upload file is empty.");
+    error.code = "upload_empty";
+    error.statusCode = 400;
+    throw error;
+  }
+  const signatureMime = assertMediaSignature({ bytes: bytes.subarray(0, 512), declaredMime: contentType });
+  if (!accepted.includes(signatureMime) && !(signatureMime === "video/webm" && accepted.includes("audio/webm"))) {
+    const error = new Error(`Detected media type ${signatureMime} is not accepted for ${uploadKind}.`);
+    error.code = "upload_invalid_mime";
+    error.statusCode = 400;
+    throw error;
+  }
+  if (signatureMime.startsWith("video/") && process.env.SLT_TEST_MODE !== "1") {
+    const error = new Error("Video files must use the streaming or signed upload pipeline.");
+    error.code = "streaming_upload_required";
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const tenantId = requestIdentity(request, auth);
+  const extension = extensionFromContentType(signatureMime, payload.fileName || "");
+  const digest = crypto.createHash("sha256").update(bytes).digest("hex").slice(0, 12);
+  const fileName = `${uploadKind}_${tenantId}_${Date.now()}_${digest}.${extension}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
+  const stored = await storeAssetBytes({ bytes, contentType: signatureMime, fileName, request, tenantId });
+  return registerUploadedAsset({
+    request,
+    auth,
+    payload,
+    uploadKind,
+    contentType,
+    detectedContentType: signatureMime,
+    bytes: bytes.length,
+    stored,
+    media: null
+  });
+}
+
+async function storeUploadedReferenceAsset({ request, auth, payload = {} }) {
+  const parsed = parseUploadedBytes(payload);
+  return storeUploadedReferenceBytes({
+    request,
+    auth,
+    payload,
+    bytes: parsed.bytes,
+    detectedContentType: parsed.contentType
+  });
 }
 
 function serializeAssetForClient(asset = {}) {
@@ -2350,6 +3985,12 @@ function savePlatformForm({ request, auth, kind, payload = {} }) {
 function buildQueuedHistoryEntry({ job, checks }) {
   return {
     id: requestId(job.kind),
+    tenantId: job.tenantId,
+    userId: job.userId || null,
+    jobId: job.id,
+    batchId: job.batchId || null,
+    projectId: job.projectId || null,
+    sessionId: job.sessionId || null,
     kind: job.kind,
     title: job.title,
     provider: job.provider,
@@ -2361,6 +4002,9 @@ function buildQueuedHistoryEntry({ job, checks }) {
       providerJobId: job.id,
       jobId: job.id,
       request_id: job.id,
+      batchId: job.batchId || null,
+      projectId: job.projectId || null,
+      sessionId: job.sessionId || null,
       status: "processing",
       state: job.status,
       reservationId: job.reservationId,
@@ -2731,6 +4375,71 @@ async function providerCreditSummary() {
   }));
 }
 
+async function refreshProviderDiagnostic(providerName) {
+  const provider = providerName === "Replicate" ? "Replicate" : normalizeProviderName(providerName);
+  if (provider === "Runway") {
+    if (!hasEnvValue("RUNWAY_API_KEY")) {
+      return setProviderDiagnostic("Runway", {
+        status: "PROVIDER_AUTH_FAILED",
+        errorName: "PROVIDER_AUTH_FAILED",
+        errorCode: "SLT-1103",
+        customerMessage: SLT_ERROR_BY_NAME.PROVIDER_AUTH_FAILED.customerMessage,
+        metadata: { source: "provider_health_check", credentialPresent: false }
+      });
+    }
+    const result = await providerCreditFetch("Runway", `${(process.env.RUNWAY_API_URL || "https://api.dev.runwayml.com/v1").replace(/\/$/, "")}/organization`, {
+      headers: {
+        Authorization: `Bearer ${process.env.RUNWAY_API_KEY}`,
+        "X-Runway-Version": process.env.RUNWAY_API_VERSION || "2024-11-06"
+      }
+    });
+    const balance = Number(result.data?.creditBalance ?? 0);
+    if (result.ok && balance > 0) {
+      return setProviderDiagnostic("Runway", {
+        status: "AVAILABLE",
+        errorName: null,
+        errorCode: null,
+        customerMessage: "Provider available.",
+        metadata: { source: "provider_health_check", balancePositive: true, httpStatus: result.status }
+      });
+    }
+    const classification = classifySltError({
+      statusCode: result.status,
+      message: result.data?.error?.message || result.data?.message || result.error || (result.ok ? "Provider balance is zero." : "Runway health check failed.")
+    }, { provider: "Runway", operation: "organization_balance" });
+    const noBalance = result.ok || classification.name === "PROVIDER_NO_CREDITS";
+    return setProviderDiagnostic("Runway", {
+      status: noBalance ? "PROVIDER_NO_CREDITS" : classification.name,
+      errorName: noBalance ? "PROVIDER_NO_CREDITS" : classification.name,
+      errorCode: noBalance ? "SLT-1002" : classification.code,
+      customerMessage: noBalance
+        ? "Temporarily unavailable — provider balance required."
+        : classification.customerMessage,
+      metadata: { source: "provider_health_check", balancePositive: false, httpStatus: result.status }
+    });
+  }
+
+  if (provider === "Replicate") {
+    const enabled = envFlag("REPLICATE_PROVIDER_AVAILABLE", false) || envFlag("REPLICATE_BILLING_ACTIVE", false);
+    return setProviderDiagnostic("Replicate", {
+      status: enabled ? "AVAILABLE" : "PROVIDER_BILLING_REQUIRED",
+      errorName: enabled ? null : "PROVIDER_BILLING_REQUIRED",
+      errorCode: enabled ? null : "SLT-1003",
+      customerMessage: enabled ? "Provider available." : "Temporarily unavailable — provider billing required.",
+      metadata: { source: "provider_health_check", billingEnabled: enabled }
+    });
+  }
+
+  const status = providerStatus(provider);
+  return setProviderDiagnostic(provider, {
+    status: status.connected ? "AVAILABLE" : status.status,
+    errorName: status.errorName || null,
+    errorCode: status.errorCode || null,
+    customerMessage: status.message,
+    metadata: { source: "provider_health_check" }
+  });
+}
+
 function appendStripeParam(params, key, value) {
   if (value === undefined || value === null || value === "") return;
   if (Array.isArray(value)) {
@@ -2930,6 +4639,7 @@ function creditPackFromStripeObject(object = {}) {
 
 function recordStripePaymentEvent(event, result = {}) {
   const object = event.data?.object || {};
+  const tenantId = stripeTenantIdFromObject(object);
   state.paymentEvents.unshift({
     id: event.id || result.eventKey,
     eventKey: result.eventKey,
@@ -2937,13 +4647,14 @@ function recordStripePaymentEvent(event, result = {}) {
     objectId: object.id || null,
     status: result.idempotent ? "duplicate_ignored" : "processed",
     actions: result.actions || [],
-    wallet: result.wallet || ledgerSnapshot(),
+    tenantId,
+    wallet: result.wallet || ledgerSnapshot(tenantId),
     receivedAt: new Date().toISOString()
   });
   state.paymentEvents = state.paymentEvents.slice(0, 100);
 }
 
-function handleStripeWebhook(request, response) {
+async function handleStripeWebhook(request, response) {
   const rawBody = stripeRawBody(request);
   const signature = request.header("Stripe-Signature") || "";
   const unsignedAllowed = allowUnsignedStripeWebhook(request);
@@ -2962,7 +4673,7 @@ function handleStripeWebhook(request, response) {
       verifyStripeWebhookSignature(rawBody, signature, process.env.STRIPE_WEBHOOK_SECRET);
     }
     const event = JSON.parse(rawBody.toString("utf8"));
-    const result = applyStripeWebhookEvent(event);
+    const result = await applyStripeWebhookEvent(event);
     response.json({
       ok: true,
       received: true,
@@ -2980,11 +4691,24 @@ function handleStripeWebhook(request, response) {
   }
 }
 
-function applyStripeWebhookEvent(event = {}) {
+function stripeTenantIdFromObject(object = {}) {
+  return String(
+    object.metadata?.tenantId ||
+    object.metadata?.tenant_id ||
+    object.subscription_details?.metadata?.tenantId ||
+    object.subscription_details?.metadata?.tenant_id ||
+    object.client_reference_id ||
+    object.metadata?.userId ||
+    state.wallet.tenantId
+  );
+}
+
+async function applyStripeWebhookEvent(event = {}) {
   const object = event.data?.object || {};
   const eventKey = stripeEventKey(event);
+  const tenantId = stripeTenantIdFromObject(object);
   if (processedWebhookEvents.has(eventKey)) {
-    const result = { idempotent: true, eventKey, actions: ["duplicate_ignored"], wallet: ledgerSnapshot() };
+    const result = { idempotent: true, eventKey, actions: ["duplicate_ignored"], wallet: ledgerSnapshot(tenantId) };
     recordStripePaymentEvent(event, result);
     return result;
   }
@@ -3002,8 +4726,10 @@ function applyStripeWebhookEvent(event = {}) {
         const pack = creditPackFromStripeObject(object);
         const credits = Number(object.metadata?.credits || pack?.credits || 0);
         if (credits > 0) {
-          const ledgerResult = grantCredits({
+          const ledgerResult = await grantCreditsTransactional({
             amount: credits,
+            tenantId,
+            userId: object.metadata?.userId || null,
             idempotencyKey: `stripe:checkout:${object.id}:credit_pack`,
             reason: "credit_pack_purchase",
             metadata: { eventId: event.id || "", stripeSessionId: object.id, packId: pack?.id || object.metadata?.creditPackId || "" }
@@ -3030,8 +4756,10 @@ function applyStripeWebhookEvent(event = {}) {
         state.subscription.plan = plan;
         state.subscription.status = "active";
         state.user.plan = plan;
-        const ledgerResult = adjustAvailableCredits({
+        const ledgerResult = await adjustAvailableCreditsTransactional({
           targetAmount: creditsForPlan(plan),
+          tenantId,
+          userId: object.metadata?.userId || null,
           idempotencyKey: `stripe:checkout:${object.id}:subscription_allowance`,
           reason: "subscription_plan_credit_reset",
           metadata: { eventId: event.id || "", stripeSessionId: object.id, stripeSubscriptionId: object.subscription || "", plan }
@@ -3046,6 +4774,10 @@ function applyStripeWebhookEvent(event = {}) {
           message: "Stripe checkout completed and subscription state updated.",
           createdAt: new Date().toISOString()
         });
+      }
+      if (paymentConfirmed) {
+        const redeemedCoupon = markCompensationCouponRedeemed(object);
+        if (redeemedCoupon) actions.push("compensation_coupon_redeemed");
       }
     }
 
@@ -3096,8 +4828,10 @@ function applyStripeWebhookEvent(event = {}) {
         state.subscription.stripeSubscriptionId = object.subscription || state.subscription.stripeSubscriptionId;
         state.user.plan = plan;
         const periodStart = object.lines?.data?.[0]?.period?.start || object.period_start || object.created || "current";
-        const ledgerResult = adjustAvailableCredits({
+        const ledgerResult = await adjustAvailableCreditsTransactional({
           targetAmount: creditsForPlan(plan),
+          tenantId,
+          userId: object.metadata?.userId || null,
           idempotencyKey: `stripe:invoice:${object.id || event.id}:${periodStart}:subscription_allowance`,
           reason: "subscription_invoice_credit_reset",
           metadata: { eventId: event.id || "", invoiceId: object.id || "", stripeSubscriptionId: object.subscription || "", plan, periodStart }
@@ -3108,7 +4842,7 @@ function applyStripeWebhookEvent(event = {}) {
       }
     }
 
-    const result = { idempotent: false, eventKey, actions, wallet: ledgerSnapshot() };
+    const result = { idempotent: false, eventKey, actions, wallet: ledgerSnapshot(tenantId) };
     recordStripePaymentEvent(event, result);
     return result;
   } catch (error) {
@@ -3129,7 +4863,11 @@ async function postBinary(url, { headers = {}, body = {}, timeoutMs = 60000 }) {
     });
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(text || `${response.status} ${response.statusText}`);
+      const error = new Error(text || `${response.status} ${response.statusText}`);
+      error.statusCode = response.status;
+      error.code = `provider_http_${response.status}`;
+      error.providerBody = { message: text.slice(0, 1200) };
+      throw error;
     }
     const arrayBuffer = await response.arrayBuffer();
     const contentType = response.headers.get("content-type") || "application/octet-stream";
@@ -3165,7 +4903,11 @@ async function postFormJson(url, { headers = {}, fields = {}, timeoutMs = 60000 
     }
     if (!response.ok) {
       const message = data.errors?.join(", ") || data.error?.message || data.message || data.raw || `${response.status} ${response.statusText}`;
-      throw new Error(message);
+      const error = new Error(message);
+      error.statusCode = response.status;
+      error.code = data.error?.code || data.code || `provider_http_${response.status}`;
+      error.providerBody = data;
+      throw error;
     }
     return data;
   } finally {
@@ -3196,7 +4938,11 @@ async function postFormBinary(url, { headers = {}, fields = {}, timeoutMs = 1200
         data = { raw: text };
       }
       const message = data.errors?.join(", ") || data.error?.message || data.message || data.raw || `${response.status} ${response.statusText}`;
-      throw new Error(message);
+      const error = new Error(message);
+      error.statusCode = response.status;
+      error.code = data.error?.code || data.code || `provider_http_${response.status}`;
+      error.providerBody = data;
+      throw error;
     }
     const arrayBuffer = await response.arrayBuffer();
     const contentType = response.headers.get("content-type") || "audio/mpeg";
@@ -3227,53 +4973,99 @@ async function callOpenAIImage({ prompt, title }) {
 }
 
 function geminiImageEndpoint() {
-  if (hasEnvValue("GEMINI_IMAGE_API_URL")) return process.env.GEMINI_IMAGE_API_URL;
-  const baseUrl = (process.env.GEMINI_API_URL || "https://generativelanguage.googleapis.com/v1").replace(/\/$/, "");
-  const model = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image";
-  return `${baseUrl}/models/${model}:generateContent`;
+  if (hasEnvValue("GEMINI_IMAGE_INTERACTIONS_API_URL")) return process.env.GEMINI_IMAGE_INTERACTIONS_API_URL;
+  const configured = process.env.GEMINI_IMAGE_API_URL || process.env.GEMINI_API_URL || "https://generativelanguage.googleapis.com/v1beta";
+  try {
+    const parsed = new URL(configured);
+    return `${parsed.origin}/v1beta/interactions`;
+  } catch {
+    return "https://generativelanguage.googleapis.com/v1beta/interactions";
+  }
 }
 
 function extractGeminiImageResult(data = {}) {
+  const interactionParts = (Array.isArray(data.steps) ? data.steps : [])
+    .filter((step) => step?.type === "model_output")
+    .flatMap((step) => step.content || []);
   const candidates = Array.isArray(data.candidates) ? data.candidates : [];
-  const parts = candidates.flatMap((candidate) => candidate.content?.parts || []);
-  const imagePart = parts.find((part) => part.inlineData?.data || part.inline_data?.data);
+  const parts = [
+    ...interactionParts,
+    ...candidates.flatMap((candidate) => candidate.content?.parts || [])
+  ];
+  const imagePart = parts.find((part) => part.type === "image" || part.inlineData?.data || part.inline_data?.data);
   const inlineData = imagePart?.inlineData || imagePart?.inline_data || null;
-  const textPart = parts.find((part) => part.text)?.text || data.promptFeedback?.blockReasonMessage || "";
+  const imageData = imagePart?.data || inlineData?.data || "";
+  const mimeType = imagePart?.mime_type || imagePart?.mimeType || inlineData?.mimeType || inlineData?.mime_type || "image/jpeg";
+  const textPart = parts.find((part) => part.type === "text" || part.text)?.text || data.output_text || data.promptFeedback?.blockReasonMessage || "";
   return {
-    previewUrl: inlineData?.data ? `data:${inlineData.mimeType || inlineData.mime_type || "image/png"};base64,${inlineData.data}` : null,
+    previewUrl: imageData ? `data:${mimeType};base64,${imageData}` : null,
     responseText: textPart,
     raw: data
   };
 }
 
-async function callGeminiImage({ prompt, title }) {
-  const data = await postJson(geminiImageEndpoint(), {
+async function geminiImageReferenceParts(payload = {}) {
+  const ids = Array.isArray(payload.referenceAssetIds) ? payload.referenceAssetIds.slice(0, 4) : [];
+  const parts = [];
+  for (const assetId of ids) {
+    const asset = state.assets.find((item) => item.id === assetId);
+    if (!asset || !String(asset.contentType || "").startsWith("image/")) continue;
+    const source = await bytesForInputAsset(asset, asset.publicUrl);
+    if (source.bytes.length > 20 * 1024 * 1024) continue;
+    parts.push({
+      type: "image",
+      mime_type: asset.contentType || source.contentType || "image/png",
+      data: source.bytes.toString("base64")
+    });
+  }
+  return parts;
+}
+
+async function callGeminiImage({ prompt, title, payload = {} }) {
+  const referenceParts = await geminiImageReferenceParts(payload);
+  const model = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image";
+  const request = {
     headers: { "x-goog-api-key": process.env.GEMINI_API_KEY },
     body: {
-      contents: [
+      model,
+      input: [
+        ...referenceParts,
         {
-          parts: [
-            {
-              text: prompt || title || "Create a cinematic futuristic garage studio image for Sweet Little Trauma."
-            }
-          ]
+          type: "text",
+          text: prompt || title || "Create a cinematic futuristic garage studio image for Sweet Little Trauma."
         }
       ],
-      generationConfig: {
-        responseModalities: ["TEXT", "IMAGE"],
-        responseFormat: {
-          image: {
-            aspectRatio: process.env.GEMINI_IMAGE_ASPECT_RATIO || "1:1",
-            imageSize: process.env.GEMINI_IMAGE_SIZE || "1K"
-          }
-        }
+      response_format: {
+        type: "image",
+        mime_type: "image/jpeg",
+        aspect_ratio: process.env.GEMINI_IMAGE_ASPECT_RATIO || "1:1",
+        image_size: process.env.GEMINI_IMAGE_SIZE || "1K"
       }
     },
     timeoutMs: 90000
-  });
+  };
+  const maxAttempts = Math.max(1, Math.min(4, envNumber("GEMINI_IMAGE_MAX_ATTEMPTS", 3)));
+  let data = null;
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      data = await postJson(geminiImageEndpoint(), request);
+      break;
+    } catch (error) {
+      lastError = error;
+      const status = Number(error?.statusCode || 0);
+      const code = String(error?.code || "").toLowerCase();
+      const message = String(error?.message || "").toLowerCase();
+      const retryable = status === 429 || status >= 500 || code === "api_error" || message.includes("high demand") || message.includes("internal error");
+      if (!retryable || attempt === maxAttempts) throw error;
+      const delayMs = attempt * envNumber("GEMINI_IMAGE_RETRY_DELAY_MS", 5000);
+      await new Promise((resolveRetry) => setTimeout(resolveRetry, delayMs));
+    }
+  }
+  if (!data) throw lastError || new Error("Gemini image generation returned no response.");
   const result = extractGeminiImageResult(data);
   return {
-    providerJobId: data.responseId || null,
+    providerJobId: data.id || data.responseId || null,
     previewUrl: result.previewUrl,
     responseText: result.responseText,
     raw: result.raw
@@ -3539,17 +5331,31 @@ function stabilityAudioEndpoint() {
   return `${baseUrl}/v2beta/audio/stable-audio-2/text-to-audio`;
 }
 
-async function callStabilityAudio({ prompt, title }) {
+function requestedAudioDuration(payload = {}, fallback = 30) {
+  const requested = Number(
+    payload.durationSeconds ||
+    payload.audioDurationSeconds ||
+    payload.musicDurationSeconds ||
+    payload.duration ||
+    fallback
+  );
+  return Math.min(180, Math.max(1, Number.isFinite(requested) ? requested : fallback));
+}
+
+async function callStabilityAudio({ prompt, title, payload = {} }) {
   const apiKey = process.env.STABILITY_AUDIO_API_KEY || process.env.STABLE_AUDIO_API_KEY || process.env.STABILITY_API_KEY;
   const outputFormat = process.env.STABILITY_AUDIO_FORMAT || process.env.STABLE_AUDIO_FORMAT || "mp3";
   const audio = await postFormBinary(stabilityAudioEndpoint(), {
     headers: {
       Authorization: `Bearer ${apiKey}`,
-      Accept: `audio/${outputFormat}`
+      Accept: "audio/*"
     },
     fields: {
       prompt: prompt || title || "A cinematic futuristic garage studio theme for Sweet Little Trauma.",
-      duration: process.env.STABILITY_AUDIO_DURATION || process.env.STABLE_AUDIO_DURATION || 30,
+      duration: requestedAudioDuration(
+        payload,
+        Number(process.env.STABILITY_AUDIO_DURATION || process.env.STABLE_AUDIO_DURATION || 30)
+      ),
       output_format: outputFormat
     },
     timeoutMs: 180000
@@ -4083,18 +5889,88 @@ function buildSeedanceContent({ prompt, title, payload = {} }) {
   return content;
 }
 
+function seedanceReadyImageReference(value = "") {
+  const reference = String(value || "").trim();
+  return reference.startsWith("data:image/") || reference.startsWith("https://") || reference.startsWith("asset://");
+}
+
+function seedanceReferenceAsset(payload = {}, explicitReference = "", { lastFrame = false } = {}) {
+  const explicitAsset = explicitReference
+    ? state.assets.find((asset) => asset.publicUrl === explicitReference && !asset.deletedAt)
+    : null;
+  if (explicitAsset && String(explicitAsset.contentType || "").startsWith("image/")) return explicitAsset;
+
+  const candidateIds = lastFrame
+    ? [payload.lastFrameAssetId, payload.endFrameAssetId]
+    : [
+        payload.firstFrameAssetId,
+        payload.sourceAssetId,
+        ...(Array.isArray(payload.referenceAssetIds) ? payload.referenceAssetIds : [])
+      ];
+  return candidateIds
+    .filter(Boolean)
+    .map((assetId) => state.assets.find((asset) => asset.id === assetId && !asset.deletedAt))
+    .find((asset) => asset && String(asset.contentType || "").startsWith("image/")) || null;
+}
+
+async function seedanceImageReference(payload = {}, { lastFrame = false } = {}) {
+  const explicitReference = String(lastFrame
+    ? payload.last_frame_url || payload.lastFrameUrl || payload.endImageUrl || ""
+    : payload.image_url || payload.imageUrl || payload.referenceImageUrl || payload.image || "").trim();
+  if (explicitReference.startsWith("data:image/") || explicitReference.startsWith("asset://")) return explicitReference;
+
+  const asset = seedanceReferenceAsset(payload, explicitReference, { lastFrame });
+  if (!asset) {
+    if (seedanceReadyImageReference(explicitReference)) return explicitReference;
+    if (explicitReference) {
+      const error = new Error("Seedance cannot access this local image reference. Store it as an SLT Asset or provide an HTTPS/Base64 reference.");
+      error.code = "seedance_reference_unreachable";
+      error.statusCode = 400;
+      throw error;
+    }
+    return "";
+  }
+
+  const source = await bytesForInputAsset(asset, asset.publicUrl || explicitReference);
+  if (source.bytes.length > 30 * 1024 * 1024) {
+    const error = new Error("Seedance image references must be smaller than 30 MB.");
+    error.code = "seedance_reference_too_large";
+    error.statusCode = 400;
+    throw error;
+  }
+  const contentType = String(asset.contentType || source.contentType || "image/jpeg").toLowerCase();
+  if (!contentType.startsWith("image/")) {
+    const error = new Error("Seedance requires an image Asset for image-to-video generation.");
+    error.code = "seedance_reference_mime_invalid";
+    error.statusCode = 400;
+    throw error;
+  }
+  return `data:${contentType};base64,${source.bytes.toString("base64")}`;
+}
+
+async function prepareSeedanceProviderPayload(payload = {}) {
+  const referenceImageUrl = await seedanceImageReference(payload);
+  const lastFrameUrl = await seedanceImageReference(payload, { lastFrame: true });
+  return {
+    ...payload,
+    referenceImageUrl,
+    lastFrameUrl
+  };
+}
+
 async function callSeedanceVideo({ prompt, title, payload = {} }) {
   const apiKey = providerApiKey(providerCatalog.Seedance);
   const baseUrl = seedanceBaseUrl();
-  const duration = Math.max(1, Math.round(videoClipDuration(payload, "Seedance", Number(process.env.SEEDANCE_DURATION || 5))));
+  const providerPayload = await prepareSeedanceProviderPayload(payload);
+  const duration = Math.max(1, Math.round(videoClipDuration(providerPayload, "Seedance", Number(process.env.SEEDANCE_DURATION || 5))));
   const requestBody = {
-    content: buildSeedanceContent({ prompt, title, payload }),
-    ratio: videoAspectRatio(payload, process.env.SEEDANCE_RATIO || "16:9"),
+    content: buildSeedanceContent({ prompt, title, payload: providerPayload }),
+    ratio: videoAspectRatio(providerPayload, process.env.SEEDANCE_RATIO || "16:9"),
     duration,
     resolution: process.env.SEEDANCE_RESOLUTION || "720p",
     generate_audio: envFlag("SEEDANCE_GENERATE_AUDIO", false)
   };
-  const callbackUrl = payload.callback_url || payload.callbackUrl || payload.webhookUrl || payload.webhook_url || "";
+  const callbackUrl = providerPayload.callback_url || providerPayload.callbackUrl || providerPayload.webhookUrl || providerPayload.webhook_url || "";
   if (callbackUrl) requestBody.callback_url = callbackUrl;
 
   let lastError = null;
@@ -4214,7 +6090,237 @@ function runwayBaseUrl() {
   return (process.env.RUNWAY_API_URL || "https://api.dev.runwayml.com/v1").replace(/\/$/, "");
 }
 
+function runwayHeaders() {
+  return {
+    Authorization: `Bearer ${process.env.RUNWAY_API_KEY}`,
+    "X-Runway-Version": process.env.RUNWAY_API_VERSION || "2024-11-06"
+  };
+}
+
+function payloadSourceAsset(payload = {}) {
+  const assetId = firstReferenceAssetId(payload);
+  return assetId ? state.assets.find((asset) => asset.id === assetId) || null : null;
+}
+
+function providerReadyHttpsUrl(value = "") {
+  try {
+    const parsed = new URL(String(value || ""));
+    return parsed.protocol === "https:" && Boolean(parsed.hostname) && !/^\d{1,3}(\.\d{1,3}){3}$/.test(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+async function fileForInputAsset(asset = null, fallbackUrl = "") {
+  const storageKey = String(asset?.storageKey || "").replace(/^\/+/, "");
+  const storagePath = asset?.storagePath || (storageKey ? resolve(assetStorageDir, storageKey) : "");
+  if (storagePath && storagePath.startsWith(resolve(assetStorageDir)) && existsSync(storagePath)) {
+    const fileStats = await stat(storagePath);
+    return {
+      filePath: storagePath,
+      bytes: fileStats.size,
+      contentType: asset?.contentType || "application/octet-stream",
+      fileName: safeUploadName(asset?.originalName || storageKey || "source.mp4"),
+      temporary: false
+    };
+  }
+
+  const sourceUrl = String(fallbackUrl || asset?.publicUrl || "");
+  if (!sourceUrl) {
+    const error = new Error("The source video is stored, but its bytes are not available for provider upload.");
+    error.code = "source_asset_unavailable";
+    error.statusCode = 422;
+    throw error;
+  }
+  const tempPath = await temporaryUploadPath("runway-source", extensionFromContentType(asset?.contentType || "", asset?.originalName || sourceUrl));
+  if (sourceUrl.startsWith("data:")) {
+    const parsed = parseDataUrl(sourceUrl);
+    if (parsed.bytes.length > envNumber("MAX_DATA_URI_INPUT_BYTES", 25 * 1024 * 1024)) {
+      const error = new Error("Large video data URIs are not accepted. Upload the source to SLT Storage first.");
+      error.code = "data_uri_too_large";
+      error.statusCode = 413;
+      throw error;
+    }
+    await writeFile(tempPath, parsed.bytes);
+    return {
+      filePath: tempPath,
+      bytes: parsed.bytes.length,
+      contentType: asset?.contentType || parsed.contentType || "application/octet-stream",
+      fileName: safeUploadName(asset?.originalName || "source.mp4"),
+      temporary: true
+    };
+  }
+  if (!/^https?:\/\//i.test(sourceUrl)) {
+    const error = new Error("The source media is not available through SLT Storage.");
+    error.code = "source_asset_unavailable";
+    error.statusCode = 422;
+    throw error;
+  }
+  const downloaded = await downloadUrlToFile(sourceUrl, tempPath, { maxBytes: 200 * 1024 * 1024 });
+  return {
+    filePath: tempPath,
+    bytes: downloaded.bytes,
+    contentType: asset?.contentType || downloaded.contentType || "video/mp4",
+    fileName: safeUploadName(asset?.originalName || "source.mp4"),
+    temporary: true
+  };
+}
+
+async function createRunwayEphemeralUpload({ asset = null, sourceUrl = "", fallbackName = "source.mp4" } = {}) {
+  const source = await fileForInputAsset(asset, sourceUrl);
+  try {
+    const maxBytes = 200 * 1024 * 1024;
+    if (source.bytes < 512 || source.bytes > maxBytes) {
+      const error = new Error("Runway source files must be between 512 bytes and 200MB.");
+      error.code = "runway_upload_size_invalid";
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const fileName = safeUploadName(source.fileName || fallbackName);
+    const upload = await postJson(`${runwayBaseUrl()}/uploads`, {
+      headers: runwayHeaders(),
+      body: { filename: fileName, type: "ephemeral" },
+      timeoutMs: 60000
+    });
+    if (!upload.uploadUrl || !upload.runwayUri || !upload.fields) {
+      const error = new Error("Runway did not return a valid ephemeral upload target.");
+      error.code = "runway_upload_target_invalid";
+      throw error;
+    }
+
+    const form = new FormData();
+    Object.entries(upload.fields).forEach(([key, value]) => form.append(key, String(value)));
+    const fileBlob = await openAsBlob(source.filePath, { type: source.contentType });
+    form.append("file", fileBlob, fileName);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), envNumber("RUNWAY_UPLOAD_TIMEOUT_MS", 180000));
+    try {
+      const response = await fetch(upload.uploadUrl, { method: "POST", body: form, signal: controller.signal });
+      if (!response.ok) {
+        const error = new Error(`Runway source upload failed with HTTP ${response.status}.`);
+        error.code = "runway_upload_failed";
+        error.statusCode = response.status;
+        throw error;
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+    return upload.runwayUri;
+  } finally {
+    if (source.temporary) await rm(source.filePath, { force: true }).catch(() => {});
+  }
+}
+
+async function bytesForInputAsset(asset = null, sourceUrl = "") {
+  const source = await fileForInputAsset(asset, sourceUrl);
+  try {
+    return {
+      bytes: await readFile(source.filePath),
+      contentType: source.contentType,
+      fileName: source.fileName
+    };
+  } finally {
+    if (source.temporary) await rm(source.filePath, { force: true }).catch(() => {});
+  }
+}
+
+async function runwayMediaUri(payload = {}, { kind = "video" } = {}) {
+  const asset = payloadSourceAsset(payload);
+  const sourceUrl = String(
+    kind === "image"
+      ? payload.referenceImageUrl || payload.promptImage || asset?.publicUrl || ""
+      : payload.sourceVideoUrl || payload.referenceVideoUrl || payload.videoUri || asset?.publicUrl || ""
+  ).trim();
+  if (sourceUrl.startsWith("runway://") || providerReadyHttpsUrl(sourceUrl)) return sourceUrl;
+  return createRunwayEphemeralUpload({
+    asset,
+    sourceUrl,
+    fallbackName: kind === "image" ? "reference.png" : "source.mp4"
+  });
+}
+
+async function runwayKeyframes(payload = {}) {
+  const entries = Array.isArray(payload.keyframes) ? payload.keyframes.slice(0, 5) : [];
+  const resolved = [];
+  for (const entry of entries) {
+    const asset = entry.assetId ? state.assets.find((item) => item.id === entry.assetId) || null : null;
+    const uri = String(entry.uri || entry.publicUrl || asset?.publicUrl || "").trim();
+    if (!uri && !asset) continue;
+    const mediaUri = providerReadyHttpsUrl(uri) || uri.startsWith("runway://") || uri.startsWith("data:image/")
+      ? uri
+      : await createRunwayEphemeralUpload({ asset, sourceUrl: uri, fallbackName: "keyframe.png" });
+    const seconds = Number(entry.seconds);
+    if (!Number.isFinite(seconds) || seconds < 0 || seconds > 30) continue;
+    const keyframe = { uri: mediaUri, seconds };
+    if (entry.range?.start_seconds !== undefined && entry.range?.end_seconds !== undefined) {
+      keyframe.range = {
+        start_seconds: Number(entry.range.start_seconds),
+        end_seconds: Number(entry.range.end_seconds)
+      };
+    }
+    resolved.push(keyframe);
+  }
+  return resolved;
+}
+
 async function callRunwayVideo({ prompt, title, payload = {} }) {
+  if (isRealityTransformPayload(payload)) {
+    const videoUri = await runwayMediaUri(payload, { kind: "video" });
+    const keyframes = await runwayKeyframes(payload);
+    const body = {
+      model: "aleph2",
+      videoUri,
+      promptText: String(prompt || title || "Transform the environment while preserving the original performance.").slice(0, 1000),
+      ...(keyframes.length ? { keyframes } : {})
+    };
+    const data = await postJson(`${runwayBaseUrl()}/video_to_video`, {
+      headers: runwayHeaders(),
+      body,
+      timeoutMs: 90000
+    });
+    const providerJobId = extractProviderJobId(data);
+    return {
+      providerJobId,
+      status: providerJobId ? "processing" : "submitted",
+      previewUrl: null,
+      note: providerJobId
+        ? "Runway Aleph 2.0 Reality Transform submitted."
+        : "Runway accepted the transform but did not return a recognizable task id.",
+      raw: data,
+      model: "aleph2",
+      operation: "reality_transform"
+    };
+  }
+
+  const operation = normalizeMultimodalOperation(payload.operation || payload.actionId || payload.tool, "video");
+  const imageToVideo = operation === "image_to_video" || Boolean(payload.referenceImageUrl || payload.promptImage);
+  if (imageToVideo) {
+    const promptImage = await runwayMediaUri(payload, { kind: "image" });
+    const body = {
+      model: sanitizeEnvValue(payload.model || payload.modelId || "") || "gen4_turbo",
+      promptImage,
+      promptText: String(prompt || title || "Animate the reference image with controlled cinematic movement.").slice(0, 1000),
+      ratio: videoAspectRatio(payload, "1280:720").replace("16:9", "1280:720").replace("9:16", "720:1280").replace("1:1", "960:960"),
+      duration: Math.min(10, Math.max(2, Math.round(videoClipDuration(payload, "Runway", 5))))
+    };
+    const data = await postJson(`${runwayBaseUrl()}/image_to_video`, {
+      headers: runwayHeaders(),
+      body,
+      timeoutMs: 90000
+    });
+    const providerJobId = extractProviderJobId(data);
+    return {
+      providerJobId,
+      status: providerJobId ? "processing" : "submitted",
+      previewUrl: null,
+      note: providerJobId ? "Runway image-to-video task submitted." : "Runway accepted image-to-video without a recognizable task id.",
+      raw: data,
+      model: body.model,
+      operation: "image_to_video"
+    };
+  }
+
   const requestBody = {
     promptText: prompt || title || "Create a cinematic futuristic garage studio video shot.",
     ratio: videoAspectRatio(payload, process.env.RUNWAY_RATIO || "1280:720").replace("16:9", "1280:720").replace("9:16", "720:1280"),
@@ -4226,10 +6332,7 @@ async function callRunwayVideo({ prompt, title, payload = {} }) {
   for (const model of models) {
     try {
       const data = await postJson(`${runwayBaseUrl()}/text_to_video`, {
-        headers: {
-          Authorization: `Bearer ${process.env.RUNWAY_API_KEY}`,
-          "X-Runway-Version": process.env.RUNWAY_API_VERSION || "2024-11-06"
-        },
+        headers: runwayHeaders(),
         body: { ...requestBody, model },
         timeoutMs: 90000
       });
@@ -4288,6 +6391,60 @@ async function callLumaVideo({ prompt, title, payload = {} }) {
     }
   }
   throw lastError || new Error("Luma request failed.");
+}
+
+function lumaModifyMode(payload = {}) {
+  const value = String(payload.transformStrength || payload.preservationMode || payload.modifyMode || "balanced").toLowerCase();
+  if (["preserve", "adhere", "adhere_1", "subtle"].includes(value)) return "adhere_1";
+  if (["reimagine", "reimagine_1", "strong"].includes(value)) return "reimagine_1";
+  return "flex_1";
+}
+
+async function replicateVideoInput(payload = {}) {
+  const asset = payloadSourceAsset(payload);
+  const sourceUrl = String(payload.sourceVideoUrl || payload.referenceVideoUrl || payload.videoUri || asset?.publicUrl || "").trim();
+  if (providerReadyHttpsUrl(sourceUrl)) return sourceUrl;
+  const source = await bytesForInputAsset(asset, sourceUrl);
+  if (source.bytes.length > 100 * 1024 * 1024) {
+    const error = new Error("Luma Modify accepts source videos up to 100MB.");
+    error.code = "luma_modify_upload_too_large";
+    error.statusCode = 400;
+    throw error;
+  }
+  return `data:${source.contentType || "video/mp4"};base64,${source.bytes.toString("base64")}`;
+}
+
+async function callReplicateLumaModify({ prompt, title, payload = {} }) {
+  const webhookUrl = payload.webhookUrl || payload.webhook_url || payload.callbackUrl || payload.callback_url || "";
+  if (webhookUrl) assertPublicWebhookUrl(webhookUrl);
+  const video = await replicateVideoInput(payload);
+  const firstFrame = String(payload.firstFrameUrl || payload.first_frame || "").trim();
+  const data = await callReplicateModel({
+    model: process.env.LUMA_MODIFY_REPLICATE_MODEL || "luma/modify-video",
+    input: {
+      video,
+      prompt: prompt || title || "Transform the environment while preserving the original performance.",
+      mode: lumaModifyMode(payload),
+      ...(firstFrame ? { first_frame: firstFrame } : {})
+    },
+    timeoutMs: 90000,
+    webhookUrl,
+    prefer: ""
+  });
+  const outputUrl = firstUrlFromReplicateOutput(data.output);
+  return {
+    providerJobId: data.id || null,
+    status: data.status || "processing",
+    previewUrl: outputUrl,
+    outputUrl,
+    outputUrls: outputUrl ? [outputUrl] : [],
+    note: data.status === "succeeded"
+      ? "Luma Modify completed on Replicate."
+      : "Luma Modify Reality Transform submitted on Replicate.",
+    raw: data,
+    model: "luma/modify-video",
+    operation: "reality_transform"
+  };
 }
 
 function base64UrlEncode(input) {
@@ -4464,6 +6621,70 @@ function minimaxHeaders(config) {
   return { Authorization: `Bearer ${providerApiKey(config)}` };
 }
 
+function miniMaxAudioMime(format = "mp3") {
+  const normalized = String(format || "mp3").trim().toLowerCase();
+  if (["mp3", "mpeg"].includes(normalized)) return "audio/mpeg";
+  if (["wav", "wave"].includes(normalized)) return "audio/wav";
+  if (normalized === "flac") return "audio/flac";
+  if (["m4a", "mp4"].includes(normalized)) return "audio/mp4";
+  if (["ogg", "oga"].includes(normalized)) return "audio/ogg";
+  return `audio/${normalized.replace(/[^a-z0-9.+-]/g, "") || "mpeg"}`;
+}
+
+function miniMaxAudioResult(data = {}, { provider = "MiniMax", format = "mp3" } = {}) {
+  const responseCode = Number(data.base_resp?.status_code ?? 0);
+  if (Number.isFinite(responseCode) && responseCode !== 0) {
+    const error = new Error(data.base_resp?.status_msg || `${provider} rejected the audio request.`);
+    error.code = "provider_invalid_response";
+    error.statusCode = 502;
+    error.provider = provider;
+    error.providerBody = { base_resp: data.base_resp, trace_id: data.trace_id || null };
+    throw error;
+  }
+
+  const audioValue = data.data?.audio || data.data?.audio_url || data.audio_url || "";
+  if (typeof audioValue !== "string" || !audioValue.trim()) {
+    const error = new Error(`${provider} completed without returning audio data.`);
+    error.code = "provider_invalid_response";
+    error.statusCode = 502;
+    error.provider = provider;
+    error.providerBody = { base_resp: data.base_resp || null, trace_id: data.trace_id || null };
+    throw error;
+  }
+
+  const compactAudio = audioValue.trim();
+  let previewUrl = compactAudio;
+  let audioBytes = Number(data.extra_info?.audio_size || 0) || null;
+  if (!/^https?:\/\//i.test(compactAudio) && !compactAudio.startsWith("data:")) {
+    const hex = compactAudio.replace(/\s+/g, "");
+    if (!hex.length || hex.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(hex)) {
+      const error = new Error(`${provider} returned audio in an unsupported encoding.`);
+      error.code = "provider_invalid_response";
+      error.statusCode = 502;
+      error.provider = provider;
+      throw error;
+    }
+    const bytes = Buffer.from(hex, "hex");
+    audioBytes = bytes.length;
+    previewUrl = `data:${miniMaxAudioMime(format)};base64,${bytes.toString("base64")}`;
+  }
+
+  const { audio: _audio, audio_url: _audioUrl, ...safeData } = data.data || {};
+  return {
+    providerJobId: data.trace_id || data.traceId || null,
+    status: "complete",
+    previewUrl,
+    audioUrl: previewUrl,
+    audioBytes,
+    note: `${provider} returned audio data.`,
+    raw: {
+      ...data,
+      data: { ...safeData, audioBytes },
+      audio_url: undefined
+    }
+  };
+}
+
 async function callMiniMaxVideo({ prompt, title, payload = {} }) {
   const config = providerCatalog.Hailuo;
   const data = await postJson(minimaxEndpoint(config, "/v1/video_generation"), {
@@ -4489,63 +6710,55 @@ async function callMiniMaxVideo({ prompt, title, payload = {} }) {
   };
 }
 
-async function callMiniMaxMusic({ prompt, title }) {
+async function callMiniMaxMusic({ prompt, title, payload = {} }) {
   const config = providerCatalog["MiniMax Music"];
-  const lyrics = process.env.MINIMAX_MUSIC_LYRICS || `[verse]\n${prompt || title || "Sweet Little Trauma Studio original song."}`;
+  const instrumental = payload.operation === "instrumental" || payload.isInstrumental === true;
+  const lyrics = payload.lyrics || process.env.MINIMAX_MUSIC_LYRICS || `[verse]\n${prompt || title || "Sweet Little Trauma Studio original song."}`;
+  const format = payload.outputFormat || process.env.MINIMAX_AUDIO_FORMAT || "mp3";
   const data = await postJson(minimaxEndpoint(config, "/v1/music_generation"), {
     headers: minimaxHeaders(config),
     body: {
       model: process.env.MINIMAX_MUSIC_MODEL || "music-2.6-free",
       prompt: prompt || title || "cinematic alternative pop, emotional, futuristic garage studio",
-      lyrics,
+      ...(instrumental ? { is_instrumental: true } : { lyrics }),
+      stream: false,
+      output_format: "hex",
       audio_setting: {
         sample_rate: Number(process.env.MINIMAX_MUSIC_SAMPLE_RATE || 44100),
         bitrate: Number(process.env.MINIMAX_MUSIC_BITRATE || 256000),
-        format: process.env.MINIMAX_AUDIO_FORMAT || "mp3"
+        format
       }
     },
     timeoutMs: 90000
   });
-  return {
-    status: data.data?.status === 2 ? "complete" : "processing",
-    audioHexPresent: Boolean(data.data?.audio),
-    note: data.data?.audio
-      ? "MiniMax Music returned audio data."
-      : "MiniMax Music request submitted.",
-    raw: data
-  };
+  return miniMaxAudioResult(data, { provider: "MiniMax Music", format });
 }
 
-async function callMiniMaxSpeech({ prompt, title }) {
+async function callMiniMaxSpeech({ prompt, title, payload = {} }) {
   const config = providerCatalog["MiniMax Speech"];
+  const format = payload.outputFormat || process.env.MINIMAX_AUDIO_FORMAT || "mp3";
   const data = await postJson(minimaxEndpoint(config, "/v1/t2a_v2"), {
     headers: minimaxHeaders(config),
     body: {
       model: process.env.MINIMAX_SPEECH_MODEL || "speech-2.8-turbo",
       text: prompt || title || "Sweet Little Trauma Studio voice preview.",
       stream: false,
+      output_format: "hex",
       voice_setting: {
-        voice_id: process.env.MINIMAX_SPEECH_VOICE_ID || "male-qn-qingse",
-        speed: Number(process.env.MINIMAX_SPEECH_SPEED || 1),
-        vol: Number(process.env.MINIMAX_SPEECH_VOLUME || 1),
-        pitch: Number(process.env.MINIMAX_SPEECH_PITCH || 0)
+        voice_id: payload.voiceId || process.env.MINIMAX_SPEECH_VOICE_ID || "male-qn-qingse",
+        speed: Number(payload.speed || process.env.MINIMAX_SPEECH_SPEED || 1),
+        vol: Number(payload.volume || process.env.MINIMAX_SPEECH_VOLUME || 1),
+        pitch: Number(payload.pitch || process.env.MINIMAX_SPEECH_PITCH || 0)
       },
       audio_setting: {
         sample_rate: Number(process.env.MINIMAX_SPEECH_SAMPLE_RATE || 32000),
         bitrate: Number(process.env.MINIMAX_SPEECH_BITRATE || 128000),
-        format: process.env.MINIMAX_AUDIO_FORMAT || "mp3"
+        format
       }
     },
     timeoutMs: 90000
   });
-  return {
-    status: data.data?.status === 2 ? "complete" : "processing",
-    audioHexPresent: Boolean(data.data?.audio),
-    note: data.data?.audio
-      ? "MiniMax Speech returned audio data."
-      : "MiniMax Speech request submitted.",
-    raw: data
-  };
+  return miniMaxAudioResult(data, { provider: "MiniMax Speech", format });
 }
 
 function compactList(value = "") {
@@ -4786,6 +6999,18 @@ class ProviderAdapter {
   }
 }
 
+function mutableCodedError(source, fallbackCode) {
+  const message = source?.message || String(source || "Unknown error");
+  const error = new Error(message);
+  error.name = source?.name || "Error";
+  error.code = source?.code || fallbackCode;
+  if (source?.statusCode) error.statusCode = source.statusCode;
+  if (source?.providerBody) error.providerBody = source.providerBody;
+  if (source?.stack) error.stack = source.stack;
+  error.cause = source;
+  return error;
+}
+
 async function attemptProviderCall({ kind, providerStatus: status, prompt, title, providerName, payload = {} }) {
   if (!status.connected) {
     const error = new Error(status.message || providerFallbackMessage);
@@ -4794,7 +7019,7 @@ async function attemptProviderCall({ kind, providerStatus: status, prompt, title
   }
   if (status.adapter === "openai-image") return callOpenAIImage({ prompt, title });
   if (status.adapter === "xai-image") return callXAIImage({ prompt, title });
-  if (status.adapter === "gemini-image") return callGeminiImage({ prompt, title });
+  if (status.adapter === "gemini-image") return callGeminiImage({ prompt, title, payload });
   if (status.adapter === "replicate-image") return callReplicateImage({ prompt, title, providerName, payload });
   if (status.adapter === "stability-image") return callStabilityImage({ prompt, title });
   if (status.adapter === "ideogram-image") return callIdeogramImage({ prompt, title });
@@ -4812,19 +7037,20 @@ async function attemptProviderCall({ kind, providerStatus: status, prompt, title
   if (status.adapter === "veo-direct") return callVeoVideo({ prompt, title, payload });
   if (status.adapter === "runway-video") return callRunwayVideo({ prompt, title, payload });
   if (status.adapter === "luma-video") return callLumaVideo({ prompt, title, payload });
+  if (status.adapter === "replicate-luma-modify") return callReplicateLumaModify({ prompt, title, payload });
   if (status.adapter === "kling-video") return callKlingVideo({ prompt, title, payload });
   if (status.adapter === "pixverse-video") return callPixVerseVideo({ prompt, title, payload });
   if (status.adapter === "replicate-wan-video") return callReplicateWanVideo({ prompt, title, payload });
   if (status.adapter === "heygen-video-agent") return callHeyGenVideoAgent({ prompt, title });
   if (status.adapter === "did-talk") return callDIDTalk({ prompt, title });
   if (status.adapter === "minimax-video") return callMiniMaxVideo({ prompt, title, payload });
-  if (status.adapter === "minimax-music") return callMiniMaxMusic({ prompt, title });
+  if (status.adapter === "minimax-music") return callMiniMaxMusic({ prompt, title, payload });
   if (status.adapter === "replicate-musicgen") return callReplicateMusicGen({ prompt, title, payload });
   if (status.adapter === "replicate-riffusion") return callReplicateRiffusion({ prompt, title, payload });
-  if (status.adapter === "minimax-speech") return callMiniMaxSpeech({ prompt, title });
+  if (status.adapter === "minimax-speech") return callMiniMaxSpeech({ prompt, title, payload });
   if (status.adapter === "slt-composer") return callSLTComposer({ prompt, title, payload });
   if (status.adapter === "moises-audio") return callMoisesAudio({ prompt, title, payload });
-  if (status.adapter === "stability-audio") return callStabilityAudio({ prompt, title });
+  if (status.adapter === "stability-audio") return callStabilityAudio({ prompt, title, payload });
   if (status.adapter === "generic-endpoint") {
     return callGenericEndpoint({ providerStatus: status, prompt, title, kind, providerName, payload });
   }
@@ -4837,7 +7063,7 @@ async function attemptProviderCall({ kind, providerStatus: status, prompt, title
 async function runProviderGateway({ kind, providerStatus: requestedStatus, prompt, title, payload = {} }) {
   const requestedProvider = requestedStatus.name;
   const fallbackEnabled = providerFallbacksEnabled(payload);
-  const candidates = providerFallbackChain(kind, requestedProvider);
+  const candidates = providerFallbackChain(kind, requestedProvider, payload);
   const route = [];
   let lastError = null;
 
@@ -4874,6 +7100,16 @@ async function runProviderGateway({ kind, providerStatus: requestedStatus, promp
 
       const adapter = new ProviderAdapter(status);
       const result = await adapter.generate({ kind, prompt, title, payload });
+      const diagnosticKey = providerDiagnosticKey(status.name, providerCatalog[status.name] || {});
+      if (["Runway", "Replicate"].includes(diagnosticKey)) {
+        setProviderDiagnostic(diagnosticKey, {
+          status: "AVAILABLE",
+          errorName: null,
+          errorCode: null,
+          customerMessage: "Provider available.",
+          metadata: { source: "successful_provider_request" }
+        });
+      }
       const fallback = status.name === requestedProvider
         ? null
         : {
@@ -4904,8 +7140,7 @@ async function runProviderGateway({ kind, providerStatus: requestedStatus, promp
     }
   }
 
-  const error = lastError || new Error(providerFallbackMessage);
-  error.code = error.code || "provider_gateway_failed";
+  const error = mutableCodedError(lastError || new Error(providerFallbackMessage), "provider_gateway_failed");
   error.route = route;
   throw error;
 }
@@ -5048,49 +7283,49 @@ async function completeAsyncJob({ job, providerRun, providerResult, message, req
       sourceHeaders
     });
   } catch (error) {
-    error.code = error.code || "asset_storage_failed";
-    appendJobEvent(job, { type: "asset_storage_failed", error: error.message, fallback: "provider_url" });
-    if (!providerOutputUrls.length) {
-      return failAsyncJob({ job, error, providerRun });
-    }
-    storageResult = {
-      assets: [],
-      outputUrls: providerOutputUrls,
-      outputUrl: providerOutputUrls[0] || null,
-      storage: {
-        status: "provider_url_fallback",
-        reason: error.code,
-        message: error.message,
-        providerUrlCount: providerOutputUrls.length,
-        storedAssetCount: 0
-      }
-    };
+    const storageError = mutableCodedError(error, "asset_storage_failed");
+    appendJobEvent(job, { type: "asset_storage_failed", error: storageError.message });
+    return await failAsyncJob({ job, error: storageError, providerRun });
   }
 
   const outputUrls = storageResult.outputUrls.length ? storageResult.outputUrls : providerOutputUrls;
   const outputUrl = storageResult.outputUrl || outputUrls[0] || result.previewUrl || null;
+  const persistedProviderOutputUrls = providerOutputUrls.map((url) =>
+    String(url || "").startsWith("data:") ? "inline-provider-output:persisted-to-slt-storage" : url
+  );
+  const persistedProviderResult = {
+    ...result,
+    previewUrl: outputUrl,
+    outputUrl,
+    outputUrls,
+    audioUrl: String(result.audioUrl || "").startsWith("data:") ? outputUrl : result.audioUrl,
+    providerOutputUrls: persistedProviderOutputUrls
+  };
   const outputModeration = outputModerationAssessment({ job, result, outputUrls });
 
   const ledgerResolution = job.reservationId
-    ? resolveReservation({
+    ? await resolveReservationTransactional({
         reservationId: job.reservationId,
         outcome: "capture",
         jobId: job.id,
         idempotencyKey: `capture:${job.reservationId}`,
         reason: "provider_completed_asset_stored"
       })
-    : { reservation: null, transaction: null, wallet: ledgerSnapshot(), skipped: true };
+    : { reservation: null, transaction: null, wallet: ledgerSnapshot(job.tenantId), skipped: true };
 
   updateJob(job.id, {
     status: jobStates.completed,
+    progress: 100,
     provider: providerName,
     providerJobId: result.providerJobId || job.providerJobId,
     reservationStatus: ledgerResolution.reservation?.status || job.reservationStatus,
     ledgerTransactionId: ledgerResolution.transaction?.id || job.ledgerTransactionId || null,
     outputUrl,
     outputUrls,
-    providerOutputUrls,
+    providerOutputUrls: persistedProviderOutputUrls,
+    providerResult: persistedProviderResult,
     assets: storageResult.assets,
+    assetId: storageResult.assets?.[0]?.id || null,
     storage: storageResult.storage,
     needs_review: outputModeration.needs_review,
     needsReview: outputModeration.needsReview,
@@ -5112,11 +7347,14 @@ async function completeAsyncJob({ job, providerRun, providerResult, message, req
       wallet: ledgerResolution.wallet
     },
     result: {
-      ...result,
+      ...persistedProviderResult,
       providerJobId: job.id,
       providerRequestId: result.providerJobId || job.providerJobId || null,
       jobId: job.id,
       request_id: job.id,
+      batchId: job.batchId || null,
+      projectId: job.projectId || null,
+      sessionId: job.sessionId || null,
       status: "completed",
       state: jobStates.completed,
       reservationId: job.reservationId,
@@ -5124,7 +7362,7 @@ async function completeAsyncJob({ job, providerRun, providerResult, message, req
       previewUrl: outputUrl,
       outputUrl,
       outputUrls,
-      providerOutputUrls,
+      providerOutputUrls: persistedProviderOutputUrls,
       assets: storageResult.assets,
       storage: storageResult.storage,
       needs_review: outputModeration.needs_review,
@@ -5135,30 +7373,61 @@ async function completeAsyncJob({ job, providerRun, providerResult, message, req
       exportFormats: exportFormatsFor(job.kind)
     }
   });
-  const project = entry ? saveProjectFromEntry(entry) : null;
-  if (project) updateJob(job.id, { projectId: project.id });
+  let project = state.projects.find((item) => item.id === job.projectId) || null;
+  if (project) {
+    project.status = jobStates.completed;
+    project.thumbnail = outputUrl;
+    project.updatedAt = new Date().toISOString();
+  } else if (entry) {
+    project = saveProjectFromEntry(entry);
+    updateJob(job.id, { projectId: project.id });
+  }
+  await persistRuntimeState(`async_job_completed:${job.id}`);
   return { job: findJob(job.id), historyItem: entry, project };
 }
 
-function failAsyncJob({ job, error, providerRun = null }) {
+async function failAsyncJob({ job, error, providerRun = null }) {
   if (!job) return { job: null, historyItem: null };
-  const code = error?.code || "provider_error";
-  const message = readableProviderError(error, providerRun?.providerName || job.provider);
+  const originalCode = error?.code || "provider_error";
   const providerRoute = error?.route || providerRun?.route || job.providerRoute || [];
   const ledgerResolution = job.reservationId
-    ? resolveReservation({
+    ? await resolveReservationTransactional({
         reservationId: job.reservationId,
         outcome: "release",
         jobId: job.id,
         idempotencyKey: `release:${job.reservationId}`,
-        reason: code
+        reason: originalCode
       })
-    : { reservation: null, transaction: null, wallet: ledgerSnapshot(), skipped: true };
+    : { reservation: null, transaction: null, wallet: ledgerSnapshot(job.tenantId), skipped: true };
+  const failure = await recordSltFailure({
+    job,
+    error,
+    ledgerResolution,
+    context: {
+      provider: providerRun?.providerName || job.provider,
+      providerRoute,
+      source: "async_generation",
+      reservationReleased: ledgerResolution.reservation?.status === "released"
+    }
+  });
+  const code = failure.classification.name;
+  const message = failure.incident.clientVisibleMessage;
   updateJob(job.id, {
     status: jobStates.failed,
+    progress: Number(job.progress || 0),
     reservationStatus: ledgerResolution.reservation?.status || job.reservationStatus,
     ledgerTransactionId: ledgerResolution.transaction?.id || job.ledgerTransactionId || null,
-    error: { code, message },
+    incidentId: failure.incident.incidentId,
+    error: {
+      code,
+      errorCode: failure.classification.code,
+      incidentId: failure.incident.incidentId,
+      message,
+      customerMessage: message,
+      retryable: failure.classification.retryable,
+      reservationReleased: failure.incident.reservationReleased,
+      compensation: failure.publicError.compensation
+    },
     providerRoute
   });
   const entry = updateHistoryItem(job.historyItemId, {
@@ -5176,20 +7445,28 @@ function failAsyncJob({ job, error, providerRun = null }) {
       providerJobId: job.id,
       jobId: job.id,
       request_id: job.id,
+      batchId: job.batchId || null,
+      projectId: job.projectId || null,
+      sessionId: job.sessionId || null,
       status: "failed",
       state: jobStates.failed,
       reservationId: job.reservationId,
       reservationStatus: ledgerResolution.reservation?.status || null,
       error: message,
+      errorCode: failure.classification.code,
+      incidentId: failure.incident.incidentId,
+      retryable: failure.classification.retryable,
+      compensation: failure.publicError.compensation,
       providerRoute,
       exportFormats: exportFormatsFor(job.kind)
     }
   });
-  return { job: findJob(job.id), historyItem: entry };
+  await persistRuntimeState(`async_job_failed:${job.id}`);
+  return { job: findJob(job.id), historyItem: entry, failure };
 }
 
 async function processAsyncGenerationJob({ jobId, kind, prompt, title, payload, checks }) {
-  const job = updateJob(jobId, { status: jobStates.processing });
+  const job = updateJob(jobId, { status: jobStates.processing, progress: 3 });
   if (!job) return;
   appendJobEvent(job, { type: "started" });
   try {
@@ -5262,7 +7539,7 @@ async function processAsyncGenerationJob({ jobId, kind, prompt, title, payload, 
     if (providerResultIsFailed(providerResult)) {
       const error = new Error(providerResult.note || "Provider returned a failed job.");
       error.code = "provider_job_failed";
-      failAsyncJob({ job: findJob(job.id), error, providerRun });
+      await failAsyncJob({ job: findJob(job.id), error, providerRun });
       return;
     }
 
@@ -5278,16 +7555,34 @@ async function processAsyncGenerationJob({ jobId, kind, prompt, title, payload, 
       message: `${kind} generation completed with ${providerRun.providerName}.`
     });
   } catch (error) {
-    failAsyncJob({ job: findJob(job.id), error });
+    await failAsyncJob({ job: findJob(job.id), error });
+  }
+}
+
+function drainGenerationQueue() {
+  const limit = Math.max(1, envNumber("GENERATION_DISPATCH_CONCURRENCY", 3));
+  while (activeGenerationExecutions < limit && generationExecutionQueue.length) {
+    const task = generationExecutionQueue.shift();
+    activeGenerationExecutions += 1;
+    updateJob(task.job.id, { status: jobStates.processing, progress: 1 });
+    void processAsyncGenerationJob(task)
+      .catch((error) => failAsyncJob({ job: findJob(task.job.id), error }))
+      .finally(() => {
+        activeGenerationExecutions = Math.max(0, activeGenerationExecutions - 1);
+        drainGenerationQueue();
+      });
   }
 }
 
 function enqueueAsyncGeneration({ job, kind, prompt, title, payload, checks }) {
-  setTimeout(() => {
-    processAsyncGenerationJob({ jobId: job.id, kind, prompt, title, payload, checks }).catch((error) => {
-      failAsyncJob({ job: findJob(job.id), error });
-    });
-  }, 0);
+  const limit = Math.max(1, envNumber("GENERATION_DISPATCH_CONCURRENCY", 3));
+  const waitingForCapacity = activeGenerationExecutions >= limit || generationExecutionQueue.length > 0;
+  updateJob(job.id, {
+    status: waitingForCapacity ? jobStates.throttled : jobStates.pending,
+    progress: 0
+  });
+  generationExecutionQueue.push({ job, jobId: job.id, kind, prompt, title, payload, checks });
+  queueMicrotask(drainGenerationQueue);
 }
 
 async function refreshLocalJobFromProvider(job) {
@@ -5315,7 +7610,7 @@ async function refreshLocalJobFromProvider(job) {
     if (jobStatus === "failed") {
       const error = new Error("OmniHuman video failed.");
       error.code = "provider_job_failed";
-      return failAsyncJob({ job, error });
+      return await failAsyncJob({ job, error });
     }
   }
 
@@ -5347,8 +7642,82 @@ async function refreshLocalJobFromProvider(job) {
       error.code = "provider_job_failed";
       error.provider = "Seedance";
       error.providerJobId = job.providerJobId;
-      return failAsyncJob({ job, error });
+      return await failAsyncJob({ job, error });
     }
+  }
+
+  if (job.provider === "Runway") {
+    const data = await getJson(`${runwayBaseUrl()}/tasks/${encodeURIComponent(job.providerJobId)}`, {
+      headers: runwayHeaders(),
+      timeoutMs: 60000
+    });
+    const jobStatus = normalizeWebhookStatus(data.status);
+    const outputUrls = collectUrlCandidates(data.output || data.outputs || data.result);
+    if (jobStatus === "completed" && outputUrls.length) {
+      return await completeAsyncJob({
+        job,
+        providerResult: {
+          providerJobId: job.providerJobId,
+          status: "completed",
+          previewUrl: outputUrls[0],
+          outputUrl: outputUrls[0],
+          outputUrls,
+          cdnBaseUrl: storagePublicBaseUrl(),
+          raw: data,
+          model: data.model || job.providerResult?.model || null
+        },
+        message: job.payload?.realityTransform
+          ? "Runway Reality Transform completed."
+          : "Runway video completed."
+      });
+    }
+    if (jobStatus === "failed") {
+      const error = new Error(extractProviderFailureMessage(data, "Runway video failed."));
+      error.code = "provider_job_failed";
+      error.provider = "Runway";
+      error.providerJobId = job.providerJobId;
+      return await failAsyncJob({ job, error });
+    }
+    updateJob(job.id, {
+      status: jobStatus === "queued" ? jobStates.queued : jobStates.processing,
+      providerResult: { ...(job.providerResult || {}), raw: data, status: jobStatus }
+    });
+  }
+
+  if (providerCatalog[job.provider]?.adapter === "replicate-luma-modify") {
+    const data = await getJson(`${replicateBaseUrl()}/predictions/${encodeURIComponent(job.providerJobId)}`, {
+      headers: { Authorization: `Bearer ${process.env.REPLICATE_API_TOKEN}` },
+      timeoutMs: 60000
+    });
+    const outputUrl = firstUrlFromReplicateOutput(data.output);
+    const jobStatus = normalizeWebhookStatus(data.status);
+    if (jobStatus === "completed" && outputUrl) {
+      return await completeAsyncJob({
+        job,
+        providerResult: {
+          providerJobId: job.providerJobId,
+          status: "completed",
+          previewUrl: outputUrl,
+          outputUrl,
+          outputUrls: [outputUrl],
+          cdnBaseUrl: storagePublicBaseUrl(),
+          raw: data,
+          model: "luma/modify-video"
+        },
+        message: "Luma Modify Reality Transform completed."
+      });
+    }
+    if (jobStatus === "failed") {
+      const error = new Error(data.error || "Luma Modify failed.");
+      error.code = "provider_job_failed";
+      error.provider = "Luma Modify";
+      error.providerJobId = job.providerJobId;
+      return await failAsyncJob({ job, error });
+    }
+    updateJob(job.id, {
+      status: jobStatus === "queued" ? jobStates.queued : jobStates.processing,
+      providerResult: { ...(job.providerResult || {}), raw: data, status: jobStatus }
+    });
   }
 
   if (job.kind === "image" && providerCatalog[job.provider]?.adapter === "replicate-image") {
@@ -5376,7 +7745,7 @@ async function refreshLocalJobFromProvider(job) {
     if (jobStatus === "failed") {
       const error = new Error(data.error || "Replicate image failed.");
       error.code = "provider_job_failed";
-      return failAsyncJob({ job, error });
+      return await failAsyncJob({ job, error });
     }
   }
 
@@ -5387,10 +7756,197 @@ async function refreshLocalJobFromProvider(job) {
   };
 }
 
+function firstReferenceAssetId(payload = {}) {
+  const ids = [
+    payload.sourceAssetId,
+    payload.referenceVideoAssetId,
+    ...(Array.isArray(payload.referenceAssetIds) ? payload.referenceAssetIds : [])
+  ].filter(Boolean);
+  return ids[0] || null;
+}
+
+function prepareCharacterReferences({ payload = {}, auth }) {
+  const requestedIds = [...new Set((Array.isArray(payload.characterIds) ? payload.characterIds : [payload.characterId]).filter(Boolean))].slice(0, 8);
+  if (!requestedIds.length) return payload;
+
+  const selectedAssets = [];
+  const characterReferences = requestedIds.map((characterId) => {
+    const summary = characterDatasetSummary(characterId, auth);
+    if (!summary) {
+      const error = new Error("Character not found.");
+      error.code = "character_not_found";
+      error.statusCode = 404;
+      throw error;
+    }
+    if (!summary.consentGranted) {
+      const error = new Error(`Character ${summary.character.name} cannot be used because consent is not currently granted.`);
+      error.code = "character_consent_required";
+      error.statusCode = 409;
+      throw error;
+    }
+    const preferred = [
+      summary.character.primaryAssetId,
+      ...summary.assets.filter(({ asset }) => String(asset.contentType || "").startsWith("image/")).map(({ asset }) => asset.id),
+      ...summary.assets.filter(({ asset }) => String(asset.contentType || "").startsWith("video/")).map(({ asset }) => asset.id)
+    ].filter(Boolean);
+    const assetIds = [...new Set(preferred)].slice(0, 5);
+    assetIds.forEach((assetId) => {
+      const asset = findOwnedAsset(assetId, auth);
+      if (asset) selectedAssets.push(asset);
+    });
+    return {
+      id: summary.character.id,
+      name: summary.character.name,
+      version: summary.versions[0]?.version || null,
+      ready: summary.ready,
+      referenceAssetIds: assetIds
+    };
+  });
+
+  const referenceAssetIds = [...new Set([
+    ...(Array.isArray(payload.referenceAssetIds) ? payload.referenceAssetIds : []),
+    ...selectedAssets.map((asset) => asset.id)
+  ])].slice(0, 12);
+  const imageReference = selectedAssets.find((asset) => String(asset.contentType || "").startsWith("image/"));
+  const videoReference = selectedAssets.find((asset) => String(asset.contentType || "").startsWith("video/"));
+  return {
+    ...payload,
+    characterIds: requestedIds,
+    characterReferences,
+    referenceAssetIds,
+    referenceImageUrl: payload.referenceImageUrl || imageReference?.publicUrl || "",
+    referenceVideoUrl: payload.referenceVideoUrl || videoReference?.publicUrl || ""
+  };
+}
+
+function prepareGenerationPayload({ kind, payload = {}, auth }) {
+  const preparedPayload = prepareCharacterReferences({ payload, auth });
+  if (kind !== "video" || !isRealityTransformPayload(preparedPayload)) return preparedPayload;
+
+  const sourceAssetId = firstReferenceAssetId(preparedPayload);
+  const sourceAsset = sourceAssetId ? findOwnedAsset(sourceAssetId, auth) : null;
+  if (sourceAsset && !String(sourceAsset.contentType || "").startsWith("video/")) {
+    const error = new Error("Reality Transform needs a source video, not an image or audio file.");
+    error.code = "reality_transform_video_required";
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const sourceVideoUrl = String(
+    preparedPayload.sourceVideoUrl ||
+    preparedPayload.referenceVideoUrl ||
+    preparedPayload.videoUri ||
+    sourceAsset?.publicUrl ||
+    ""
+  ).trim();
+  if (!sourceVideoUrl && !sourceAsset) {
+    const error = new Error("Upload the source performance video before starting Reality Transform.");
+    error.code = "reality_transform_source_required";
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (process.env.SLT_TEST_MODE !== "1") {
+    if (!sourceAsset) {
+      const error = new Error("Reality Transform requires a source video uploaded and validated by SLT Storage.");
+      error.code = "reality_transform_validated_asset_required";
+      error.statusCode = 400;
+      throw error;
+    }
+    const mediaMetadata = sourceAsset.metadata?.media || sourceAsset.metadata || {};
+    if (!sourceAsset.metadata?.serverValidated) {
+      const error = new Error("This source predates server validation. Upload it again before using Reality Transform.");
+      error.code = "reality_transform_revalidation_required";
+      error.statusCode = 400;
+      throw error;
+    }
+    assertRealityTransformMedia(mediaMetadata);
+  }
+
+  const requestedDuration = Number(
+    preparedPayload.sourceDurationSeconds ||
+    sourceAsset?.metadata?.durationSeconds ||
+    preparedPayload.durationSeconds ||
+    preparedPayload.videoDurationSeconds ||
+    0
+  );
+  if (Number.isFinite(requestedDuration) && requestedDuration > 0 && (requestedDuration < 2 || requestedDuration > 30)) {
+    const error = new Error("Reality Transform accepts source clips from 2 to 30 seconds.");
+    error.code = "reality_transform_duration_invalid";
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const requestedResolution = String(preparedPayload.outputResolution || preparedPayload.resolution || "1080p").toLowerCase();
+  if (["2k", "4k", "8k"].includes(requestedResolution)) {
+    const error = new Error("Runway Aleph 2 generates up to 1080p. Choose 1080p, then run Upscale as a separate operation.");
+    error.code = "reality_transform_native_resolution_invalid";
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return {
+    ...preparedPayload,
+    sourceAssetId: sourceAsset?.id || sourceAssetId || null,
+    sourceVideoUrl,
+    referenceVideoUrl: sourceVideoUrl,
+    sourceDurationSeconds: requestedDuration || null,
+    resolution: preparedPayload.resolution || "1080p",
+    outputResolution: preparedPayload.outputResolution || preparedPayload.resolution || "1080p",
+    realityTransform: true,
+    model: preparedPayload.model || (normalizeProviderName(preparedPayload.provider || preparedPayload.providerLabel || "") === "Runway" ? "aleph2" : preparedPayload.model)
+  };
+}
+
 function handleGenerate(kind) {
   return async (request, response) => {
     if (failProviderIfRequested(request, response)) return;
 
+    const requestedProvider = String(request.body?.provider || request.body?.providerLabel || "").trim().toLowerCase();
+    if (["auto", "slt auto"].includes(requestedProvider)) {
+      const routed = routeMultimodalModel({ ...(request.body || {}), modality: kind });
+      if (!routed.ok || !routed.selected) {
+        response.status(routed.comingSoon ? 422 : 409).json({
+          ok: false,
+          code: routed.comingSoon ? "operation_coming_soon" : "compatible_provider_unavailable",
+          error: routed.message,
+          readableError: routed.message,
+          route: routed
+        });
+        return;
+      }
+      request.body = {
+        ...(request.body || {}),
+        provider: routed.selected.provider,
+        providerLabel: routed.selected.provider,
+        model: routed.selected.model,
+        modelId: routed.selected.model,
+        operation: routed.request.operation,
+        modelRoute: { priority: routed.request.priority, selectedModelId: routed.selected.id }
+      };
+    } else if (request.body?.capabilityAware === true) {
+      const routed = routeMultimodalModel({ ...(request.body || {}), modality: kind });
+      if (!routed.selected) {
+        response.status(422).json({
+          ok: false,
+          code: "operation_coming_soon",
+          error: routed.message,
+          readableError: routed.message,
+          route: routed
+        });
+        return;
+      }
+    }
+
+    if (
+      kind === "video" &&
+      isRealityTransformPayload(request.body || {}) &&
+      normalizeProviderName(request.body?.provider || request.body?.providerLabel || "") === "Runway" &&
+      !request.body?.model &&
+      !request.body?.modelId
+    ) {
+      request.body = { ...(request.body || {}), model: "aleph2" };
+    }
     const checks = baseChecks(request, kind);
     const prompt = request.body?.prompt || request.body?.description || "";
     const title = request.body?.title || `${kind} project`;
@@ -5410,7 +7966,19 @@ function handleGenerate(kind) {
 
     const inputModeration = await runInputModeration({ kind, title, prompt, payload: request.body || {} });
     if (!inputModeration.ok) {
-      response.status(400).json(moderationFailurePayload({ moderation: inputModeration, kind, title }));
+      const moderationError = new Error(inputModeration.reason || "Prompt blocked by input moderation.");
+      moderationError.sltCode = "PROMPT_BLOCKED";
+      moderationError.code = "moderation_blocked";
+      moderationError.statusCode = 400;
+      const failure = await recordSltFailure({
+        request,
+        auth: checks.auth,
+        error: moderationError,
+        context: { kind, modality: kind.toUpperCase(), provider: checks.provider.name, source: "input_moderation", deliberateInvalid: true }
+      });
+      response.status(400).json(sltErrorResponsePayload(failure, {
+        moderation: moderationFailurePayload({ moderation: inputModeration, kind, title }).moderation
+      }));
       return;
     }
 
@@ -5424,7 +7992,52 @@ function handleGenerate(kind) {
         code: "insufficient_credits"
       });
       saveHistory(failed);
-      response.status(402).json({ ok: false, checks, historyItem: failed, error: checks.credits.readableError, code: "insufficient_credits" });
+      const creditError = new Error(checks.credits.readableError || "Insufficient credits.");
+      creditError.sltCode = "USER_INSUFFICIENT_CREDITS";
+      creditError.code = "insufficient_credits";
+      creditError.statusCode = 402;
+      const failure = await recordSltFailure({
+        request,
+        auth: checks.auth,
+        error: creditError,
+        context: {
+          kind,
+          modality: kind.toUpperCase(),
+          provider: checks.provider.name,
+          system: "ledger",
+          creditsBefore: checks.credits.available,
+          creditsReserved: 0,
+          creditsAfter: checks.credits.available,
+          source: "credit_preflight"
+        }
+      });
+      response.status(402).json(sltErrorResponsePayload(failure, { checks, historyItem: failed }));
+      return;
+    }
+
+    if (checks.provider.errorName && !checks.provider.connected) {
+      const providerError = new Error(checks.provider.message || "Provider temporarily unavailable.");
+      providerError.sltCode = checks.provider.errorName;
+      providerError.code = checks.provider.errorName;
+      providerError.statusCode = 503;
+      const failure = await recordSltFailure({
+        request,
+        auth: checks.auth,
+        error: providerError,
+        context: {
+          kind,
+          modality: kind.toUpperCase(),
+          provider: checks.provider.diagnostic?.provider || checks.provider.name,
+          model: request.body?.model || request.body?.modelId || checks.provider.model?.id || null,
+          operation: generationAction(request.body || {}),
+          creditsBefore: checks.credits.available,
+          creditsReserved: 0,
+          creditsAfter: checks.credits.available,
+          customerMessage: checks.provider.message,
+          source: "provider_preflight"
+        }
+      });
+      response.status(503).json(sltErrorResponsePayload(failure, { checks, provider: checks.provider }));
       return;
     }
 
@@ -5432,15 +8045,231 @@ function handleGenerate(kind) {
     let selectedProviderName = providerName;
     let runtimeChecks = checks;
     let activeReservation = null;
+    const activeReservations = [];
     try {
-      let payload = request.body || {};
+      let payload = prepareGenerationPayload({ kind, payload: request.body || {}, auth: checks.auth });
       let videoPlan = null;
       if (kind === "video") {
         videoPlan = resolveVideoPlan({ payload, auth: checks.auth, providerName });
         payload = { ...payload, videoPlan };
       }
 
-      const reservationResult = reserveCredits({
+      if (shouldQueueGeneration(kind, checks.provider, payload)) {
+        const outputCount = billableOutputCount(payload);
+        const tenantId = requestIdentity(request, checks.auth);
+        const perOutputCost = checks.credits.mode?.includes("provider-direct")
+          ? 0
+          : creditCostFor(kind, { ...payload, outputCount: 1, count: 1, quantity: 1 });
+        const totalCredits = perOutputCost * outputCount;
+        const batchRequestKey = generationIdempotencyKey(request, kind, "batch");
+        const existingBatch = state.generationBatches.find((item) => item.idempotencyKey === batchRequestKey);
+        if (existingBatch) {
+          const serialized = serializeGenerationBatch(existingBatch);
+          response.status(202).json({
+            ok: true,
+            accepted: true,
+            async: true,
+            idempotent: true,
+            batchId: existingBatch.id,
+            jobId: serialized.jobIds[0] || null,
+            jobIds: serialized.jobIds,
+            jobs: serialized.jobs,
+            batch: serialized,
+            message: `${kind} generation batch already accepted.`
+          });
+          return;
+        }
+
+        const project = createGenerationProject({
+          tenantId,
+          userId: checks.auth.userId,
+          title,
+          kind,
+          requestedProjectId: payload.projectId || null
+        });
+        const generationSession = createGenerationSession({
+          tenantId,
+          userId: checks.auth.userId,
+          projectId: project.id,
+          title,
+          kind,
+          requestedSessionId: payload.sessionId || null
+        });
+        const batch = createGenerationBatch({
+          tenantId,
+          userId: checks.auth.userId,
+          projectId: project.id,
+          sessionId: generationSession.id,
+          kind,
+          payload,
+          providerName,
+          outputCount,
+          idempotencyKey: batchRequestKey,
+          totalCredits
+        });
+        const jobs = [];
+        const historyItems = [];
+        const reservedOutputs = [];
+        const pendingDispatches = [];
+        let latestWallet = ledgerSnapshot(tenantId);
+
+        // Reserve every output before dispatching any provider request. This prevents
+        // partially-funded batches from leaking already-running jobs.
+        for (let index = 1; index <= outputCount; index += 1) {
+          const jobId = requestId("job");
+          const variationPayload = {
+            ...payload,
+            outputCount: 1,
+            count: 1,
+            quantity: 1,
+            batchId: batch.id,
+            batchIndex: index,
+            projectId: project.id,
+            sessionId: generationSession.id,
+            variationIndex: index,
+            variationCount: outputCount,
+            seed: Number.isFinite(Number(payload.seed)) ? Number(payload.seed) + index - 1 : undefined
+          };
+          const reservationResult = await reserveCreditsTransactional({
+            amount: perOutputCost,
+            kind,
+            auth: checks.auth,
+            request,
+            idempotencyKey: `${batchRequestKey}:reserve:${index}`,
+            metadata: {
+              jobId,
+              title,
+              provider: providerName,
+              batchId: batch.id,
+              batchIndex: index,
+              projectId: project.id,
+              sessionId: generationSession.id,
+              promptHash: crypto.createHash("sha256").update(prompt).digest("hex")
+            }
+          });
+          if (reservationResult.reservation) activeReservations.push(reservationResult.reservation);
+          latestWallet = reservationResult.wallet || latestWallet;
+          reservedOutputs.push({ index, jobId, variationPayload, reservationResult });
+        }
+
+        for (const reservedOutput of reservedOutputs) {
+          const { index, jobId, variationPayload, reservationResult } = reservedOutput;
+          const outputWallet = reservationResult.wallet || latestWallet;
+          const ledgerCredits = {
+            ...checks.credits,
+            cost: perOutputCost,
+            reservation: reservationResult.reservation,
+            reserveTransactionId: reservationResult.transaction?.id || null,
+            remaining: outputWallet.availableCredits,
+            available: outputWallet.availableCredits,
+            held: outputWallet.heldCredits,
+            wallet: outputWallet
+          };
+          const ledgerChecks = {
+            ...checks,
+            credits: ledgerCredits,
+            ledger: {
+              reservationId: reservationResult.reservation?.id || null,
+              reserveTransactionId: reservationResult.transaction?.id || null,
+              wallet: outputWallet,
+              skipped: Boolean(reservationResult.skipped)
+            }
+          };
+          const job = createJob({
+            jobId,
+            kind,
+            title: outputCount > 1 ? `${title} · ${index}/${outputCount}` : title,
+            providerName,
+            prompt,
+            payload: variationPayload,
+            checks: ledgerChecks,
+            request,
+            batch,
+            batchIndex: index,
+            projectId: project.id,
+            sessionId: generationSession.id
+          });
+          // Local durable staging relies on provider polling when no public HTTPS
+          // callback is available. Production keeps signed webhooks enabled.
+          const webhookUrl = envFlag("DISABLE_PROVIDER_WEBHOOKS", false)
+            ? ""
+            : webhookUrlForJob(request, checks.provider, job.id);
+          const asyncPayload = {
+            ...variationPayload,
+            jobId: job.id,
+            request_id: job.id,
+            webhookUrl,
+            webhook_url: webhookUrl,
+            callbackUrl: webhookUrl,
+            callback_url: webhookUrl
+          };
+          const queuedChecks = {
+            ...ledgerChecks,
+            requestedProvider: checks.provider,
+            providerWebhook: {
+              provider: webhookProviderForStatus(checks.provider),
+              url: webhookUrl,
+              signatureRequired: Boolean(webhookUrl)
+            }
+          };
+          const queuedEntry = buildQueuedHistoryEntry({ job, checks: queuedChecks });
+          queuedEntry.batchId = batch.id;
+          queuedEntry.projectId = project.id;
+          queuedEntry.sessionId = generationSession.id;
+          saveHistory(queuedEntry);
+          if (reservationResult.reservation) {
+            reservationResult.reservation.jobId = job.id;
+            reservationResult.reservation.updatedAt = new Date().toISOString();
+          }
+          updateJob(job.id, {
+            historyItemId: queuedEntry.id,
+            reservationId: reservationResult.reservation?.id || null,
+            reservationStatus: reservationResult.reservation?.status || null
+          });
+          pendingDispatches.push({ job: findJob(job.id), kind, prompt, title: job.title, payload: asyncPayload, checks: ledgerChecks });
+          jobs.push(findJob(job.id));
+          historyItems.push(queuedEntry);
+        }
+
+        pendingDispatches.forEach(enqueueAsyncGeneration);
+        recomputeGenerationBatch(batch.id);
+        const serializedBatch = serializeGenerationBatch(batch);
+        runtimeChecks = {
+          ...checks,
+          credits: {
+            ...checks.credits,
+            cost: totalCredits,
+            perOutputCost,
+            outputCount,
+            wallet: latestWallet,
+            remaining: latestWallet.availableCredits,
+            available: latestWallet.availableCredits,
+            held: latestWallet.heldCredits
+          }
+        };
+        response.status(202).json({
+          ok: true,
+          accepted: true,
+          async: true,
+          batchId: batch.id,
+          request_id: batch.id,
+          jobId: jobs[0]?.id || null,
+          jobIds: jobs.map((job) => job.id),
+          jobs: jobs.map(serializeJob),
+          batch: serializedBatch,
+          project,
+          session: generationSession,
+          checks: runtimeChecks,
+          historyItems,
+          historyItem: historyItems[0] || null,
+          emptyState: emptyStateFor(kind),
+          success: successFor(kind),
+          message: `${outputCount} ${kind} output${outputCount === 1 ? "" : "s"} queued in batch ${batch.id}.`
+        });
+        return;
+      }
+
+      const reservationResult = await reserveCreditsTransactional({
         amount: checks.credits.cost,
         kind,
         auth: checks.auth,
@@ -5453,6 +8282,7 @@ function handleGenerate(kind) {
         }
       });
       activeReservation = reservationResult.reservation;
+      if (activeReservation) activeReservations.push(activeReservation);
       const ledgerCredits = {
         ...checks.credits,
         reservation: reservationResult.reservation,
@@ -5473,51 +8303,6 @@ function handleGenerate(kind) {
         }
       };
       runtimeChecks = ledgerChecks;
-
-      if (shouldQueueGeneration(kind, checks.provider, payload)) {
-        const job = createJob({ kind, title, providerName, prompt, payload, checks: ledgerChecks, request });
-        const webhookUrl = webhookUrlForJob(request, checks.provider, job.id);
-        const asyncPayload = {
-          ...payload,
-          jobId: job.id,
-          request_id: job.id,
-          webhookUrl,
-          webhook_url: webhookUrl,
-          callbackUrl: webhookUrl,
-          callback_url: webhookUrl
-        };
-        const queuedChecks = {
-          ...ledgerChecks,
-          requestedProvider: checks.provider,
-          providerWebhook: {
-            provider: webhookProviderForStatus(checks.provider),
-            url: webhookUrl,
-            signatureRequired: true
-          }
-        };
-        const queuedEntry = buildQueuedHistoryEntry({ job, checks: queuedChecks });
-        saveHistory(queuedEntry);
-        if (activeReservation) {
-          activeReservation.jobId = job.id;
-          activeReservation.updatedAt = new Date().toISOString();
-        }
-        updateJob(job.id, { historyItemId: queuedEntry.id, reservationId: activeReservation?.id || null, reservationStatus: activeReservation?.status || null });
-        enqueueAsyncGeneration({ job: findJob(job.id), kind, prompt, title, payload: asyncPayload, checks: ledgerChecks });
-        response.status(202).json({
-          ok: true,
-          accepted: true,
-          async: true,
-          jobId: job.id,
-          request_id: job.id,
-          checks: queuedChecks,
-          job: serializeJob(findJob(job.id)),
-          historyItem: queuedEntry,
-          emptyState: emptyStateFor(kind),
-          success: successFor(kind),
-          message: `${kind} generation queued. Poll /api/jobs/${job.id} for status.`
-        });
-        return;
-      }
 
       const providerRun = kind === "video" && videoPlan?.mode === "timeline"
         ? {
@@ -5542,9 +8327,17 @@ function handleGenerate(kind) {
         providerFallback: providerRun.fallback,
         providerRoute: providerRun.route
       };
+      const syncLedgerResolution = activeReservation
+        ? await resolveReservationTransactional({
+            reservationId: activeReservation.id,
+            outcome: "capture",
+            idempotencyKey: `capture:${activeReservation.id}`,
+            reason: "sync_provider_completed"
+          })
+        : null;
       const entry = {
         id: requestId(kind),
-        tenantId: checks.auth.userId,
+        tenantId: requestIdentity(request, checks.auth),
         kind,
         title,
         provider: selectedProviderName,
@@ -5556,14 +8349,9 @@ function handleGenerate(kind) {
           ? {
               reservationId: activeReservation.id,
               resolution: "capture",
-              ...resolveReservation({
-                reservationId: activeReservation.id,
-                outcome: "capture",
-                idempotencyKey: `capture:${activeReservation.id}`,
-                reason: "sync_provider_completed"
-              })
+              ...syncLedgerResolution
             }
-          : { reservationId: null, resolution: "none", wallet: ledgerSnapshot() },
+          : { reservationId: null, resolution: "none", wallet: ledgerSnapshot(requestIdentity(request, checks.auth)) },
         result: {
           ...providerRun.providerResult,
           fallback: providerRun.fallback,
@@ -5587,16 +8375,38 @@ function handleGenerate(kind) {
       });
     } catch (error) {
       let releasedReservation = null;
-      if (activeReservation?.id) {
-        releasedReservation = resolveReservation({
-          reservationId: activeReservation.id,
+      for (const reservation of activeReservations) {
+        if (!reservation?.id || ["captured", "released"].includes(reservation.status)) continue;
+        releasedReservation = await resolveReservationTransactional({
+          reservationId: reservation.id,
           outcome: "release",
-          idempotencyKey: `release:${activeReservation.id}`,
-          reason: error.code || "sync_provider_failed"
+          idempotencyKey: `release:${reservation.id}`,
+          reason: error.code || "generation_setup_failed"
         });
       }
-      const code = error.code || "provider_error";
-      const readableError = code === "provider_not_connected" ? providerFallbackMessage : readableProviderError(error, selectedProviderName);
+      const originalCode = error.code || "provider_error";
+      const failure = await recordSltFailure({
+        request,
+        auth: checks.auth,
+        error,
+        ledgerResolution: releasedReservation,
+        context: {
+          kind,
+          modality: kind.toUpperCase(),
+          provider: selectedProviderName,
+          model: request.body?.model || request.body?.modelId || null,
+          operation: generationAction(request.body || {}),
+          providerRoute: error.route || runtimeChecks.providerRoute || [],
+          creditsBefore: checks.credits.available,
+          creditsReserved: activeReservations.reduce((total, reservation) => total + Number(reservation?.amount || 0), 0),
+          creditsAfter: releasedReservation?.wallet?.availableCredits ?? checks.credits.available,
+          reservationReleased: activeReservations.length > 0 && activeReservations.every((reservation) => ["released", "captured"].includes(reservation.status)),
+          deliberateInvalid: ["model_not_found", "invalid_model", "model_parameter_unsupported"].includes(originalCode),
+          source: "generation_setup"
+        }
+      });
+      const code = failure.classification.name;
+      const readableError = failure.incident.clientVisibleMessage;
       const failedEntry = buildFailedEntry({
         kind,
         title,
@@ -5605,35 +8415,28 @@ function handleGenerate(kind) {
         message: readableError,
         code
       });
+      failedEntry.errorCode = failure.classification.code;
+      failedEntry.incidentId = failure.incident.incidentId;
+      failedEntry.retryable = failure.classification.retryable;
+      failedEntry.compensation = failure.publicError.compensation;
       failedEntry.ledger = releasedReservation
         ? {
-            reservationId: activeReservation.id,
+            reservationId: activeReservation?.id || releasedReservation.reservation?.id || null,
             resolution: "release",
             transactionId: releasedReservation.transaction?.id || null,
             wallet: releasedReservation.wallet
           }
         : null;
       saveHistory(failedEntry);
-      const statusCode = code === "provider_not_connected" || code === "seedance_missing_image" || code === "omnihuman_missing_media_urls"
-        ? 400
-        : code === "insufficient_credits"
-        ? 402
-        : ["owner_long_video_required", "video_duration_limit", "ceo_video_duration_limit"].includes(code)
-        ? 403
-        : 502;
-      response.status(statusCode).json({
-        ok: false,
+      const statusCode = error.statusCode || incidentHttpStatus(failure.classification);
+      response.status(statusCode).json(sltErrorResponsePayload(failure, {
         checks: runtimeChecks,
         historyItem: failedEntry,
-        code,
         warning: readableError,
-        error: readableError,
-        readableError,
-        providerError: error.message || "",
-        providerRoute: error.route || runtimeChecks.providerRoute || [],
+        providerRoute: (error.route || runtimeChecks.providerRoute || []).map((item) => ({ provider: item.provider, status: item.status, code: item.code, ok: item.ok })),
         emptyState: emptyStateFor(kind),
         errorFallback: errorFallbackFor(kind)
-      });
+      }));
     }
   };
 }
@@ -5728,6 +8531,88 @@ app.get("/api/providers", (request, response) => {
     providers,
     message: providers.some((provider) => provider.connected) ? "At least one provider is connected." : providerFallbackMessage
   });
+});
+
+app.get("/api/error-registry", (_request, response) => {
+  response.json({
+    ok: true,
+    ...registrySummary(),
+    errors: Object.values(SLT_ERROR_REGISTRY).map(({ code, name, category, customerMessage, retryable }) => ({
+      code,
+      name,
+      category,
+      customerMessage,
+      retryable
+    }))
+  });
+});
+
+app.get("/api/model-router/capabilities", (request, response) => {
+  const supportedModalities = ["image", "video", "music", "sound", "voice"];
+  const modality = supportedModalities.includes(String(request.query.modality || request.query.kind || "").toLowerCase())
+    ? String(request.query.modality || request.query.kind).toLowerCase()
+    : "";
+  const models = multimodalModelRegistry
+    .filter((model) => !modality || model.modality === modality)
+    .map(modelAvailability);
+  const operations = modality
+    ? operationCatalog(modality)
+    : supportedModalities.flatMap(operationCatalog);
+  response.json({
+    ok: true,
+    auth: getAuth(request),
+    modality: modality || "all",
+    priorities: ["quality", "speed", "cost"],
+    operations,
+    models,
+    rules: {
+      incompatibleParametersHidden: true,
+      unsupportedOperations: "coming_soon",
+      upscale: "post_process"
+    }
+  });
+});
+
+app.get("/api/provider-status", (request, response) => {
+  const auth = getAuth(request);
+  const kind = String(request.query.kind || "").trim().toLowerCase();
+  const providers = Object.keys(providerCatalog)
+    .map((name) => providerStatus(name))
+    .filter((item) => !kind || item.kind === kind)
+    .map((item) => ({
+      name: item.name,
+      kind: item.kind,
+      status: item.connected ? "AVAILABLE" : item.status,
+      available: item.connected,
+      canGenerate: item.canGenerate,
+      execution: item.execution,
+      supportsWebhook: item.supportsWebhook,
+      message: item.message,
+      errorCode: item.errorCode || null,
+      errorName: item.errorName || null,
+      model: item.model ? { id: item.model.id, label: item.model.label, pricing: item.model.pricing || null } : null,
+      pricing: item.pricing || null
+    }));
+  response.json({
+    ok: true,
+    auth,
+    checkedAt: new Date().toISOString(),
+    providers,
+    summary: {
+      available: providers.filter((item) => item.available).length,
+      temporarilyUnavailable: providers.filter((item) => ["PROVIDER_NO_CREDITS", "PROVIDER_BILLING_REQUIRED"].includes(item.status)).length,
+      comingSoon: providers.filter((item) => ["prepared", "future", "missing_key", "missing_config"].includes(item.status)).length
+    }
+  });
+});
+
+app.post("/api/model-router/resolve", (request, response) => {
+  try {
+    const route = routeMultimodalModel(request.body || {});
+    response.status(route.ok ? 200 : route.comingSoon ? 422 : 409).json({ ok: route.ok, route, message: route.message });
+  } catch (error) {
+    response.status(error.statusCode || 400).json({ ok: false, code: error.code || "model_route_failed", error: error.message });
+  }
 });
 
 function webhookSecretFor(provider) {
@@ -5838,6 +8723,7 @@ function normalizeWebhookStatus(value = "") {
   const status = String(value || "").toLowerCase();
   if (["succeeded", "success", "completed", "complete", "done"].includes(status)) return "completed";
   if (["failed", "error", "errored", "cancelled", "canceled"].includes(status)) return "failed";
+  if (status === "throttled") return "throttled";
   if (["queued", "pending", "starting"].includes(status)) return "queued";
   return "processing";
 }
@@ -5906,10 +8792,21 @@ function handleProviderWebhook(provider) {
         response.json({ ok: true, duplicate: true, ignored: true });
         return;
       }
+      state.webhookEvents.unshift({
+        id: requestId("webhook_event"),
+        eventKey,
+        eventId: event.eventId || eventKey,
+        provider,
+        jobId: job?.id || queryJobId || null,
+        event,
+        payload: event.raw,
+        status: event.status,
+        receivedAt: new Date().toISOString()
+      });
+      state.webhookEvents = state.webhookEvents.slice(0, 200);
       if (!job) {
         processedWebhookEvents.add(eventKey);
-        state.webhookEvents.unshift({ provider, event, status: "orphan", receivedAt: new Date().toISOString() });
-        state.webhookEvents = state.webhookEvents.slice(0, 50);
+        state.webhookEvents[0].status = "orphan";
         response.status(202).json({ ok: true, accepted: true, orphan: true });
         return;
       }
@@ -5925,7 +8822,7 @@ function handleProviderWebhook(provider) {
       if (event.status === "failed") {
         const error = new Error(event.errorMessage || `${provider} webhook reported failure.`);
         error.code = "provider_webhook_failed";
-        const failed = failAsyncJob({ job, error });
+        const failed = await failAsyncJob({ job, error });
         response.json({ ok: true, job: serializeJob(failed.job), historyItem: failed.historyItem });
         return;
       }
@@ -5951,7 +8848,7 @@ function handleProviderWebhook(provider) {
             },
             message: `${job.kind} generation completed from ${provider} webhook.`
           }).catch((error) => {
-            failAsyncJob({ job: findJob(job.id), error });
+            void failAsyncJob({ job: findJob(job.id), error });
           });
         }, 0);
         response.status(202).json({ ok: true, accepted: true, job: serializeJob(findJob(job.id)), message: "Webhook accepted for async asset persistence." });
@@ -5959,7 +8856,11 @@ function handleProviderWebhook(provider) {
       }
 
       updateJob(job.id, {
-        status: event.status === "queued" ? jobStates.queued : jobStates.processing,
+        status: event.status === "throttled"
+          ? jobStates.throttled
+          : event.status === "queued"
+          ? jobStates.pending
+          : jobStates.processing,
         providerJobId: event.providerJobId || job.providerJobId
       });
       response.json({ ok: true, job: serializeJob(findJob(job.id)) });
@@ -5973,6 +8874,32 @@ function handleProviderWebhook(provider) {
   };
 }
 
+app.post("/api/generate/estimate", (request, response) => {
+  const kind = String(request.body?.kind || "video").toLowerCase();
+  if (!["image", "video", "music", "sound", "fashion"].includes(kind)) {
+    response.status(400).json({ ok: false, code: "invalid_generation_kind", error: "Unsupported generation kind." });
+    return;
+  }
+  const payload = {
+    ...(request.body?.payload || {}),
+    ...request.body,
+    provider: request.body?.provider || request.body?.providerLabel || defaultProvider[kind]
+  };
+  const providerName = normalizeProviderName(String(payload.provider || defaultProvider[kind]));
+  const config = providerCatalog[providerName] || null;
+  const model = providerModelConfig(config || {}, payload);
+  response.json({
+    ok: true,
+    kind,
+    provider: providerName,
+    model: model?.id || payload.model || null,
+    outputCount: billableOutputCount(payload),
+    estimatedCredits: creditCostFor(kind, payload),
+    pricing: providerPricingFor(config || {}, payload),
+    note: "Estimate only. Credits are reserved server-side when the job is submitted."
+  });
+});
+
 app.post("/api/generate/image", handleGenerate("image"));
 app.post("/api/generate/video", handleGenerate("video"));
 app.post("/api/generate/music", handleGenerate("music"));
@@ -5982,6 +8909,200 @@ app.post("/api/webhooks/fal", handleProviderWebhook("fal"));
 app.post("/api/webhooks/replicate", handleProviderWebhook("replicate"));
 app.post("/api/webhooks/seedance", handleProviderWebhook("seedance"));
 app.post("/api/webhooks/omnihuman", handleProviderWebhook("omnihuman"));
+
+app.get("/api/jobs", (request, response) => {
+  const auth = getAuth(request);
+  const kind = typeof request.query.kind === "string" ? request.query.kind.trim().toLowerCase() : "";
+  const requestedLimit = Number.parseInt(request.query.limit, 10);
+  const limit = Number.isFinite(requestedLimit) ? Math.min(100, Math.max(1, requestedLimit)) : 50;
+  const ownedJobs = filterRecordsForAuth(state.jobs, auth)
+    .filter((job) => !kind || String(job.kind || "").toLowerCase() === kind);
+  const jobs = ownedJobs.slice(0, limit).map(serializeJob);
+  const summary = ownedJobs.reduce((counts, job) => {
+    const status = clientJobStatus(job.status);
+    counts[status] = (counts[status] || 0) + 1;
+    return counts;
+  }, {});
+
+  response.json({
+    ok: true,
+    auth,
+    jobs,
+    summary,
+    total: ownedJobs.length,
+    emptyState: "No Jobs"
+  });
+});
+
+app.get("/api/batches", (request, response) => {
+  const auth = getAuth(request);
+  const kind = typeof request.query.kind === "string" ? request.query.kind.trim().toLowerCase() : "";
+  const batches = filterRecordsForAuth(state.generationBatches, auth)
+    .filter((batch) => !kind || String(batch.kind || "").toLowerCase() === kind)
+    .slice(0, 50)
+    .map((batch) => serializeGenerationBatch(recomputeGenerationBatch(batch.id)));
+  response.json({ ok: true, auth, batches, total: batches.length });
+});
+
+app.get("/api/generation-sessions", (request, response) => {
+  const auth = getAuth(request);
+  const kind = typeof request.query.kind === "string" ? request.query.kind.trim().toLowerCase() : "";
+  const sessions = filterRecordsForAuth(state.generationSessions, auth)
+    .filter((session) => !kind || String(session.kind || "").toLowerCase() === kind)
+    .slice(0, 100)
+    .map((session) => {
+      const jobs = filterRecordsForAuth(state.jobs, auth).filter((job) => job.sessionId === session.id);
+      const assets = filterRecordsForAuth(state.assets, auth).filter((asset) => asset.sessionId === session.id);
+      return {
+        ...session,
+        jobCount: jobs.length,
+        assetCount: assets.length,
+        latestAsset: assets[0] ? serializeAssetForClient(assets[0]) : null
+      };
+    });
+  response.json({ ok: true, auth, sessions, total: sessions.length });
+});
+
+app.post("/api/generation-sessions", (request, response) => {
+  const auth = getAuth(request);
+  const tenantId = requestIdentity(request, auth);
+  const projectId = request.body?.projectId || null;
+  if (projectId) {
+    const project = state.projects.find((item) => item.id === projectId);
+    if (!project || !canAccessRecord(project, auth)) {
+      response.status(404).json({ ok: false, code: "project_not_found", error: "Project not found." });
+      return;
+    }
+  }
+  const now = new Date().toISOString();
+  const session = {
+    id: requestId("generation_session"),
+    tenantId,
+    userId: auth.userId || null,
+    projectId,
+    title: String(request.body?.title || "Untitled session").slice(0, 180),
+    kind: String(request.body?.kind || "multimodal").slice(0, 80),
+    status: "ACTIVE",
+    metadata: request.body?.metadata && typeof request.body.metadata === "object" ? request.body.metadata : {},
+    createdAt: now,
+    updatedAt: now
+  };
+  state.generationSessions.unshift(session);
+  response.status(201).json({ ok: true, auth, session });
+});
+
+app.get("/api/generation-sessions/:sessionId", (request, response) => {
+  const auth = getAuth(request);
+  const session = state.generationSessions.find((item) => item.id === request.params.sessionId);
+  if (!session || !canAccessRecord(session, auth)) {
+    response.status(404).json({ ok: false, code: "session_not_found", error: "Session not found." });
+    return;
+  }
+  const jobs = filterRecordsForAuth(state.jobs, auth).filter((item) => item.sessionId === session.id);
+  const assets = filterRecordsForAuth(state.assets, auth).filter((item) => item.sessionId === session.id && !item.deletedAt).map(serializeAssetForClient);
+  const history = filterRecordsForAuth(state.history, auth).filter((item) => item.sessionId === session.id || jobs.some((job) => job.id === item.jobId));
+  response.json({ ok: true, auth, session, jobs, assets, history });
+});
+
+app.patch("/api/generation-sessions/:sessionId", (request, response) => {
+  const auth = getAuth(request);
+  const session = state.generationSessions.find((item) => item.id === request.params.sessionId);
+  if (!session || !canAccessRecord(session, auth)) {
+    response.status(404).json({ ok: false, code: "session_not_found", error: "Session not found." });
+    return;
+  }
+  if (typeof request.body?.title === "string" && request.body.title.trim()) session.title = request.body.title.trim().slice(0, 180);
+  if (["ACTIVE", "ARCHIVED"].includes(String(request.body?.status || "").toUpperCase())) session.status = String(request.body.status).toUpperCase();
+  if (request.body?.projectId !== undefined) session.projectId = request.body.projectId || null;
+  session.updatedAt = new Date().toISOString();
+  response.json({ ok: true, auth, session });
+});
+
+app.get("/api/batches/:batchId", (request, response) => {
+  const auth = getAuth(request);
+  const batch = findGenerationBatch(request.params.batchId);
+  if (!batch) {
+    response.status(404).json({ ok: false, code: "batch_not_found", error: "Generation batch not found." });
+    return;
+  }
+  try {
+    assertTenantAccess(batch, auth);
+  } catch (error) {
+    response.status(error.statusCode || 403).json({ ok: false, code: error.code || "forbidden", error: "Forbidden." });
+    return;
+  }
+  response.json({ ok: true, auth, batch: serializeGenerationBatch(recomputeGenerationBatch(batch.id)) });
+});
+
+function buildRetryGenerationPayload(originalJob, requestBody = {}) {
+  const retryKey = `retry:${originalJob.id}:${Date.now()}:${crypto.randomBytes(3).toString("hex")}`;
+  return {
+    retryKey,
+    payload: {
+      ...(originalJob.parameters || {}),
+      ...(requestBody.overrides || {}),
+      title: requestBody.title || originalJob.title || `${originalJob.kind} retry`,
+      prompt: requestBody.prompt || originalJob.prompt || "",
+      provider: requestBody.provider || originalJob.provider,
+      providerLabel: requestBody.provider || originalJob.provider,
+      model: requestBody.model || originalJob.parameters?.model || originalJob.payload?.model || undefined,
+      outputCount: 1,
+      count: 1,
+      quantity: 1,
+      projectId: originalJob.projectId || undefined,
+      sessionId: originalJob.sessionId || undefined,
+      retryOfJobId: originalJob.id,
+      idempotencyKey: retryKey,
+      clientRequestId: retryKey
+    }
+  };
+}
+
+app.post("/api/jobs/:jobId/retry", async (request, response) => {
+  const auth = getAuth(request);
+  const originalJob = findJob(request.params.jobId);
+  if (!originalJob) {
+    response.status(404).json({ ok: false, code: "job_not_found", error: "Generation job not found." });
+    return;
+  }
+  try {
+    assertTenantAccess(originalJob, auth);
+  } catch (error) {
+    response.status(error.statusCode || 403).json(authFailurePayload("forbidden"));
+    return;
+  }
+  if (![jobStates.failed, jobStates.cancelled].includes(originalJob.status)) {
+    response.status(409).json({ ok: false, code: "job_not_retryable_state", error: "Only failed or cancelled jobs can be retried." });
+    return;
+  }
+  const incident = incidentForId(originalJob.incidentId || originalJob.error?.incidentId || "");
+  const definition = incident
+    ? SLT_ERROR_REGISTRY[incident.errorCode]
+    : SLT_ERROR_REGISTRY[originalJob.error?.errorCode] || classifySltError(originalJob.error || {}, { provider: originalJob.provider, jobId: originalJob.id });
+  if (!definition?.retryable) {
+    response.status(409).json({
+      ok: false,
+      code: "job_error_not_retryable",
+      errorCode: definition?.code || originalJob.error?.errorCode || null,
+      error: "This generation error is not retryable. Adjust the request before generating again."
+    });
+    return;
+  }
+
+  const retry = buildRetryGenerationPayload(originalJob, request.body || {});
+  const retryKey = retry.retryKey;
+  request.body = retry.payload;
+  request.headers = request.headers || {};
+  request.headers["idempotency-key"] = retryKey;
+  if (incident) {
+    incident.metadata = {
+      ...(incident.metadata || {}),
+      retryRequestedAt: new Date().toISOString()
+    };
+    incident.updatedAt = new Date().toISOString();
+  }
+  await handleGenerate(originalJob.kind)(request, response);
+});
 
 app.get("/api/jobs/:jobId", async (request, response) => {
   const auth = getAuth(request);
@@ -6297,8 +9418,10 @@ app.post("/api/login", async (request, response) => {
       username: data.user.user_metadata?.username || data.user.user_metadata?.full_name || data.user.email || email,
       role
     };
-    state.wallet.tenantId = tenantId;
-    syncCreditViews();
+    const wallet = walletForTenant(tenantId, {
+      create: true,
+      initialCredits: envNumber("NEW_TENANT_STARTING_CREDITS", 0)
+    });
     response.json({
       ok: true,
       session: {
@@ -6312,6 +9435,7 @@ app.post("/api/login", async (request, response) => {
         mode: "supabase"
       },
       user: state.user,
+      wallet: ledgerSnapshot(wallet.tenantId),
       message: "Supabase session started."
     });
     return;
@@ -6425,7 +9549,7 @@ app.post("/api/assist", async (request, response) => {
     }
     let assistReservation = null;
     try {
-      const reservationResult = reserveCredits({
+      const reservationResult = await reserveCreditsTransactional({
         amount: checks.credits.cost,
         kind: "assist",
         auth,
@@ -6440,13 +9564,13 @@ app.post("/api/assist", async (request, response) => {
       assistReservation = reservationResult.reservation;
       const providerResult = await callOpenRouterHermes({ prompt, title });
       const ledgerResolution = assistReservation
-        ? resolveReservation({
+        ? await resolveReservationTransactional({
             reservationId: assistReservation.id,
             outcome: "capture",
             idempotencyKey: `capture:${assistReservation.id}`,
             reason: "assist_completed"
           })
-        : { reservation: null, transaction: null, wallet: ledgerSnapshot(), skipped: true };
+        : { reservation: null, transaction: null, wallet: ledgerSnapshot(requestIdentity(request, auth)), skipped: true };
       const entry = {
         id: requestId("assist"),
         kind: "assist",
@@ -6471,7 +9595,7 @@ app.post("/api/assist", async (request, response) => {
     } catch (error) {
       let ledgerResolution = null;
       if (assistReservation?.id) {
-        ledgerResolution = resolveReservation({
+        ledgerResolution = await resolveReservationTransactional({
           reservationId: assistReservation.id,
           outcome: "release",
           idempotencyKey: `release:${assistReservation.id}`,
@@ -6511,7 +9635,7 @@ app.post("/api/assist", async (request, response) => {
 
   let assistReservation = null;
   try {
-    const reservationResult = reserveCredits({
+    const reservationResult = await reserveCreditsTransactional({
       amount: checks.credits.cost,
       kind: "assist",
       auth,
@@ -6532,13 +9656,13 @@ app.post("/api/assist", async (request, response) => {
       payload: request.body || {}
     });
     const ledgerResolution = assistReservation
-      ? resolveReservation({
+      ? await resolveReservationTransactional({
           reservationId: assistReservation.id,
           outcome: "capture",
           idempotencyKey: `capture:${assistReservation.id}`,
           reason: "assist_completed"
         })
-      : { reservation: null, transaction: null, wallet: ledgerSnapshot(), skipped: true };
+      : { reservation: null, transaction: null, wallet: ledgerSnapshot(requestIdentity(request, auth)), skipped: true };
     const entry = {
       id: requestId("assist"),
       kind: "assist",
@@ -6578,7 +9702,7 @@ app.post("/api/assist", async (request, response) => {
   } catch (error) {
     let ledgerResolution = null;
     if (assistReservation?.id) {
-      ledgerResolution = resolveReservation({
+      ledgerResolution = await resolveReservationTransactional({
         reservationId: assistReservation.id,
         outcome: "release",
         idempotencyKey: `release:${assistReservation.id}`,
@@ -6617,6 +9741,225 @@ app.post("/api/assist", async (request, response) => {
       errorFallback: errorFallbackFor("assist")
     });
   }
+});
+
+function refreshCouponExpiry(coupon) {
+  if (coupon?.status === "ACTIVE" && new Date(coupon.expiresAt || 0).getTime() <= Date.now()) {
+    coupon.status = "EXPIRED";
+  }
+  return coupon;
+}
+
+function compensationCouponForClient(coupon) {
+  if (!coupon) return null;
+  refreshCouponExpiry(coupon);
+  return {
+    code: coupon.code,
+    discountPercent: Number(coupon.discountPercent || 5),
+    status: coupon.status,
+    incidentId: coupon.incidentId,
+    expiresAt: coupon.expiresAt,
+    oneUse: true,
+    transferable: false
+  };
+}
+
+function compensationCouponForCheckout(code, tenantId, userId = null) {
+  const normalized = String(code || "").trim().toUpperCase();
+  if (!normalized) return null;
+  const coupon = state.compensationCoupons.find((item) => String(item.code || "").toUpperCase() === normalized) || null;
+  if (!coupon || coupon.tenantId !== tenantId || (coupon.userId && userId && coupon.userId !== userId)) return null;
+  refreshCouponExpiry(coupon);
+  return coupon.status === "ACTIVE" ? coupon : null;
+}
+
+function markCompensationCouponRedeemed(object = {}) {
+  const promotionIds = (object.total_details?.breakdown?.discounts || [])
+    .map((item) => item.discount?.promotion_code || item.promotion_code)
+    .filter(Boolean);
+  const code = String(object.metadata?.compensationCode || "").trim().toUpperCase();
+  const coupon = state.compensationCoupons.find((item) => (
+    (code && String(item.code || "").toUpperCase() === code)
+    || (item.promotionCodeId && promotionIds.includes(item.promotionCodeId))
+  )) || null;
+  if (!coupon || coupon.status !== "ACTIVE") return null;
+  coupon.status = "REDEEMED";
+  coupon.redeemedAt = new Date().toISOString();
+  coupon.metadata = { ...(coupon.metadata || {}), stripeCheckoutSessionId: object.id || null };
+  return coupon;
+}
+
+function incidentForCeo(incident) {
+  return {
+    ...incident,
+    coupon: compensationCouponForClient(couponForIncident(incident.incidentId)),
+    sanitizedProviderError: sanitizeDiagnosticText(incident.sanitizedProviderError || ""),
+    technicalMessage: sanitizeDiagnosticText(incident.technicalMessage || ""),
+    browser: sanitizeDiagnosticText(incident.browser || "", { maxLength: 500 }),
+    route: sanitizeDiagnosticText(incident.route || "", { maxLength: 300 })
+  };
+}
+
+function matchesIncidentFilter(incident, query = {}) {
+  const status = String(query.status || "").trim().toUpperCase();
+  const category = String(query.category || "").trim().toUpperCase();
+  const provider = String(query.provider || "").trim().toLowerCase();
+  const modality = String(query.modality || query.type || "").trim().toUpperCase();
+  const filter = String(query.filter || "").trim().toLowerCase();
+  const search = String(query.search || "").trim().toLowerCase();
+  if (status && status !== "ALL" && incident.status !== status) return false;
+  if (category && category !== "ALL" && incident.category !== category) return false;
+  if (provider && !String(incident.provider || "").toLowerCase().includes(provider)) return false;
+  if (modality && modality !== "ALL" && incident.modality !== modality) return false;
+  if (query.reported === "true" && !incident.reported) return false;
+  if (query.reported === "false" && incident.reported) return false;
+  const categoryFilters = { credits: "CREDIT", provider: "PROVIDER", storage: "STORAGE", database: "DATABASE" };
+  if (categoryFilters[filter] && incident.category !== categoryFilters[filter]) return false;
+  if (filter === "open" && !["OPEN", "INVESTIGATING"].includes(incident.status)) return false;
+  if (filter === "resolved" && incident.status !== "RESOLVED") return false;
+  if (filter === "openai" && !/openai|gpt/i.test(`${incident.provider || ""} ${incident.model || ""} ${incident.technicalMessage || ""}`)) return false;
+  if (filter === "video" && incident.modality !== "VIDEO") return false;
+  if (filter === "image" && incident.modality !== "IMAGE") return false;
+  if (search) {
+    const haystack = [incident.incidentId, incident.errorCode, incident.errorName, incident.userId, incident.tenantId, incident.projectId, incident.jobId, incident.provider, incident.model].filter(Boolean).join(" ").toLowerCase();
+    if (!haystack.includes(search)) return false;
+  }
+  return true;
+}
+
+app.post("/api/support/incidents", async (request, response) => {
+  const auth = getAuth(request);
+  const incident = incidentForId(String(request.body?.incidentId || "").trim());
+  if (!incident) {
+    response.status(404).json({ ok: false, code: "incident_not_found", error: "Incident not found." });
+    return;
+  }
+  try {
+    assertTenantAccess(incident, auth);
+  } catch (error) {
+    response.status(error.statusCode || 403).json(authFailurePayload("forbidden"));
+    return;
+  }
+  const duplicate = Boolean(incident.reported);
+  if (!duplicate) {
+    incident.reported = true;
+    incident.reportedAt = new Date().toISOString();
+    incident.browser = incident.browser || sanitizeDiagnosticText(request.header("user-agent") || "", { maxLength: 500 });
+    incident.route = incident.route || sanitizeDiagnosticText(request.body?.route || request.header("referer") || "", { maxLength: 300 });
+    incident.metadata = {
+      ...(incident.metadata || {}),
+      reportContext: {
+        note: sanitizeDiagnosticText(request.body?.note || "", { maxLength: 500 }),
+        clientRoute: sanitizeDiagnosticText(request.body?.route || "", { maxLength: 300 })
+      }
+    };
+    incident.updatedAt = new Date().toISOString();
+    await persistRuntimeState(`incident_reported:${incident.incidentId}`);
+  }
+  response.json({
+    ok: true,
+    duplicate,
+    incident: incidentForClient(incident),
+    message: `Report sent successfully. Our technical team can reference incident ${incident.incidentId}.`
+  });
+});
+
+app.get("/api/compensation/coupons", async (request, response) => {
+  const auth = getAuth(request);
+  const coupons = state.compensationCoupons
+    .filter((coupon) => canAccessRecord(coupon, auth))
+    .map(refreshCouponExpiry)
+    .map(compensationCouponForClient);
+  await persistRuntimeState("compensation_coupon_expiry_refresh");
+  response.json({ ok: true, coupons, total: coupons.length });
+});
+
+app.get("/api/ceo/errors", (request, response) => {
+  const auth = getAuth(request);
+  if (!isOwnerAuth(auth)) {
+    response.status(403).json(authFailurePayload("forbidden"));
+    return;
+  }
+  const requestedLimit = Number.parseInt(request.query.limit, 10);
+  const limit = Number.isFinite(requestedLimit) ? Math.min(500, Math.max(1, requestedLimit)) : 100;
+  const incidents = state.errorIncidents
+    .filter((incident) => matchesIncidentFilter(incident, request.query))
+    .slice(0, limit)
+    .map(incidentForCeo);
+  const summary = state.errorIncidents.reduce((counts, incident) => {
+    counts.total += 1;
+    counts.status[incident.status] = (counts.status[incident.status] || 0) + 1;
+    counts.category[incident.category] = (counts.category[incident.category] || 0) + 1;
+    return counts;
+  }, { total: 0, status: {}, category: {} });
+  response.json({ ok: true, incidents, total: incidents.length, summary });
+});
+
+app.get("/api/ceo/errors/:incidentId", (request, response) => {
+  const auth = getAuth(request);
+  if (!isOwnerAuth(auth)) {
+    response.status(403).json(authFailurePayload("forbidden"));
+    return;
+  }
+  const incident = incidentForId(request.params.incidentId);
+  if (!incident) {
+    response.status(404).json({ ok: false, code: "incident_not_found", error: "Incident not found." });
+    return;
+  }
+  response.json({ ok: true, incident: incidentForCeo(incident) });
+});
+
+app.patch("/api/ceo/errors/:incidentId", async (request, response) => {
+  const auth = getAuth(request);
+  if (!isOwnerAuth(auth)) {
+    response.status(403).json(authFailurePayload("forbidden"));
+    return;
+  }
+  const incident = incidentForId(request.params.incidentId);
+  if (!incident) {
+    response.status(404).json({ ok: false, code: "incident_not_found", error: "Incident not found." });
+    return;
+  }
+  const status = String(request.body?.status || "").trim().toUpperCase();
+  if (!["OPEN", "INVESTIGATING", "RESOLVED", "IGNORED"].includes(status)) {
+    response.status(400).json({ ok: false, code: "invalid_incident_status", error: "Invalid incident status." });
+    return;
+  }
+  incident.status = status;
+  incident.updatedAt = new Date().toISOString();
+  incident.resolvedAt = status === "RESOLVED" ? incident.updatedAt : null;
+  incident.metadata = {
+    ...(incident.metadata || {}),
+    ceoNote: sanitizeDiagnosticText(request.body?.note || incident.metadata?.ceoNote || "", { maxLength: 1000 })
+  };
+  await persistRuntimeState(`incident_status:${incident.incidentId}:${status}`);
+  response.json({ ok: true, incident: incidentForCeo(incident), message: `Incident marked ${status}.` });
+});
+
+app.post("/api/ceo/providers/refresh", async (request, response) => {
+  const auth = getAuth(request);
+  if (!isOwnerAuth(auth)) {
+    response.status(403).json(authFailurePayload("forbidden"));
+    return;
+  }
+  const requested = String(request.body?.provider || "all").trim();
+  const providers = requested.toLowerCase() === "all" ? ["Runway", "Replicate"] : [requested];
+  const diagnostics = [];
+  for (const provider of providers) {
+    diagnostics.push(await refreshProviderDiagnostic(provider));
+  }
+  await persistRuntimeState("provider_diagnostics_refresh");
+  response.json({
+    ok: true,
+    diagnostics: diagnostics.map((diagnostic) => ({
+      provider: diagnostic.provider,
+      status: diagnostic.status,
+      errorName: diagnostic.errorName,
+      errorCode: diagnostic.errorCode,
+      customerMessage: diagnostic.customerMessage,
+      checkedAt: diagnostic.checkedAt
+    }))
+  });
 });
 
 app.get("/api/ceo/provider-credits", async (request, response) => {
@@ -6659,13 +10002,15 @@ app.get("/api/projects", (request, response) => {
 
 app.post("/api/projects", (request, response) => {
   const auth = getAuth(request);
+  const tenantId = requestIdentity(request, auth);
   const project = {
     id: requestId("project"),
-    tenantId: auth.userId,
+    tenantId,
+    userId: auth.userId || null,
     title: request.body?.title || "Untitled project",
     kind: request.body?.kind || "studio",
     status: "saved",
-    thumbnail: request.body?.thumbnail || "local-placeholder://project-thumbnail",
+    thumbnail: request.body?.thumbnail || null,
     versions: [{ id: requestId("version"), label: "Autosave", createdAt: new Date().toISOString() }],
     exports: request.body?.exports || [],
     createdAt: new Date().toISOString(),
@@ -6674,15 +10019,55 @@ app.post("/api/projects", (request, response) => {
   state.projects.unshift(project);
   saveHistory({
     id: requestId("history"),
-    tenantId: auth.userId,
+    tenantId,
     kind: project.kind,
     title: project.title,
-    provider: "project storage mock",
-    status: "mock",
-    message: `${mockModeMessage} Project saved in local/mock storage.`,
+    provider: "SLT Project Manager",
+    status: "saved",
+    message: "Project saved in the active SLT data store.",
     createdAt: project.createdAt
   });
-  response.json({ ok: true, auth, project, mock: true, message: `${mockModeMessage} Project saved in local/mock storage.` });
+  response.json({ ok: true, auth, project, message: "Project saved." });
+});
+
+app.get("/api/projects/:projectId", (request, response) => {
+  const auth = getAuth(request);
+  const project = state.projects.find((item) => item.id === request.params.projectId);
+  if (!project || !canAccessRecord(project, auth)) {
+    response.status(404).json({ ok: false, code: "project_not_found", error: "Project not found." });
+    return;
+  }
+  const sessions = filterRecordsForAuth(state.generationSessions, auth).filter((item) => item.projectId === project.id);
+  const jobs = filterRecordsForAuth(state.jobs, auth).filter((item) => item.projectId === project.id);
+  const assets = filterRecordsForAuth(state.assets, auth).filter((item) => item.projectId === project.id && !item.deletedAt).map(serializeAssetForClient);
+  const scenes = filterRecordsForAuth(state.scenes, auth).filter((item) => item.projectId === project.id);
+  response.json({ ok: true, auth, project, sessions, jobs, assets, scenes });
+});
+
+app.patch("/api/projects/:projectId", (request, response) => {
+  const auth = getAuth(request);
+  const project = state.projects.find((item) => item.id === request.params.projectId);
+  if (!project || !canAccessRecord(project, auth)) {
+    response.status(404).json({ ok: false, code: "project_not_found", error: "Project not found." });
+    return;
+  }
+  if (typeof request.body?.title === "string" && request.body.title.trim()) project.title = request.body.title.trim().slice(0, 180);
+  if (typeof request.body?.kind === "string" && request.body.kind.trim()) project.kind = request.body.kind.trim().slice(0, 80);
+  if (["ACTIVE", "SAVED", "ARCHIVED"].includes(String(request.body?.status || "").toUpperCase())) project.status = String(request.body.status).toLowerCase();
+  project.updatedAt = new Date().toISOString();
+  response.json({ ok: true, auth, project });
+});
+
+app.delete("/api/projects/:projectId", (request, response) => {
+  const auth = getAuth(request);
+  const project = state.projects.find((item) => item.id === request.params.projectId);
+  if (!project || !canAccessRecord(project, auth)) {
+    response.status(404).json({ ok: false, code: "project_not_found", error: "Project not found." });
+    return;
+  }
+  project.status = "archived";
+  project.updatedAt = new Date().toISOString();
+  response.json({ ok: true, auth, project, message: "Project archived without deleting its history or assets." });
 });
 
 app.get("/api/history", (request, response) => {
@@ -6717,10 +10102,12 @@ app.get("/api/stripe/status", (request, response) => {
 });
 
 app.get("/api/credits/packs", (request, response) => {
+  const auth = getAuth(request);
+  const tenantId = requestIdentity(request, auth);
   response.json({
     ok: true,
-    auth: getAuth(request),
-    balance: state.subscription.credits,
+    auth,
+    balance: ledgerSnapshot(tenantId).availableCredits,
     packs: stripeCreditPackStatus()
   });
 });
@@ -6778,12 +10165,26 @@ async function handleSubscriptionCheckout(request, response) {
 
   try {
     const customer = currentStripeCustomerId();
+    const auth = getAuth(request);
+    const tenantId = requestIdentity(request, auth);
+    const requestedCompensationCode = String(request.body?.compensationCode || "").trim();
+    const compensationCoupon = requestedCompensationCode
+      ? compensationCouponForCheckout(requestedCompensationCode, tenantId, auth.userId)
+      : null;
+    if (requestedCompensationCode && !compensationCoupon) {
+      response.status(400).json({ ok: false, code: "compensation_coupon_invalid", error: "This compensation coupon is invalid, expired, redeemed or belongs to another user." });
+      return;
+    }
+    if (compensationCoupon && !compensationCoupon.promotionCodeId) {
+      await syncCompensationCouponWithStripe(compensationCoupon);
+    }
     const session = await stripeRequest("/v1/checkout/sessions", {
       mode: "subscription",
       success_url: stripeReturnUrl("success"),
       cancel_url: stripeReturnUrl("cancel"),
       line_items: [{ price: priceId, quantity: 1 }],
-      allow_promotion_codes: true,
+      allow_promotion_codes: !compensationCoupon?.promotionCodeId,
+      discounts: compensationCoupon?.promotionCodeId ? [{ promotion_code: compensationCoupon.promotionCodeId }] : undefined,
       billing_address_collection: "auto",
       automatic_tax: { enabled: stripeAutomaticTaxEnabled() },
       customer: customer || undefined,
@@ -6792,7 +10193,9 @@ async function handleSubscriptionCheckout(request, response) {
         plan,
         interval,
         credits: creditsForPlan(plan),
-        userId: requestIdentity(request, getAuth(request)),
+        tenantId,
+        userId: auth.userId || tenantId,
+        compensationCode: compensationCoupon?.code || "",
         source: "sweet-little-trauma-studio"
       }
     });
@@ -6865,12 +10268,26 @@ async function handleCreditPackCheckout(request, response) {
 
   try {
     const customer = currentStripeCustomerId();
+    const auth = getAuth(request);
+    const tenantId = requestIdentity(request, auth);
+    const requestedCompensationCode = String(request.body?.compensationCode || "").trim();
+    const compensationCoupon = requestedCompensationCode
+      ? compensationCouponForCheckout(requestedCompensationCode, tenantId, auth.userId)
+      : null;
+    if (requestedCompensationCode && !compensationCoupon) {
+      response.status(400).json({ ok: false, code: "compensation_coupon_invalid", error: "This compensation coupon is invalid, expired, redeemed or belongs to another user." });
+      return;
+    }
+    if (compensationCoupon && !compensationCoupon.promotionCodeId) {
+      await syncCompensationCouponWithStripe(compensationCoupon);
+    }
     const session = await stripeRequest("/v1/checkout/sessions", {
       mode: "payment",
       success_url: stripeReturnUrl("success"),
       cancel_url: stripeReturnUrl("cancel"),
       line_items: [{ price: priceId, quantity: 1 }],
-      allow_promotion_codes: true,
+      allow_promotion_codes: !compensationCoupon?.promotionCodeId,
+      discounts: compensationCoupon?.promotionCodeId ? [{ promotion_code: compensationCoupon.promotionCodeId }] : undefined,
       billing_address_collection: "auto",
       automatic_tax: { enabled: stripeAutomaticTaxEnabled() },
       customer: customer || undefined,
@@ -6879,7 +10296,9 @@ async function handleCreditPackCheckout(request, response) {
         type: "credit_pack",
         creditPackId: pack.id,
         credits: pack.credits,
-        userId: requestIdentity(request, getAuth(request)),
+        tenantId,
+        userId: auth.userId || tenantId,
+        compensationCode: compensationCoupon?.code || "",
         source: "sweet-little-trauma-studio"
       }
     });
@@ -7003,16 +10422,12 @@ app.post("/api/billing", (request, response) => {
   response.json({ ok: true, auth: getAuth(request), billing: state.billing, message: "Payment method saved." });
 });
 
-app.get("/api/ledger", (request, response) => {
+app.get("/api/ledger", async (request, response) => {
   const auth = getAuth(request);
-  if (!isOwnerAuth(auth) && state.wallet.tenantId && state.wallet.tenantId !== auth.userId) {
-    response.status(403).json({
-      ok: false,
-      code: "tenant_wallet_forbidden",
-      error: "Forbidden.",
-      readableError: "This wallet does not belong to your session."
-    });
-    return;
+  const tenantId = auth.tenantId || auth.userId;
+  if (runtimeStore.durable && typeof runtimeStore.getWallet === "function") {
+    const durableWallet = await runtimeStore.getWallet(tenantId);
+    if (durableWallet) mirrorLedgerResult({ wallet: durableWallet });
   }
   const reservations = filterRecordsForAuth(state.creditReservations, auth);
   const transactions = filterRecordsForAuth(state.creditTransactions, auth);
@@ -7020,7 +10435,7 @@ app.get("/api/ledger", (request, response) => {
   response.json({
     ok: true,
     auth,
-    wallet: ledgerSnapshot(),
+    wallet: ledgerSnapshot(tenantId),
     jobCount: filterRecordsForAuth(state.jobs, auth).length,
     reservations: reservations.slice(0, 20),
     transactions: transactions.slice(0, 50),
@@ -7029,15 +10444,451 @@ app.get("/api/ledger", (request, response) => {
   });
 });
 
+const characterCapturePlan = [
+  {
+    stage: "consent",
+    label: "Identity and consent",
+    recommended: 1,
+    instructions: ["Confirm the subject identity", "Grant explicit likeness, voice and training consent", "Choose revocation and commercial-use scope"]
+  },
+  {
+    stage: "face_angles",
+    label: "Face geometry",
+    recommended: 24,
+    instructions: ["Front", "Left and right profile", "Three-quarter left and right", "High and low angles", "Neutral light and hard light"]
+  },
+  {
+    stage: "expressions",
+    label: "Expressions",
+    recommended: 24,
+    instructions: ["Neutral", "Smile", "Laugh", "Cry", "Shout", "Anger", "Fear", "Surprise", "Disgust", "Eyes closed"]
+  },
+  {
+    stage: "body",
+    label: "Body and wardrobe",
+    recommended: 12,
+    instructions: ["Full body front, side and back", "Sitting and standing", "Natural wardrobe variations", "Hands visible"]
+  },
+  {
+    stage: "performance_video",
+    label: "Motion performance",
+    recommended: 6,
+    instructions: ["Walk and turn", "Sit and stand", "Gesture naturally", "Speak to camera", "Fast movement", "Slow controlled movement"]
+  },
+  {
+    stage: "voice",
+    label: "Voice calibration",
+    recommended: 8,
+    instructions: ["Alphabet and numbers", "Calibration phrase", "Neutral narration", "Whisper", "Shout", "Laugh", "Cry", "Anger and fear"]
+  }
+];
+
+function findOwnedCharacter(characterId, auth) {
+  const character = state.characters.find((item) => item.id === characterId);
+  if (!character) return null;
+  assertTenantAccess(character, auth);
+  return character;
+}
+
+function ensureCharacterCreativeAsset(character) {
+  if (!character) return null;
+  const existing = state.assets.find((asset) => asset.metadata?.characterId === character.id && asset.kind === "character");
+  if (existing) {
+    character.metadata = { ...(character.metadata || {}), creativeAssetId: existing.id };
+    return existing;
+  }
+  const now = new Date().toISOString();
+  const asset = {
+    id: requestId("asset"),
+    tenantId: character.tenantId,
+    userId: character.userId || null,
+    jobId: null,
+    batchId: null,
+    projectId: null,
+    sessionId: null,
+    parentAssetId: null,
+    kind: "character",
+    provider: "SLT Character Lab",
+    role: "character",
+    originalName: character.name,
+    originalUrl: null,
+    publicUrl: `/api/characters/${encodeURIComponent(character.id)}`,
+    storageKey: null,
+    storageProvider: "postgres",
+    storagePath: null,
+    contentType: "application/vnd.slt.character+json",
+    bytes: 0,
+    status: "ready",
+    metadata: { characterId: character.id, creativeAsset: true },
+    createdAt: now
+  };
+  state.assets.unshift(asset);
+  character.metadata = { ...(character.metadata || {}), creativeAssetId: asset.id };
+  character.updatedAt = now;
+  return asset;
+}
+
+function characterDatasetSummary(characterId, auth) {
+  const character = findOwnedCharacter(characterId, auth);
+  if (!character) return null;
+  const links = state.characterAssets.filter((item) => item.characterId === characterId && canAccessRecord(item, auth));
+  const linkedAssets = links
+    .map((link) => ({ link, asset: state.assets.find((asset) => asset.id === link.assetId) || null }))
+    .filter((item) => item.asset);
+  const consents = state.characterConsents
+    .filter((item) => item.characterId === characterId && canAccessRecord(item, auth))
+    .sort((left, right) => new Date(right.createdAt || 0).getTime() - new Date(left.createdAt || 0).getTime());
+  const counts = linkedAssets.reduce((result, { link, asset }) => {
+    const media = String(asset.contentType || "").split("/")[0] || "other";
+    result.total += 1;
+    result[media] = (result[media] || 0) + 1;
+    result.categories[link.category] = (result.categories[link.category] || 0) + 1;
+    if (link.angle) result.angles.add(link.angle);
+    if (link.expression) result.expressions.add(link.expression);
+    return result;
+  }, { total: 0, image: 0, video: 0, audio: 0, other: 0, categories: {}, angles: new Set(), expressions: new Set() });
+  const consentGranted = consents[0]?.status === "granted";
+  const requirements = {
+    consent: consentGranted,
+    images: { current: counts.image, recommended: 50, complete: counts.image >= 50 },
+    videos: { current: counts.video, recommended: 6, complete: counts.video >= 6 },
+    voice: { current: counts.audio, recommended: 8, complete: counts.audio >= 8 },
+    angles: { current: counts.angles.size, recommended: 8, complete: counts.angles.size >= 8 },
+    expressions: { current: counts.expressions.size, recommended: 8, complete: counts.expressions.size >= 8 }
+  };
+  const ready = consentGranted && Object.values(requirements).filter((value) => typeof value === "object").every((value) => value.complete);
+  return {
+    character,
+    consentGranted,
+    consents,
+    assets: linkedAssets,
+    counts: { ...counts, angles: [...counts.angles], expressions: [...counts.expressions] },
+    requirements,
+    ready,
+    capturePlan: characterCapturePlan,
+    versions: state.characterVersions
+      .filter((item) => item.characterId === characterId && canAccessRecord(item, auth))
+      .sort((left, right) => Number(right.version || 0) - Number(left.version || 0)),
+    previewAsset: linkedAssets.find(({ asset }) => asset.id === character.primaryAssetId)?.asset
+      || linkedAssets.find(({ asset }) => String(asset.contentType || "").startsWith("image/"))?.asset
+      || null
+  };
+}
+
+app.get("/api/characters", (request, response) => {
+  const auth = getAuth(request);
+  const characters = filterRecordsForAuth(state.characters, auth).map((character) => {
+    const creativeAsset = ensureCharacterCreativeAsset(character);
+    const summary = characterDatasetSummary(character.id, auth);
+    return {
+      ...character,
+      readiness: summary?.requirements || null,
+      ready: Boolean(summary?.ready),
+      consentGranted: Boolean(summary?.consentGranted),
+      assetCount: Number(summary?.counts?.total || 0),
+      creativeAssetId: creativeAsset?.id || null,
+      previewAsset: summary?.previewAsset ? serializeAssetForClient(summary.previewAsset) : null
+    };
+  });
+  response.json({ ok: true, auth, characters, capturePlan: characterCapturePlan });
+});
+
+app.post("/api/characters", (request, response) => {
+  const auth = getAuth(request);
+  const name = String(request.body?.name || "").trim();
+  if (name.length < 2 || name.length > 120) {
+    response.status(400).json({ ok: false, code: "character_name_invalid", error: "Character name must contain 2 to 120 characters." });
+    return;
+  }
+  const now = new Date().toISOString();
+  const tenantId = requestIdentity(request, auth);
+  const baseSlug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "character";
+  const character = {
+    id: requestId("character"),
+    tenantId,
+    userId: auth.userId || null,
+    name,
+    slug: `${baseSlug}-${Date.now().toString(36)}`,
+    description: String(request.body?.description || "").trim(),
+    status: "draft",
+    datasetStatus: "collecting",
+    primaryAssetId: null,
+    trainingProvider: null,
+    providerModelId: null,
+    metadata: { source: "character_lab", unlimitedDatasetIntake: true },
+    createdAt: now,
+    updatedAt: now
+  };
+  state.characters.unshift(character);
+  const creativeAsset = ensureCharacterCreativeAsset(character);
+  response.status(201).json({ ok: true, auth, character, creativeAsset: serializeAssetForClient(creativeAsset), capturePlan: characterCapturePlan });
+});
+
+app.get("/api/characters/:characterId", (request, response) => {
+  const auth = getAuth(request);
+  try {
+    const summary = characterDatasetSummary(request.params.characterId, auth);
+    if (!summary) {
+      response.status(404).json({ ok: false, code: "character_not_found", error: "Character not found." });
+      return;
+    }
+    response.json({ ok: true, auth, ...summary });
+  } catch (error) {
+    response.status(error.statusCode || 500).json({ ok: false, code: error.code || "character_read_failed", error: error.message });
+  }
+});
+
+app.get("/api/characters/:characterId/use", (request, response) => {
+  const auth = getAuth(request);
+  try {
+    const summary = characterDatasetSummary(request.params.characterId, auth);
+    if (!summary) {
+      response.status(404).json({ ok: false, code: "character_not_found", error: "Character not found." });
+      return;
+    }
+    if (!summary.consentGranted) {
+      response.status(409).json({ ok: false, code: "character_consent_required", error: "Current character consent is required." });
+      return;
+    }
+    const prepared = prepareCharacterReferences({ payload: { characterIds: [summary.character.id] }, auth });
+    response.json({
+      ok: true,
+      auth,
+      character: summary.character,
+      ready: summary.ready,
+      referenceAssetIds: prepared.referenceAssetIds,
+      references: prepared.characterReferences,
+      previewAsset: summary.previewAsset ? serializeAssetForClient(summary.previewAsset) : null
+    });
+  } catch (error) {
+    response.status(error.statusCode || 500).json({ ok: false, code: error.code || "character_use_failed", error: error.message });
+  }
+});
+
+app.patch("/api/characters/:characterId", (request, response) => {
+  const auth = getAuth(request);
+  try {
+    const character = findOwnedCharacter(request.params.characterId, auth);
+    if (!character) {
+      response.status(404).json({ ok: false, code: "character_not_found", error: "Character not found." });
+      return;
+    }
+    if (typeof request.body?.name === "string" && request.body.name.trim()) character.name = request.body.name.trim().slice(0, 120);
+    if (typeof request.body?.description === "string") character.description = request.body.description.trim().slice(0, 2000);
+    if (request.body?.primaryAssetId) {
+      const asset = findOwnedAsset(request.body.primaryAssetId, auth);
+      if (!asset) throw Object.assign(new Error("Primary asset not found."), { statusCode: 404, code: "asset_not_found" });
+      character.primaryAssetId = asset.id;
+    }
+    character.updatedAt = new Date().toISOString();
+    response.json({ ok: true, auth, character });
+  } catch (error) {
+    response.status(error.statusCode || 500).json({ ok: false, code: error.code || "character_update_failed", error: error.message });
+  }
+});
+
+app.post("/api/characters/:characterId/consent", (request, response) => {
+  const auth = getAuth(request);
+  try {
+    const character = findOwnedCharacter(request.params.characterId, auth);
+    if (!character) {
+      response.status(404).json({ ok: false, code: "character_not_found", error: "Character not found." });
+      return;
+    }
+    const status = String(request.body?.status || "granted").toLowerCase();
+    if (!["granted", "revoked"].includes(status)) {
+      response.status(400).json({ ok: false, code: "consent_status_invalid", error: "Consent status must be granted or revoked." });
+      return;
+    }
+    const now = new Date().toISOString();
+    const consent = {
+      id: requestId("character_consent"),
+      characterId: character.id,
+      tenantId: character.tenantId,
+      subjectUserId: auth.userId || null,
+      subjectName: String(request.body?.subjectName || character.name).trim().slice(0, 160),
+      status,
+      scope: {
+        likeness: request.body?.scope?.likeness !== false,
+        voice: request.body?.scope?.voice !== false,
+        training: request.body?.scope?.training !== false,
+        commercialUse: Boolean(request.body?.scope?.commercialUse),
+        expiresAt: request.body?.scope?.expiresAt || null
+      },
+      evidenceAssetId: request.body?.evidenceAssetId || null,
+      signedAt: status === "granted" ? now : null,
+      revokedAt: status === "revoked" ? now : null,
+      metadata: { capturedBy: auth.userId || null },
+      createdAt: now,
+      updatedAt: now
+    };
+    state.characterConsents.unshift(consent);
+    character.updatedAt = now;
+    response.status(201).json({ ok: true, auth, consent });
+  } catch (error) {
+    response.status(error.statusCode || 500).json({ ok: false, code: error.code || "character_consent_failed", error: error.message });
+  }
+});
+
+app.post("/api/characters/:characterId/assets", (request, response) => {
+  const auth = getAuth(request);
+  try {
+    const summary = characterDatasetSummary(request.params.characterId, auth);
+    if (!summary) {
+      response.status(404).json({ ok: false, code: "character_not_found", error: "Character not found." });
+      return;
+    }
+    if (!summary.consentGranted) {
+      response.status(409).json({ ok: false, code: "character_consent_required", error: "Grant explicit subject consent before adding biometric assets." });
+      return;
+    }
+    const asset = findOwnedAsset(request.body?.assetId, auth);
+    if (!asset) {
+      response.status(404).json({ ok: false, code: "asset_not_found", error: "Asset not found." });
+      return;
+    }
+    const existing = state.characterAssets.find((item) => item.characterId === summary.character.id && item.assetId === asset.id);
+    if (existing) {
+      response.json({ ok: true, auth, characterAsset: existing, duplicate: true, summary });
+      return;
+    }
+    const link = {
+      id: requestId("character_asset"),
+      characterId: summary.character.id,
+      assetId: asset.id,
+      tenantId: summary.character.tenantId,
+      category: String(request.body?.category || "identity_photo").slice(0, 80),
+      angle: String(request.body?.angle || "").slice(0, 80) || null,
+      expression: String(request.body?.expression || "").slice(0, 80) || null,
+      captureStage: String(request.body?.captureStage || "identity").slice(0, 80),
+      qualityStatus: "pending",
+      consentScope: "character_training",
+      metadata: { originalName: asset.originalName || null },
+      createdAt: new Date().toISOString()
+    };
+    state.characterAssets.unshift(link);
+    summary.character.updatedAt = new Date().toISOString();
+    response.status(201).json({ ok: true, auth, characterAsset: link, summary: characterDatasetSummary(summary.character.id, auth) });
+  } catch (error) {
+    response.status(error.statusCode || 500).json({ ok: false, code: error.code || "character_asset_failed", error: error.message });
+  }
+});
+
+app.post("/api/characters/:characterId/versions", (request, response) => {
+  const auth = getAuth(request);
+  try {
+    const summary = characterDatasetSummary(request.params.characterId, auth);
+    if (!summary) {
+      response.status(404).json({ ok: false, code: "character_not_found", error: "Character not found." });
+      return;
+    }
+    if (!summary.consentGranted) {
+      response.status(409).json({ ok: false, code: "character_consent_required", error: "Consent is required before creating a dataset version." });
+      return;
+    }
+    const nextVersion = Math.max(0, ...summary.versions.map((item) => Number(item.version || 0))) + 1;
+    const now = new Date().toISOString();
+    const version = {
+      id: requestId("character_version"),
+      characterId: summary.character.id,
+      tenantId: summary.character.tenantId,
+      version: nextVersion,
+      status: summary.ready ? "dataset_ready" : "collecting",
+      provider: null,
+      providerModelId: null,
+      datasetSnapshot: {
+        assetIds: summary.assets.map((item) => item.asset.id),
+        counts: summary.counts,
+        requirements: summary.requirements,
+        consentIds: summary.consents.filter((item) => item.status === "granted").map((item) => item.id)
+      },
+      metadata: { providerTrainingStarted: false },
+      createdAt: now,
+      updatedAt: now
+    };
+    state.characterVersions.unshift(version);
+    summary.character.datasetStatus = version.status;
+    summary.character.updatedAt = now;
+    response.status(201).json({ ok: true, auth, version, ready: summary.ready });
+  } catch (error) {
+    response.status(error.statusCode || 500).json({ ok: false, code: error.code || "character_version_failed", error: error.message });
+  }
+});
+
 app.get("/api/assets", (request, response) => {
   const auth = getAuth(request);
+  const kind = String(request.query.kind || "").trim().toLowerCase();
+  const projectId = String(request.query.projectId || "").trim();
+  const sessionId = String(request.query.sessionId || "").trim();
   response.json({
     ok: true,
     auth,
     cdnBaseUrl: storagePublicBaseUrl(request),
     storageProvider: process.env.STORAGE_PROVIDER || "local",
-    assets: filterRecordsForAuth(state.assets, auth).slice(0, 100).map(serializeAssetForClient)
+    assets: filterRecordsForAuth(state.assets, auth)
+      .filter((asset) => !asset.deletedAt)
+      .filter((asset) => !kind || String(asset.kind || "").toLowerCase() === kind)
+      .filter((asset) => !projectId || asset.projectId === projectId)
+      .filter((asset) => !sessionId || asset.sessionId === sessionId)
+      .slice(0, 500)
+      .map(serializeAssetForClient)
   });
+});
+
+app.get("/api/assets/:assetId", (request, response) => {
+  const auth = getAuth(request);
+  const asset = findOwnedAsset(request.params.assetId, auth);
+  if (!asset || asset.deletedAt) {
+    response.status(404).json({ ok: false, code: "asset_not_found", error: "Asset not found." });
+    return;
+  }
+  const rootId = asset.parentAssetId || asset.id;
+  const versions = filterRecordsForAuth(state.assets, auth)
+    .filter((item) => !item.deletedAt && (item.id === rootId || item.parentAssetId === rootId))
+    .sort((left, right) => Number(left.version || 1) - Number(right.version || 1))
+    .map(serializeAssetForClient);
+  response.json({ ok: true, auth, asset: serializeAssetForClient(asset), versions });
+});
+
+app.patch("/api/assets/:assetId", (request, response) => {
+  const auth = getAuth(request);
+  const asset = findOwnedAsset(request.params.assetId, auth);
+  if (!asset || asset.deletedAt) {
+    response.status(404).json({ ok: false, code: "asset_not_found", error: "Asset not found." });
+    return;
+  }
+  if (typeof request.body?.displayName === "string" && request.body.displayName.trim()) asset.displayName = request.body.displayName.trim().slice(0, 180);
+  if (request.body?.projectId !== undefined) asset.projectId = request.body.projectId || null;
+  if (request.body?.sessionId !== undefined) asset.sessionId = request.body.sessionId || null;
+  if (typeof request.body?.role === "string") asset.role = request.body.role.trim().slice(0, 80);
+  asset.metadata = { ...(asset.metadata || {}), ...(request.body?.metadata && typeof request.body.metadata === "object" ? request.body.metadata : {}) };
+  response.json({ ok: true, auth, asset: serializeAssetForClient(asset) });
+});
+
+app.get(["/api/versions", "/api/assets/:assetId/versions"], (request, response) => {
+  const auth = getAuth(request);
+  const requestedAssetId = request.params.assetId || String(request.query.assetId || "").trim();
+  let assets = filterRecordsForAuth(state.assets, auth).filter((item) => !item.deletedAt);
+  if (requestedAssetId) {
+    const selected = assets.find((item) => item.id === requestedAssetId);
+    if (!selected) {
+      response.status(404).json({ ok: false, code: "asset_not_found", error: "Asset not found." });
+      return;
+    }
+    const rootId = selected.parentAssetId || selected.id;
+    assets = assets.filter((item) => item.id === rootId || item.parentAssetId === rootId);
+  }
+  const groups = new Map();
+  for (const asset of assets) {
+    const rootId = asset.parentAssetId || asset.id;
+    if (!groups.has(rootId)) groups.set(rootId, []);
+    groups.get(rootId).push(serializeAssetForClient(asset));
+  }
+  const lineages = [...groups.entries()].map(([rootAssetId, versions]) => ({
+    rootAssetId,
+    versions: versions.sort((left, right) => Number(left.version || 1) - Number(right.version || 1))
+  }));
+  response.json({ ok: true, auth, lineages, total: lineages.length });
 });
 
 app.post(["/api/assets/upload", "/api/uploads/reference"], async (request, response) => {
@@ -7059,6 +10910,253 @@ app.post(["/api/assets/upload", "/api/uploads/reference"], async (request, respo
       error: error.message,
       readableError: error.message
     });
+  }
+});
+
+app.post("/api/uploads/signed", async (request, response) => {
+  const auth = getAuth(request);
+  try {
+    const payload = {
+      kind: request.body?.kind,
+      module: request.body?.module,
+      role: request.body?.role,
+      projectId: request.body?.projectId || null,
+      sessionId: request.body?.sessionId || null,
+      note: request.body?.note || "",
+      fileName: request.body?.fileName || "upload.bin",
+      contentType: String(request.body?.contentType || "application/octet-stream").split(";")[0].trim().toLowerCase(),
+      bytes: Number(request.body?.bytes || 0),
+      durationSeconds: request.body?.durationSeconds || null
+    };
+    const uploadKind = normalizeUploadKind(payload.kind || payload.module);
+    validateDeclaredUpload({ uploadKind, contentType: payload.contentType, bytes: payload.bytes || null });
+    if (!payload.bytes) {
+      const error = new Error("File size is required before upload.");
+      error.code = "upload_size_required";
+      error.statusCode = 400;
+      throw error;
+    }
+    if (!supabaseStorage.configured || process.env.SLT_TEST_MODE === "1") {
+      response.json({
+        ok: true,
+        mode: "stream",
+        uploadUrl: "/api/assets/upload-binary",
+        maxBytes: maxUploadBytesFor(uploadKind),
+        requiresCompletion: false
+      });
+      return;
+    }
+    const tenantId = requestIdentity(request, auth);
+    const extension = extensionFromContentType(payload.contentType, payload.fileName);
+    const storageKey = `${safeStorageSegment(tenantId)}/${new Date().toISOString().slice(0, 10)}/upload_${requestId("asset")}.${extension}`;
+    const signed = await supabaseStorage.createSignedUpload({ key: storageKey, upsert: false });
+    response.json({
+      ok: true,
+      mode: "signed",
+      provider: signed.provider,
+      storageKey: signed.storageKey,
+      signedUrl: signed.signedUrl,
+      token: signed.token,
+      completeUrl: "/api/uploads/complete",
+      expiresInSeconds: 7200,
+      metadata: payload
+    });
+  } catch (error) {
+    response.status(error.statusCode || 400).json({
+      ok: false,
+      auth,
+      code: error.code || "upload_failed",
+      error: error.message,
+      readableError: error.message
+    });
+  }
+});
+
+app.post("/api/uploads/complete", async (request, response) => {
+  const auth = getAuth(request);
+  const payload = request.body?.metadata || request.body || {};
+  const storageKey = String(request.body?.storageKey || payload.storageKey || "").replace(/^\/+/, "");
+  const tenantId = requestIdentity(request, auth);
+  const tenantPrefix = `${safeStorageSegment(tenantId)}/`;
+  let tempPath = "";
+  try {
+    if (!supabaseStorage.configured) {
+      const error = new Error("Signed upload completion requires Supabase Storage.");
+      error.code = "signed_upload_not_configured";
+      error.statusCode = 409;
+      throw error;
+    }
+    if (!storageKey || !storageKey.startsWith(tenantPrefix)) {
+      const error = new Error("The uploaded object does not belong to this tenant.");
+      error.code = "upload_storage_key_forbidden";
+      error.statusCode = 403;
+      throw error;
+    }
+    const existing = state.assets.find((asset) => asset.tenantId === tenantId && asset.storageKey === storageKey);
+    if (existing) {
+      response.json({ ok: true, asset: serializeAssetForClient(existing), idempotent: true });
+      return;
+    }
+    const uploadKind = normalizeUploadKind(payload.kind || payload.module);
+    const declaredContentType = String(payload.contentType || "application/octet-stream").split(";")[0].trim().toLowerCase();
+    const { accepted, maxBytes } = validateDeclaredUpload({ uploadKind, contentType: declaredContentType, bytes: Number(payload.bytes || 0) || null });
+    const signedDownload = await supabaseStorage.createSignedDownload({ key: storageKey, expiresIn: 180 });
+    tempPath = await temporaryUploadPath(uploadKind, extensionFromContentType(declaredContentType, payload.fileName));
+    await downloadUrlToFile(signedDownload.signedUrl, tempPath, { maxBytes });
+    const validation = await validateMediaFile({
+      filePath: tempPath,
+      declaredMime: declaredContentType,
+      kind: uploadKind,
+      maxBytes,
+      probeLimits: {
+        maxDuration: envNumber("MAX_VIDEO_DURATION_SECONDS", 3600),
+        maxWidth: envNumber("MAX_VIDEO_WIDTH", 8192),
+        maxHeight: envNumber("MAX_VIDEO_HEIGHT", 8192),
+        maxFps: envNumber("MAX_VIDEO_FPS", 120)
+      }
+    });
+    if (!accepted.includes(validation.detectedMime) && !(validation.detectedMime === "video/webm" && accepted.includes("audio/webm"))) {
+      const error = new Error(`Detected media type ${validation.detectedMime} is not accepted for ${uploadKind}.`);
+      error.code = "upload_invalid_mime";
+      error.statusCode = 400;
+      throw error;
+    }
+    const publicUrl = process.env.STORAGE_PUBLIC_BASE_URL
+      ? `${String(process.env.STORAGE_PUBLIC_BASE_URL).replace(/\/$/, "")}/${storageKey}`
+      : supabaseStorage.publicUrl(storageKey);
+    const asset = registerUploadedAsset({
+      request,
+      auth,
+      payload,
+      uploadKind,
+      contentType: declaredContentType,
+      detectedContentType: validation.detectedMime,
+      bytes: validation.bytes,
+      stored: { provider: "supabase", storageKey, publicUrl },
+      media: validation.media
+    });
+    await rm(tempPath, { force: true });
+    tempPath = "";
+    response.status(201).json({ ok: true, auth, asset: serializeAssetForClient(asset), message: "Signed upload validated and registered." });
+  } catch (error) {
+    if (tempPath) await rm(tempPath, { force: true }).catch(() => {});
+    if (storageKey && storageKey.startsWith(tenantPrefix)) await supabaseStorage.remove(storageKey).catch(() => {});
+    response.status(error.statusCode || 400).json({
+      ok: false,
+      auth,
+      code: error.code || "upload_completion_failed",
+      error: error.message,
+      readableError: error.message,
+      details: error.details || null
+    });
+  }
+});
+
+app.post("/api/assets/:assetId/extract-frame", async (request, response) => {
+  const auth = getAuth(request);
+  let temporarySourcePath = "";
+  let outputPath = "";
+  try {
+    const sourceAsset = findOwnedAsset(request.params.assetId, auth);
+    if (!sourceAsset) {
+      response.status(404).json({ ok: false, code: "asset_not_found", error: "Video asset not found." });
+      return;
+    }
+    if (!String(sourceAsset.contentType || "").startsWith("video/")) {
+      response.status(400).json({ ok: false, code: "video_asset_required", error: "Frame extraction requires a video asset." });
+      return;
+    }
+
+    const duration = Number(sourceAsset.metadata?.durationSeconds || 0);
+    const requestedTimestamp = Math.max(0, Number(request.body?.timestampSeconds || 0) || 0);
+    const timestampSeconds = duration > 0 ? Math.min(requestedTimestamp, Math.max(0, duration - 0.04)) : requestedTimestamp;
+    let sourcePath = sourceAsset.storagePath && existsSync(sourceAsset.storagePath) ? sourceAsset.storagePath : "";
+    if (!sourcePath) {
+      temporarySourcePath = await temporaryUploadPath("frame-source", extensionFromContentType(sourceAsset.contentType, sourceAsset.originalName || "video.mp4"));
+      const downloadUrl = sourceAsset.storageProvider === "supabase" && sourceAsset.storageKey && supabaseStorage.configured
+        ? (await supabaseStorage.createSignedDownload({ key: sourceAsset.storageKey, expiresIn: 180 })).signedUrl
+        : sourceAsset.publicUrl;
+      if (!downloadUrl || !/^https?:\/\//i.test(downloadUrl)) {
+        const error = new Error("The persistent video file is not available for frame extraction.");
+        error.code = "asset_file_missing";
+        error.statusCode = 404;
+        throw error;
+      }
+      await downloadUrlToFile(downloadUrl, temporarySourcePath, { maxBytes: maxUploadBytesFor("video") });
+      sourcePath = temporarySourcePath;
+    }
+
+    outputPath = await temporaryUploadPath("extracted-frame", "png");
+    await extractVideoFrame({ sourcePath, outputPath, timestampSeconds });
+    const validation = await validateMediaFile({
+      filePath: outputPath,
+      declaredMime: "image/png",
+      kind: "image",
+      maxBytes: maxUploadBytesFor("image"),
+      skipProbe: true
+    });
+    const tenantId = requestIdentity(request, auth);
+    const digest = (await hashFile(outputPath)).slice(0, 12);
+    const fileName = `frame_${safeStorageSegment(tenantId)}_${Date.now()}_${digest}.png`;
+    const stored = await storeAssetFile({
+      filePath: outputPath,
+      contentType: "image/png",
+      fileName,
+      request,
+      tenantId,
+      move: true
+    });
+    outputPath = "";
+    const now = new Date().toISOString();
+    const frameAsset = {
+      id: requestId("asset"),
+      tenantId,
+      userId: auth.userId || null,
+      jobId: null,
+      batchId: null,
+      projectId: sourceAsset.projectId || null,
+      sessionId: sourceAsset.sessionId || null,
+      parentAssetId: sourceAsset.id,
+      kind: "image",
+      module: "image",
+      provider: "SLT Frame Extraction",
+      role: "extracted_frame",
+      originalName: fileName,
+      originalUrl: sourceAsset.publicUrl || null,
+      publicUrl: stored.publicUrl,
+      storageKey: stored.storageKey,
+      storageProvider: stored.provider || "local",
+      storagePath: stored.storagePath || null,
+      contentType: validation.detectedMime,
+      bytes: validation.bytes,
+      status: "stored",
+      metadata: {
+        sourceAssetId: sourceAsset.id,
+        timestampSeconds,
+        serverValidated: true
+      },
+      createdAt: now
+    };
+    state.assets.unshift(frameAsset);
+    state.assets = state.assets.slice(0, 300);
+    response.status(201).json({
+      ok: true,
+      auth,
+      asset: serializeAssetForClient(frameAsset),
+      sourceAssetId: sourceAsset.id,
+      message: "Frame extracted and stored as a reusable SLT Asset."
+    });
+  } catch (error) {
+    if (outputPath) await rm(outputPath, { force: true }).catch(() => {});
+    response.status(error.statusCode || 500).json({
+      ok: false,
+      auth,
+      code: error.code || "frame_extraction_failed",
+      error: error.message,
+      readableError: error.message
+    });
+  } finally {
+    if (temporarySourcePath) await rm(temporarySourcePath, { force: true }).catch(() => {});
   }
 });
 
@@ -7092,16 +11190,496 @@ app.delete("/api/assets/:assetId", async (request, response) => {
       response.status(404).json({ ok: false, code: "asset_not_found", error: "Asset not found." });
       return;
     }
-    state.assets = state.assets.filter((item) => item.id !== asset.id);
-    if (asset.storageProvider === "supabase" && asset.storageKey) {
-      await supabaseStorage.remove(asset.storageKey);
-    } else if (asset.storagePath && existsSync(asset.storagePath)) {
-      await unlink(asset.storagePath);
-    }
-    response.json({ ok: true, auth, assetId: asset.id, message: "Asset deleted." });
+    asset.deletedAt = new Date().toISOString();
+    asset.status = "deleted";
+    state.creativeReferences.forEach((reference) => {
+      if (reference.assetId === asset.id) {
+        reference.status = "DELETED";
+        reference.updatedAt = asset.deletedAt;
+      }
+    });
+    response.json({ ok: true, auth, assetId: asset.id, message: "Asset removed from the active Library. Version history remains durable." });
   } catch (error) {
     response.status(error.statusCode || 500).json({ ok: false, code: error.code || "asset_delete_failed", error: error.message });
   }
+});
+
+const creativeReferenceTypes = new Set(["FACE", "CHARACTER", "IMAGE", "STYLE", "PRODUCT", "LOCATION", "AUDIO", "MUSIC", "VOICE"]);
+const timelineTrackTypes = new Set(["VIDEO", "DIALOGUE", "VOICE", "MUSIC", "SFX", "AMBIENCE", "FOLEY", "EFFECT"]);
+const workflowNodeTypes = new Set(["TEXT", "IMAGE", "VIDEO", "MUSIC", "AUDIO", "VOICE", "CHARACTER", "SCENE", "UTILITY"]);
+
+function normalizeReferenceType(value = "IMAGE") {
+  const normalized = String(value || "IMAGE").trim().toUpperCase();
+  return creativeReferenceTypes.has(normalized) ? normalized : "IMAGE";
+}
+
+function createCreativeReference({ auth, asset, payload = {} }) {
+  const tenantId = requestIdentity({ headers: {} }, auth);
+  const referenceType = normalizeReferenceType(payload.referenceType || payload.type);
+  const existing = state.creativeReferences.find((item) => item.tenantId === tenantId && item.assetId === asset.id && item.referenceType === referenceType);
+  const now = new Date().toISOString();
+  if (existing) {
+    existing.name = String(payload.name || existing.name || asset.displayName || asset.originalName || "Reference").slice(0, 180);
+    existing.projectId = payload.projectId !== undefined ? payload.projectId || null : existing.projectId;
+    existing.sessionId = payload.sessionId !== undefined ? payload.sessionId || null : existing.sessionId;
+    existing.status = "ACTIVE";
+    existing.updatedAt = now;
+    return existing;
+  }
+  const reference = {
+    id: requestId("reference"),
+    tenantId,
+    userId: auth.userId || null,
+    assetId: asset.id,
+    projectId: payload.projectId || asset.projectId || null,
+    sessionId: payload.sessionId || asset.sessionId || null,
+    referenceType,
+    name: String(payload.name || asset.displayName || asset.originalName || `${referenceType} reference`).slice(0, 180),
+    status: "ACTIVE",
+    metadata: payload.metadata && typeof payload.metadata === "object" ? payload.metadata : {},
+    createdAt: now,
+    updatedAt: now
+  };
+  state.creativeReferences.unshift(reference);
+  return reference;
+}
+
+function serializeReference(reference, auth) {
+  const asset = state.assets.find((item) => item.id === reference.assetId && !item.deletedAt && canAccessRecord(item, auth));
+  return { ...reference, asset: asset ? serializeAssetForClient(asset) : null };
+}
+
+app.get("/api/references", (request, response) => {
+  const auth = getAuth(request);
+  const type = String(request.query.type || request.query.referenceType || "").toUpperCase();
+  const projectId = String(request.query.projectId || "").trim();
+  const sessionId = String(request.query.sessionId || "").trim();
+  const references = filterRecordsForAuth(state.creativeReferences, auth)
+    .filter((item) => item.status === "ACTIVE")
+    .filter((item) => !type || item.referenceType === type)
+    .filter((item) => !projectId || item.projectId === projectId)
+    .filter((item) => !sessionId || item.sessionId === sessionId)
+    .map((item) => serializeReference(item, auth));
+  response.json({ ok: true, auth, references, types: [...creativeReferenceTypes], total: references.length });
+});
+
+app.post("/api/references", (request, response) => {
+  const auth = getAuth(request);
+  const asset = findOwnedAsset(request.body?.assetId, auth);
+  if (!asset || asset.deletedAt) {
+    response.status(404).json({ ok: false, code: "asset_not_found", error: "A stored Asset is required to create a Reference." });
+    return;
+  }
+  const reference = createCreativeReference({ auth, asset, payload: request.body || {} });
+  response.status(201).json({ ok: true, auth, reference: serializeReference(reference, auth) });
+});
+
+app.patch("/api/references/:referenceId", (request, response) => {
+  const auth = getAuth(request);
+  const reference = state.creativeReferences.find((item) => item.id === request.params.referenceId);
+  if (!reference || !canAccessRecord(reference, auth) || reference.status !== "ACTIVE") {
+    response.status(404).json({ ok: false, code: "reference_not_found", error: "Reference not found." });
+    return;
+  }
+  if (typeof request.body?.name === "string" && request.body.name.trim()) reference.name = request.body.name.trim().slice(0, 180);
+  if (request.body?.projectId !== undefined) reference.projectId = request.body.projectId || null;
+  if (request.body?.sessionId !== undefined) reference.sessionId = request.body.sessionId || null;
+  if (request.body?.referenceType) reference.referenceType = normalizeReferenceType(request.body.referenceType);
+  reference.updatedAt = new Date().toISOString();
+  response.json({ ok: true, auth, reference: serializeReference(reference, auth) });
+});
+
+app.delete("/api/references/:referenceId", (request, response) => {
+  const auth = getAuth(request);
+  const reference = state.creativeReferences.find((item) => item.id === request.params.referenceId);
+  if (!reference || !canAccessRecord(reference, auth) || reference.status !== "ACTIVE") {
+    response.status(404).json({ ok: false, code: "reference_not_found", error: "Reference not found." });
+    return;
+  }
+  reference.status = "DELETED";
+  reference.updatedAt = new Date().toISOString();
+  response.json({ ok: true, auth, referenceId: reference.id });
+});
+
+app.post("/api/assets/:assetId/actions", (request, response) => {
+  const auth = getAuth(request);
+  const asset = findOwnedAsset(request.params.assetId, auth);
+  if (!asset || asset.deletedAt) {
+    response.status(404).json({ ok: false, code: "asset_not_found", error: "Asset not found." });
+    return;
+  }
+  const action = String(request.body?.action || "").trim().toUpperCase();
+  const navigation = {
+    OPEN: `/library?assetId=${encodeURIComponent(asset.id)}`,
+    DOWNLOAD: `/api/assets/${encodeURIComponent(asset.id)}/download`,
+    USE_IN_VIDEO: `/video?studio=v2&referenceAssetId=${encodeURIComponent(asset.id)}`,
+    USE_IN_IMAGE: `/image?studio=v2&referenceAssetId=${encodeURIComponent(asset.id)}`,
+    OPEN_FRAME_IN_IMAGE: `/image?studio=v2&referenceAssetId=${encodeURIComponent(asset.id)}&versionType=VARIATION`,
+    GENERATE_SOUND: `/sound?referenceAssetId=${encodeURIComponent(asset.id)}`,
+    GENERATE_MUSIC: `/music?referenceAssetId=${encodeURIComponent(asset.id)}`
+  };
+  if (navigation[action]) {
+    response.json({ ok: true, auth, action, asset: serializeAssetForClient(asset), navigateTo: navigation[action] });
+    return;
+  }
+  if (action === "ADD_AS_REFERENCE") {
+    const reference = createCreativeReference({ auth, asset, payload: request.body || {} });
+    response.status(201).json({ ok: true, auth, action, reference: serializeReference(reference, auth) });
+    return;
+  }
+  if (action === "ADD_TO_SCENE") {
+    const scene = state.scenes.find((item) => item.id === request.body?.sceneId && canAccessRecord(item, auth));
+    if (!scene) {
+      response.status(404).json({ ok: false, code: "scene_not_found", error: "Choose an existing Scene first." });
+      return;
+    }
+    const item = {
+      id: requestId("scene_item"),
+      sceneId: scene.id,
+      tenantId: scene.tenantId,
+      itemType: String(asset.kind || "ASSET").toUpperCase(),
+      assetId: asset.id,
+      characterId: null,
+      referenceId: null,
+      track: String(asset.kind || "asset").toUpperCase(),
+      position: state.sceneItems.filter((entry) => entry.sceneId === scene.id).length,
+      parameters: {},
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    state.sceneItems.push(item);
+    if (asset.kind === "image") scene.currentFrameAssetId = asset.id;
+    if (asset.kind === "video") scene.currentVideoAssetId = asset.id;
+    scene.updatedAt = new Date().toISOString();
+    response.status(201).json({ ok: true, auth, action, scene, item });
+    return;
+  }
+  response.status(400).json({ ok: false, code: "asset_action_not_supported", error: "This Asset action is not supported." });
+});
+
+function scenePayload(scene, auth) {
+  const items = state.sceneItems.filter((item) => item.sceneId === scene.id && !item.deletedAt && canAccessRecord(item, auth));
+  const timeline = state.timelineItems.filter((item) => item.sceneId === scene.id && !item.deletedAt && canAccessRecord(item, auth));
+  return { ...scene, items, timeline };
+}
+
+app.get("/api/scenes", (request, response) => {
+  const auth = getAuth(request);
+  const projectId = String(request.query.projectId || "").trim();
+  const scenes = filterRecordsForAuth(state.scenes, auth)
+    .filter((item) => !projectId || item.projectId === projectId)
+    .map((item) => scenePayload(item, auth));
+  response.json({ ok: true, auth, scenes, total: scenes.length });
+});
+
+app.post("/api/scenes", (request, response) => {
+  const auth = getAuth(request);
+  const now = new Date().toISOString();
+  const scene = {
+    id: requestId("scene"),
+    tenantId: requestIdentity(request, auth),
+    userId: auth.userId || null,
+    projectId: request.body?.projectId || null,
+    sessionId: request.body?.sessionId || null,
+    title: String(request.body?.title || "Untitled scene").slice(0, 180),
+    status: "DRAFT",
+    prompt: String(request.body?.prompt || "").slice(0, 12000),
+    movementPrompt: String(request.body?.movementPrompt || "").slice(0, 12000),
+    currentFrameAssetId: request.body?.currentFrameAssetId || null,
+    currentVideoAssetId: request.body?.currentVideoAssetId || null,
+    parameters: request.body?.parameters && typeof request.body.parameters === "object" ? request.body.parameters : {},
+    metadata: request.body?.metadata && typeof request.body.metadata === "object" ? request.body.metadata : {},
+    createdAt: now,
+    updatedAt: now
+  };
+  state.scenes.unshift(scene);
+  response.status(201).json({ ok: true, auth, scene: scenePayload(scene, auth) });
+});
+
+app.get("/api/scenes/:sceneId", (request, response) => {
+  const auth = getAuth(request);
+  const scene = state.scenes.find((item) => item.id === request.params.sceneId);
+  if (!scene || !canAccessRecord(scene, auth)) {
+    response.status(404).json({ ok: false, code: "scene_not_found", error: "Scene not found." });
+    return;
+  }
+  response.json({ ok: true, auth, scene: scenePayload(scene, auth) });
+});
+
+app.patch("/api/scenes/:sceneId", (request, response) => {
+  const auth = getAuth(request);
+  const scene = state.scenes.find((item) => item.id === request.params.sceneId);
+  if (!scene || !canAccessRecord(scene, auth)) {
+    response.status(404).json({ ok: false, code: "scene_not_found", error: "Scene not found." });
+    return;
+  }
+  for (const key of ["projectId", "sessionId", "currentFrameAssetId", "currentVideoAssetId"]) {
+    if (request.body?.[key] !== undefined) scene[key] = request.body[key] || null;
+  }
+  for (const key of ["title", "prompt", "movementPrompt"]) {
+    if (typeof request.body?.[key] === "string") scene[key] = request.body[key].slice(0, key === "title" ? 180 : 12000);
+  }
+  if (request.body?.status) scene.status = String(request.body.status).toUpperCase().slice(0, 40);
+  if (request.body?.parameters && typeof request.body.parameters === "object") scene.parameters = { ...(scene.parameters || {}), ...request.body.parameters };
+  scene.updatedAt = new Date().toISOString();
+  response.json({ ok: true, auth, scene: scenePayload(scene, auth) });
+});
+
+app.post("/api/scenes/:sceneId/items", (request, response) => {
+  const auth = getAuth(request);
+  const scene = state.scenes.find((entry) => entry.id === request.params.sceneId);
+  if (!scene || !canAccessRecord(scene, auth)) {
+    response.status(404).json({ ok: false, code: "scene_not_found", error: "Scene not found." });
+    return;
+  }
+  for (const [key, collection] of [["assetId", state.assets], ["characterId", state.characters], ["referenceId", state.creativeReferences]]) {
+    const id = request.body?.[key];
+    if (id && !collection.some((entry) => entry.id === id && canAccessRecord(entry, auth))) {
+      response.status(404).json({ ok: false, code: `${key.replace("Id", "")}_not_found`, error: `${key.replace("Id", "")} not found.` });
+      return;
+    }
+  }
+  const now = new Date().toISOString();
+  const item = {
+    id: requestId("scene_item"),
+    sceneId: scene.id,
+    tenantId: scene.tenantId,
+    itemType: String(request.body?.itemType || "ASSET").toUpperCase().slice(0, 80),
+    assetId: request.body?.assetId || null,
+    characterId: request.body?.characterId || null,
+    referenceId: request.body?.referenceId || null,
+    track: String(request.body?.track || "").toUpperCase().slice(0, 80) || null,
+    position: Number(request.body?.position ?? state.sceneItems.filter((entry) => entry.sceneId === scene.id).length),
+    parameters: request.body?.parameters && typeof request.body.parameters === "object" ? request.body.parameters : {},
+    createdAt: now,
+    updatedAt: now
+  };
+  state.sceneItems.push(item);
+  scene.updatedAt = now;
+  response.status(201).json({ ok: true, auth, item, scene: scenePayload(scene, auth) });
+});
+
+app.delete("/api/scenes/:sceneId/items/:itemId", (request, response) => {
+  const auth = getAuth(request);
+  const scene = state.scenes.find((entry) => entry.id === request.params.sceneId);
+  if (!scene || !canAccessRecord(scene, auth)) {
+    response.status(404).json({ ok: false, code: "scene_not_found", error: "Scene not found." });
+    return;
+  }
+  const item = state.sceneItems.find((entry) => entry.id === request.params.itemId && entry.sceneId === scene.id && !entry.deletedAt);
+  if (!item) {
+    response.status(404).json({ ok: false, code: "scene_item_not_found", error: "Scene item not found." });
+    return;
+  }
+  item.deletedAt = new Date().toISOString();
+  item.updatedAt = item.deletedAt;
+  response.json({ ok: true, auth, itemId: request.params.itemId });
+});
+
+app.get("/api/timeline", (request, response) => {
+  const auth = getAuth(request);
+  const projectId = String(request.query.projectId || "").trim();
+  const sceneId = String(request.query.sceneId || "").trim();
+  const items = filterRecordsForAuth(state.timelineItems, auth)
+    .filter((item) => !item.deletedAt)
+    .filter((item) => !projectId || item.projectId === projectId)
+    .filter((item) => !sceneId || item.sceneId === sceneId)
+    .sort((left, right) => Number(left.position || 0) - Number(right.position || 0) || Number(left.startSeconds || 0) - Number(right.startSeconds || 0));
+  response.json({ ok: true, auth, items, trackTypes: [...timelineTrackTypes] });
+});
+
+app.post("/api/timeline", (request, response) => {
+  const auth = getAuth(request);
+  const trackType = String(request.body?.trackType || "VIDEO").toUpperCase();
+  if (!timelineTrackTypes.has(trackType)) {
+    response.status(400).json({ ok: false, code: "timeline_track_invalid", error: "Timeline track type is invalid." });
+    return;
+  }
+  if (request.body?.assetId && !findOwnedAsset(request.body.assetId, auth)) {
+    response.status(404).json({ ok: false, code: "asset_not_found", error: "Asset not found." });
+    return;
+  }
+  const now = new Date().toISOString();
+  const item = {
+    id: requestId("timeline_item"),
+    tenantId: requestIdentity(request, auth),
+    projectId: request.body?.projectId || null,
+    sessionId: request.body?.sessionId || null,
+    sceneId: request.body?.sceneId || null,
+    assetId: request.body?.assetId || null,
+    trackType,
+    startSeconds: Math.max(0, Number(request.body?.startSeconds || 0)),
+    durationSeconds: request.body?.durationSeconds == null ? null : Math.max(0, Number(request.body.durationSeconds)),
+    position: Number(request.body?.position || 0),
+    muted: Boolean(request.body?.muted),
+    solo: Boolean(request.body?.solo),
+    volume: Number(request.body?.volume ?? 1),
+    pan: Number(request.body?.pan || 0),
+    fadeInSeconds: Math.max(0, Number(request.body?.fadeInSeconds || 0)),
+    fadeOutSeconds: Math.max(0, Number(request.body?.fadeOutSeconds || 0)),
+    parameters: request.body?.parameters && typeof request.body.parameters === "object" ? request.body.parameters : {},
+    createdAt: now,
+    updatedAt: now
+  };
+  state.timelineItems.push(item);
+  response.status(201).json({ ok: true, auth, item });
+});
+
+app.patch("/api/timeline/:itemId", (request, response) => {
+  const auth = getAuth(request);
+  const item = state.timelineItems.find((entry) => entry.id === request.params.itemId);
+  if (!item || !canAccessRecord(item, auth)) {
+    response.status(404).json({ ok: false, code: "timeline_item_not_found", error: "Timeline item not found." });
+    return;
+  }
+  for (const key of ["startSeconds", "durationSeconds", "position", "volume", "pan", "fadeInSeconds", "fadeOutSeconds"]) {
+    if (request.body?.[key] !== undefined) item[key] = Number(request.body[key]);
+  }
+  for (const key of ["muted", "solo"]) if (request.body?.[key] !== undefined) item[key] = Boolean(request.body[key]);
+  if (request.body?.trackType && timelineTrackTypes.has(String(request.body.trackType).toUpperCase())) item.trackType = String(request.body.trackType).toUpperCase();
+  item.updatedAt = new Date().toISOString();
+  response.json({ ok: true, auth, item });
+});
+
+app.delete("/api/timeline/:itemId", (request, response) => {
+  const auth = getAuth(request);
+  const item = state.timelineItems.find((entry) => entry.id === request.params.itemId);
+  if (!item || !canAccessRecord(item, auth)) {
+    response.status(404).json({ ok: false, code: "timeline_item_not_found", error: "Timeline item not found." });
+    return;
+  }
+  item.deletedAt = new Date().toISOString();
+  item.updatedAt = item.deletedAt;
+  response.json({ ok: true, auth, itemId: item.id });
+});
+
+function workflowPayload(workflow, auth) {
+  return {
+    ...workflow,
+    nodes: state.workflowNodes.filter((item) => item.workflowId === workflow.id && canAccessRecord(item, auth)),
+    edges: state.workflowEdges.filter((item) => item.workflowId === workflow.id && canAccessRecord(item, auth))
+  };
+}
+
+app.get("/api/workflows", (request, response) => {
+  const auth = getAuth(request);
+  const workflows = filterRecordsForAuth(state.workflows, auth).map((item) => workflowPayload(item, auth));
+  response.json({ ok: true, auth, workflows, nodeTypes: [...workflowNodeTypes] });
+});
+
+app.post("/api/workflows", (request, response) => {
+  const auth = getAuth(request);
+  const now = new Date().toISOString();
+  const workflow = {
+    id: requestId("workflow"),
+    tenantId: requestIdentity(request, auth),
+    userId: auth.userId || null,
+    projectId: request.body?.projectId || null,
+    name: String(request.body?.name || "Untitled workflow").slice(0, 180),
+    status: "DRAFT",
+    description: String(request.body?.description || "").slice(0, 1000),
+    metadata: {},
+    createdAt: now,
+    updatedAt: now
+  };
+  state.workflows.unshift(workflow);
+  response.status(201).json({ ok: true, auth, workflow: workflowPayload(workflow, auth) });
+});
+
+app.post("/api/workflows/:workflowId/nodes", (request, response) => {
+  const auth = getAuth(request);
+  const workflow = state.workflows.find((item) => item.id === request.params.workflowId);
+  if (!workflow || !canAccessRecord(workflow, auth)) {
+    response.status(404).json({ ok: false, code: "workflow_not_found", error: "Workflow not found." });
+    return;
+  }
+  const nodeType = String(request.body?.nodeType || "UTILITY").toUpperCase();
+  if (!workflowNodeTypes.has(nodeType)) {
+    response.status(400).json({ ok: false, code: "workflow_node_invalid", error: "Workflow node type is invalid." });
+    return;
+  }
+  const now = new Date().toISOString();
+  const node = {
+    id: requestId("workflow_node"),
+    workflowId: workflow.id,
+    tenantId: workflow.tenantId,
+    nodeType,
+    label: String(request.body?.label || nodeType).slice(0, 180),
+    position: request.body?.position && typeof request.body.position === "object" ? request.body.position : { x: 0, y: 0 },
+    configuration: request.body?.configuration && typeof request.body.configuration === "object" ? request.body.configuration : {},
+    createdAt: now,
+    updatedAt: now
+  };
+  state.workflowNodes.push(node);
+  workflow.updatedAt = now;
+  response.status(201).json({ ok: true, auth, node, workflow: workflowPayload(workflow, auth) });
+});
+
+app.post("/api/workflows/:workflowId/edges", (request, response) => {
+  const auth = getAuth(request);
+  const workflow = state.workflows.find((item) => item.id === request.params.workflowId);
+  if (!workflow || !canAccessRecord(workflow, auth)) {
+    response.status(404).json({ ok: false, code: "workflow_not_found", error: "Workflow not found." });
+    return;
+  }
+  const nodes = state.workflowNodes.filter((item) => item.workflowId === workflow.id);
+  if (!nodes.some((item) => item.id === request.body?.sourceNodeId) || !nodes.some((item) => item.id === request.body?.targetNodeId)) {
+    response.status(400).json({ ok: false, code: "workflow_edge_invalid", error: "Both workflow nodes must exist." });
+    return;
+  }
+  const edge = {
+    id: requestId("workflow_edge"),
+    workflowId: workflow.id,
+    tenantId: workflow.tenantId,
+    sourceNodeId: request.body.sourceNodeId,
+    targetNodeId: request.body.targetNodeId,
+    metadata: request.body?.metadata && typeof request.body.metadata === "object" ? request.body.metadata : {},
+    createdAt: new Date().toISOString()
+  };
+  state.workflowEdges.push(edge);
+  response.status(201).json({ ok: true, auth, edge, workflow: workflowPayload(workflow, auth) });
+});
+
+const creativeApplicationCatalog = [
+  { id: "storyboard", label: "Storyboard Builder", status: "AVAILABLE", route: "/scene-builder" },
+  { id: "reality-transform", label: "Reality Transform", status: "AVAILABLE", route: "/video?studio=v2&operation=reality_transform" },
+  { id: "character-pack", label: "Character Reference Pack", status: "AVAILABLE", route: "/characters" },
+  { id: "ad-creator", label: "Multimodal Ad Creator", status: "COMING_SOON", reason: "WORKFLOW_EXECUTION_NOT_CONNECTED" },
+  { id: "social-campaign", label: "Social Campaign Factory", status: "COMING_SOON", reason: "WORKFLOW_EXECUTION_NOT_CONNECTED" }
+];
+
+app.get("/api/applications", (request, response) => {
+  const auth = getAuth(request);
+  response.json({ ok: true, auth, applications: creativeApplicationCatalog, instances: filterRecordsForAuth(state.appInstances, auth) });
+});
+
+app.post("/api/applications", (request, response) => {
+  const auth = getAuth(request);
+  const definition = creativeApplicationCatalog.find((item) => item.id === request.body?.appType);
+  if (!definition) {
+    response.status(400).json({ ok: false, code: "application_not_found", error: "Application type not found." });
+    return;
+  }
+  if (definition.status !== "AVAILABLE") {
+    response.status(409).json({ ok: false, code: "application_coming_soon", error: "Coming Soon", reason: definition.reason });
+    return;
+  }
+  const now = new Date().toISOString();
+  const instance = {
+    id: requestId("application"),
+    tenantId: requestIdentity(request, auth),
+    userId: auth.userId || null,
+    projectId: request.body?.projectId || null,
+    sessionId: request.body?.sessionId || null,
+    appType: definition.id,
+    title: String(request.body?.title || definition.label).slice(0, 180),
+    status: "DRAFT",
+    configuration: request.body?.configuration && typeof request.body.configuration === "object" ? request.body.configuration : {},
+    createdAt: now,
+    updatedAt: now
+  };
+  state.appInstances.unshift(instance);
+  response.status(201).json({ ok: true, auth, instance, definition });
 });
 
 app.post(["/api/forms/:kind", "/api/contact"], (request, response) => {
@@ -7142,7 +11720,7 @@ app.get("/api/subscription", (request, response) => {
 
 app.get("/api/subscription-status", (request, response) => {
   const auth = getAuth(request);
-  const wallet = ledgerSnapshot();
+  const wallet = ledgerSnapshot(requestIdentity(request, auth));
   const subscription = state.subscription;
   const isCeo = auth.role === "CEO";
   response.json({
@@ -7158,8 +11736,9 @@ app.get("/api/subscription-status", (request, response) => {
   });
 });
 
-app.post("/api/subscription", (request, response) => {
+app.post("/api/subscription", async (request, response) => {
   const auth = getAuth(request);
+  const tenantId = requestIdentity(request, auth);
   const action = request.body?.action || "status";
   const nextPlan = request.body?.plan || state.subscription.plan;
   if (action !== "status" && !isOwnerAuth(auth)) {
@@ -7176,7 +11755,9 @@ app.post("/api/subscription", (request, response) => {
     state.subscription.plan = nextPlan;
     state.subscription.status = "active";
     state.user.plan = nextPlan;
-    adjustAvailableCredits({
+    await adjustAvailableCreditsTransactional({
+      tenantId,
+      userId: auth.userId || null,
       targetAmount: creditsForPlan(nextPlan),
       idempotencyKey: `manual_subscription:${action}:${nextPlan}:${Date.now()}`,
       reason: "manual_subscription_plan_credit_reset",
@@ -7278,6 +11859,8 @@ app.use((request, response) => {
 function resetTestState({ credits = 100 } = {}) {
   sessions.clear();
   processedWebhookEvents.clear();
+  generationExecutionQueue.length = 0;
+  activeGenerationExecutions = 0;
   rateBuckets.clear();
   usageBuckets.clear();
   state.user = {
@@ -7307,17 +11890,55 @@ function resetTestState({ credits = 100 } = {}) {
     stripeSubscriptionId: ""
   };
   state.projects = [];
+  state.generationSessions = [];
+  state.generationBatches = [];
   state.history = [];
   state.jobs = [];
   state.assets = [];
+  state.characters = [];
+  state.characterConsents = [];
+  state.characterCaptureSessions = [];
+  state.characterAssets = [];
+  state.characterVersions = [];
+  state.creativeReferences = [];
+  state.scenes = [];
+  state.sceneItems = [];
+  state.timelineItems = [];
+  state.workflows = [];
+  state.workflowNodes = [];
+  state.workflowEdges = [];
+  state.appInstances = [];
   state.webhookEvents = [];
   state.paymentEvents = [];
+  state.errorIncidents = [];
+  state.compensationCoupons = [];
+  state.providerDiagnostics = [
+    {
+      provider: "Runway",
+      status: "AVAILABLE",
+      errorName: null,
+      errorCode: null,
+      customerMessage: "Provider available in isolated tests.",
+      checkedAt: new Date().toISOString(),
+      metadata: { source: "test_reset" }
+    },
+    {
+      provider: "Replicate",
+      status: "AVAILABLE",
+      errorName: null,
+      errorCode: null,
+      customerMessage: "Provider available in isolated tests.",
+      checkedAt: new Date().toISOString(),
+      metadata: { source: "test_reset" }
+    }
+  ];
   state.wallet = {
     tenantId: "demo-user",
     availableCredits: credits,
     heldCredits: 0,
     capturedCredits: 0
   };
+  state.wallets = [state.wallet];
   state.creditReservations = [];
   state.creditTransactions = [
     {
@@ -7381,11 +12002,39 @@ export const __test = {
   authProtectionMiddleware,
   rateLimitForPath,
   providerStatus,
+  providerDiagnosticFor,
+  setProviderDiagnostic,
+  refreshProviderDiagnostic,
+  SLT_ERROR_REGISTRY,
+  SLT_ERROR_BY_NAME,
+  classifySltError,
+  createSltIncident,
+  incidentForClient,
+  recordSltFailure,
+  compensationAllowed,
+  createCompensationCoupon,
+  compensationCouponForCheckout,
+  markCompensationCouponRedeemed,
+  registrySummary,
+  multimodalModelRegistry,
+  operationCatalog,
+  routeMultimodalModel,
   runProviderGateway,
   creditCostFor,
+  billableOutputCount,
+  isRealityTransformPayload,
+  prepareCharacterReferences,
+  prepareGenerationPayload,
+  prepareSeedanceProviderPayload,
+  miniMaxAudioResult,
+  requestedAudioDuration,
+  refreshLocalJobFromProvider,
   reserveCredits,
+  reserveCreditsTransactional,
   resolveReservation,
+  resolveReservationTransactional,
   ledgerSnapshot,
+  walletForTenant,
   runInputModeration,
   moderationFailurePayload,
   verifyProviderWebhookSignature,
@@ -7393,10 +12042,20 @@ export const __test = {
   verifyStripeWebhookSignature,
   applyStripeWebhookEvent,
   createJob,
+  createGenerationBatch,
+  findGenerationBatch,
+  recomputeGenerationBatch,
+  serializeGenerationBatch,
+  buildRetryGenerationPayload,
+  handleGenerate,
   findJob,
   storeUploadedReferenceAsset,
+  storeUploadedReferenceBytes,
   serializeAssetForClient,
   findOwnedAsset,
+  findOwnedCharacter,
+  characterDatasetSummary,
+  characterCapturePlan,
   savePlatformForm,
   buildQueuedHistoryEntry,
   completeAsyncJob,

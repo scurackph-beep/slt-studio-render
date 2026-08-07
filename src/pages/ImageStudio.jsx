@@ -1,4 +1,5 @@
 import UnifiedStudio from '../components/studio/UnifiedStudio';
+import ImageStudioV2 from './ImageStudioV2';
 import './StudioLayout.css';
 
 const TOOLS = [
@@ -31,6 +32,12 @@ const SETTINGS = [
 ];
 
 export default function ImageStudio() {
+  const studioMode = new URLSearchParams(window.location.search).get('studio');
+
+  if (studioMode !== 'original') {
+    return <ImageStudioV2 />;
+  }
+
   return (
     <UnifiedStudio
       kind="image"

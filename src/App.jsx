@@ -10,9 +10,13 @@ import EngineeringLab from './pages/EngineeringLab';
 import VirtualAssist from './pages/VirtualAssist';
 import ContactPage from './pages/ContactPage';
 import CEODashboard from './pages/CEODashboard';
+import CEOErrors from './pages/CEOErrors';
 import InfoPage from './pages/InfoPage';
 import ProfilePage from './pages/ProfilePage';
 import LibraryPage from './pages/LibraryPage';
+import CharacterLab from './pages/CharacterLab';
+import SceneBuilder from './pages/SceneBuilder';
+import StudioWorkspace from './pages/StudioWorkspace';
 import { AuthProvider } from './context/AuthContext';
 import { StudioProvider } from './context/StudioContext';
 import SiteGate from './components/SiteGate';
@@ -34,6 +38,7 @@ export default function App() {
           <Route path="engineering" element={<EngineeringLab />} />
           <Route path="contact" element={<ContactPage />} />
           <Route path="ceo" element={<CEODashboard />} />
+          <Route path="ceo/errors" element={<CEOErrors />} />
           <Route path="about" element={<InfoPage type="about" />} />
           <Route path="careers" element={<InfoPage type="careers" />} />
           <Route path="privacy" element={<InfoPage type="privacy" />} />
@@ -41,6 +46,17 @@ export default function App() {
           <Route path="sitemap" element={<InfoPage type="sitemap" />} />
           <Route path="subscription" element={<InfoPage type="subscription" />} />
           <Route path="library" element={<LibraryPage />} />
+          <Route path="characters" element={<CharacterLab />} />
+          <Route path="scene-builder" element={<SceneBuilder />} />
+          <Route path="projects" element={<StudioWorkspace section="projects" />} />
+          <Route path="sessions" element={<StudioWorkspace section="sessions" />} />
+          <Route path="references" element={<StudioWorkspace section="references" />} />
+          <Route path="history" element={<StudioWorkspace section="history" />} />
+          <Route path="queue" element={<StudioWorkspace section="queue" />} />
+          <Route path="versions" element={<StudioWorkspace section="versions" />} />
+          <Route path="workflows" element={<StudioWorkspace section="workflows" />} />
+          <Route path="applications" element={<StudioWorkspace section="applications" />} />
+          <Route path="credits" element={<StudioWorkspace section="credits" />} />
           <Route path="profile" element={<ProfilePage />} />
           <Route path="settings" element={<InfoPage type="settings" />} />
           <Route path="help" element={<InfoPage type="help" />} />
