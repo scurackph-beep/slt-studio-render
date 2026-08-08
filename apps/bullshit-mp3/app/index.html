@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Sweet Deck" />
+  <meta name="theme-color" content="#ffffff" />
+  <meta name="description" content="Sweet Deck — By Sweet Little Trauma. Demo limitada. Sin suscripción." />
+  <meta name="author" content="Sweet Little Trauma" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icons/icon-180.png" />
+  <link rel="icon" href="icons/icon-192.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css?v=sweetdeck14" />
+  <title>Sweet Deck · By Sweet Little Trauma</title>
+</head>
+<body>
+  <div class="world" aria-hidden="true">
+    <div class="world-photo"></div>
+    <div class="world-depth"></div>
+    <div class="world-glow a"></div>
+    <div class="world-glow b"></div>
+    <div class="world-vignette"></div>
+  </div>
+
+  <!-- GATE -->
+  <div id="gate" class="gate hidden">
+    <div class="glass gate-panel" id="gateNotice">
+      <div class="neon-brand gate-neon" id="gateNeon" aria-hidden="false">
+        <img class="neon-base" src="brand-neon.png?v=14" alt="Sweet Little Trauma" />
+        <img class="neon-glow" src="brand-neon-glow.png?v=14" alt="" />
+      </div>
+      <h2 data-i18n="noticeTitle">Antes de empezar</h2>
+      <ul class="notice">
+        <li data-i18n="noticeNoSub">Esto <strong>no es una suscripción</strong>.</li>
+        <li data-i18n="noticeNoAds">Hoy <strong>no tiene publicidad</strong>. En el futuro podría tenerla; te avisaremos en la app.</li>
+        <li data-i18n="noticeDemo">La <strong>DEMO</strong> es de uso limitado: 3 canciones, 1 karaoke, 1 letra, 1 video, y reproducción solo en primer plano.</li>
+        <li data-i18n="noticeAccount">Debes crear una cuenta. Ese email sirve para el universo Sweet Little Trauma.</li>
+        <li data-i18n="noticeCode">Por tener la app recibes un <strong>código 10%</strong> ligado a tu email (Studio, merch y futuros productos).</li>
+      </ul>
+      <label class="check"><input id="noticeAccept" type="checkbox" /><span data-i18n="noticeAccept">Acepto el aviso</span></label>
+      <label class="check"><input id="termsAccept" type="checkbox" /><span data-i18n="termsAccept">Acepto Bases y Condiciones</span></label>
+      <button id="btnViewTerms" class="btn soft" type="button" data-i18n="legal">Ver Bases y condiciones</button>
+      <button id="btnNoticeContinue" class="btn solid" type="button" disabled data-i18n="continue">Continuar</button>
+      <button id="btnOwnerFromNotice" class="btn soft" type="button" data-i18n="ownerEntry">Soy el dueño</button>
+    </div>
+
+    <div class="glass gate-panel hidden" id="gateOwner">
+      <div class="neon-brand gate-neon" aria-hidden="true">
+        <img class="neon-base" src="brand-neon.png?v=14" alt="Sweet Little Trauma" />
+        <img class="neon-glow" src="brand-neon-glow.png?v=14" alt="" />
+      </div>
+      <h2 data-i18n="ownerTitle">Acceso dueño</h2>
+      <p class="hint" data-i18n="ownerHint">Entra sin crear cuenta. Este dispositivo quedará en modo dueño (Pro).</p>
+      <label class="field"><span data-i18n="ownerCode">Código</span><input id="ownerCode" type="password" autocomplete="off" /></label>
+      <button id="btnOwnerUnlock" class="btn solid" type="button" data-i18n="ownerEnter">Entrar como dueño</button>
+      <button id="btnOwnerBack" class="btn soft" type="button" data-i18n="back">Volver</button>
+    </div>
+
+    <div class="glass gate-panel hidden" id="gateAccount">
+      <p class="eyebrow">By Sweet Little Trauma</p>
+      <h2 data-i18n="accountTitle">Crear cuenta</h2>
+      <div class="form-grid">
+        <label class="field"><span data-i18n="firstName">Nombre</span><input id="regFirst" type="text" autocomplete="given-name" /></label>
+        <label class="field"><span data-i18n="lastName">Apellido</span><input id="regLast" type="text" autocomplete="family-name" /></label>
+        <label class="field full"><span data-i18n="email">Email</span><input id="regEmail" type="email" autocomplete="email" /></label>
+        <label class="field"><span data-i18n="phone">Teléfono</span><input id="regPhone" type="tel" autocomplete="tel" /></label>
+        <label class="field"><span data-i18n="country">País</span><input id="regCountry" type="text" autocomplete="country-name" /></label>
+        <label class="field"><span data-i18n="password">Clave</span><input id="regPass" type="password" autocomplete="new-password" minlength="6" /></label>
+        <label class="field"><span data-i18n="passwordConfirm">Confirmar</span><input id="regPass2" type="password" autocomplete="new-password" minlength="6" /></label>
+      </div>
+      <button id="btnCreateAccount" class="btn solid" type="button" data-i18n="createAccount">Crear cuenta</button>
+      <button id="btnHaveAccount" class="btn soft" type="button" data-i18n="haveAccount">Ya tengo cuenta</button>
+      <button id="btnOwnerFromAccount" class="btn soft" type="button" data-i18n="ownerEntry">Soy el dueño</button>
+    </div>
+
+    <div class="glass gate-panel hidden" id="gateLogin">
+      <h2 data-i18n="loginTitle">Entrar</h2>
+      <label class="field"><span data-i18n="email">Email</span><input id="loginEmail" type="email" /></label>
+      <label class="field"><span data-i18n="password">Clave</span><input id="loginPass" type="password" /></label>
+      <button id="btnLogin" class="btn solid" type="button" data-i18n="login">Entrar</button>
+      <button id="btnBackRegister" class="btn soft" type="button" data-i18n="createAccount">Crear cuenta</button>
+      <button id="btnOwnerFromLogin" class="btn soft" type="button" data-i18n="ownerEntry">Soy el dueño</button>
+    </div>
+
+    <div class="glass gate-panel hidden" id="gateReward">
+      <h2 data-i18n="rewardTitle">Tu código 10%</h2>
+      <p class="hint" data-i18n="rewardHint">Asociado a tu email. Se aplica automáticamente en el universo Sweet Little Trauma.</p>
+      <p class="code-email" id="rewardEmail">—</p>
+      <p class="code-box" id="discountCode">SWEET-XXXX</p>
+      <button id="btnCopyCode" class="btn soft" type="button" data-i18n="copyCode">Copiar</button>
+      <button id="btnRewardContinue" class="btn solid" type="button" data-i18n="continue">Continuar</button>
+    </div>
+
+    <div class="glass gate-panel hidden" id="gateSecure">
+      <h2 data-i18n="secureTitle">Protege la app</h2>
+      <label class="field"><span data-i18n="pin">PIN (4–8)</span><input id="setPin" type="password" inputmode="numeric" maxlength="8" /></label>
+      <label class="field"><span data-i18n="pinConfirm">Confirmar PIN</span><input id="setPin2" type="password" inputmode="numeric" maxlength="8" /></label>
+      <label class="check"><input id="enableBio" type="checkbox" checked /><span data-i18n="enableBio">Face ID / huella</span></label>
+      <button id="btnSaveSecure" class="btn solid" type="button" data-i18n="saveContinue">Guardar y entrar</button>
+      <button id="btnSkipSecure" class="btn soft" type="button" data-i18n="skipForNow">Ahora no</button>
+    </div>
+
+    <div class="glass gate-panel hidden" id="gateUnlock">
+      <h2 data-i18n="unlockTitle">Desbloquear</h2>
+      <p class="hint" id="unlockEmail"></p>
+      <label class="field"><span data-i18n="pinOrPass">PIN o clave</span><input id="unlockSecret" type="password" /></label>
+      <button id="btnUnlock" class="btn solid" type="button" data-i18n="unlock">Desbloquear</button>
+      <button id="btnBioUnlock" class="btn soft" type="button" data-i18n="useBio">Face ID / Huella</button>
+    </div>
+
+    <div class="glass gate-panel hidden" id="gateBanned">
+      <h2 data-i18n="bannedTitle">Acceso suspendido</h2>
+      <p class="hint" data-i18n="bannedHint">Esta cuenta fue suspendida por Sweet Little Trauma. Contactá soporte si creés que es un error.</p>
+      <a class="btn solid" href="mailto:info@studiosweetlittletrauma.com" data-i18n="bannedContact">Contactar soporte</a>
+    </div>
+  </div>
+
+  <main class="app hidden" id="appRoot">
+    <header class="top">
+      <button id="btnMenu" class="icon-tile" type="button" aria-label="Menu">☰</button>
+      <div class="brand-wrap">
+        <div class="neon-brand header-neon" id="headerNeon">
+          <img class="neon-base" src="brand-neon-header.png?v=14" alt="Sweet Little Trauma" />
+          <img class="neon-glow" src="brand-neon-header.png?v=14" alt="" />
+        </div>
+      </div>
+      <button id="btnLang" class="icon-tile" type="button">ES</button>
+    </header>
+
+    <p id="demoBanner" class="demo-banner"></p>
+    <p id="statusMsg" class="status" hidden></p>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="deck" type="button" data-i18n="tabDeck">Deck</button>
+      <button class="tab" data-tab="lists" type="button" data-i18n="tabLists">Listas</button>
+      <button class="tab" data-tab="karaoke" type="button" data-i18n="tabKaraoke">Karaoke</button>
+      <button class="tab" data-tab="video" type="button" data-i18n="tabVideo">Video</button>
+      <button class="tab" data-tab="radio" type="button" data-i18n="tabRadio">Radio</button>
+      <button class="tab" data-tab="record" type="button" data-i18n="tabRecord">Grabar</button>
+    </nav>
+
+    <!-- DECK -->
+    <section class="panel active" id="panel-deck">
+      <div class="stage glass">
+        <div class="turntable" id="art">
+          <div class="chassis">
+            <div class="chassis-bevel"></div>
+            <div class="chassis-face">
+              <div class="platter-well">
+                <div class="platter-rim"></div>
+                <div class="platter-spin" id="platterSpin">
+                  <canvas class="vinyl-canvas" id="vinylCanvas" width="640" height="640" aria-hidden="true"></canvas>
+                  <div class="vinyl-label">
+                    <img id="avatar" src="avatar.png" alt="" />
+                  </div>
+                  <div class="spindle"></div>
+                </div>
+              </div>
+              <div class="tonearm" id="tonearm">
+                <div class="tonearm-pivot">
+                  <div class="pivot-cap"></div>
+                  <div class="pivot-ring"></div>
+                </div>
+                <div class="tonearm-beam">
+                  <div class="arm-shaft"></div>
+                  <div class="arm-counter"></div>
+                  <div class="headshell">
+                    <div class="cartridge"></div>
+                    <div class="needle"></div>
+                  </div>
+                </div>
+              </div>
+              <div class="deck-lights"><span></span><span></span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="viz" id="viz" aria-hidden="true">
+          <canvas class="viz-canvas" id="vizCanvas" width="720" height="160"></canvas>
+        </div>
+
+        <div class="meta">
+          <h2 id="trackTitle" data-i18n="noPlayback">Sin reproducción</h2>
+          <p id="trackSub" data-i18n="importHint">Importa medios para empezar</p>
+        </div>
+
+        <audio id="audio" playsinline webkit-playsinline preload="auto"></audio>
+
+        <div class="seek">
+          <input id="seek" type="range" min="0" max="1000" value="0" />
+          <div class="times"><span id="timeCurrent">0:00</span><span id="timeTotal">0:00</span></div>
+        </div>
+
+        <div class="transport">
+          <button id="btnShuffle" class="chip" type="button" title="Shuffle">⇄</button>
+          <button id="btnPrev" class="chip" type="button">⏮</button>
+          <button id="btnPlay" class="play3d" type="button"><span id="iconPlay">▶</span><span id="iconPause" class="hidden">⏸</span></button>
+          <button id="btnNext" class="chip" type="button">⏭</button>
+          <button id="btnRepeat" class="chip" type="button" title="Repeat" data-mode="off">⟳</button>
+        </div>
+
+        <div class="volume-row"><span>VOL</span><input id="volume" type="range" min="0" max="100" value="100" /></div>
+
+        <div class="row-actions">
+          <input id="fileInput" type="file" accept="audio/*,video/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.mp4,.mov,.webm" multiple hidden />
+          <input id="folderInput" type="file" webkitdirectory directory multiple hidden />
+          <button id="btnImportFiles" class="btn solid" type="button" data-i18n="addMedia">Añadir</button>
+          <button id="btnImportFolder" class="btn soft" type="button" data-i18n="folder">Carpeta</button>
+        </div>
+      </div>
+
+      <div class="glass block">
+        <div class="block-head">
+          <h3 data-i18n="playlist">Cola</h3>
+          <span id="trackCount" class="pill">0</span>
+        </div>
+        <ul id="playlist" class="playlist"></ul>
+        <p id="emptyHint" class="hint" data-i18n="emptyList">Vacía</p>
+        <button id="btnClear" class="btn soft hidden" type="button" data-i18n="clear">Vaciar</button>
+      </div>
+
+      <details class="glass block" id="eqCard">
+        <summary><span data-i18n="equalizer">Ecualizador</span> <span class="pill pro" id="eqLock">PRO</span></summary>
+        <div class="eq-tools">
+          <label class="switch"><input id="eqEnabled" type="checkbox" /><span>ON</span></label>
+          <select id="eqPreset">
+            <option value="flat">Flat</option>
+            <option value="bass">Bass</option>
+            <option value="voice">Voice</option>
+            <option value="electronic">Electronic</option>
+            <option value="rock">Rock</option>
+            <option value="soft">Soft</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+        <div class="eq" id="eqBands"></div>
+      </details>
+    </section>
+
+    <!-- LISTS -->
+    <section class="panel" id="panel-lists">
+      <div class="glass block">
+        <h3 data-i18n="playlists">Listas de reproducción</h3>
+        <div class="row-actions">
+          <input id="playlistName" type="text" placeholder="Nombre de lista" />
+          <button id="btnNewPlaylist" class="btn solid" type="button" data-i18n="createList">Crear</button>
+        </div>
+        <ul id="playlistLibrary" class="playlist"></ul>
+        <p class="hint" data-i18n="listHint">Crea listas y añade temas desde la cola.</p>
+      </div>
+      <div class="glass block">
+        <div class="block-head">
+          <h3 data-i18n="savedLibrary">Biblioteca guardada</h3>
+          <span id="libraryCount" class="pill">0</span>
+        </div>
+        <ul id="savedLibrary" class="playlist"></ul>
+        <p id="savedEmptyHint" class="hint" data-i18n="savedEmpty">Sin medios guardados</p>
+        <p class="hint" data-i18n="savedLibraryHint">Grabaciones de voz/video y videos importados se guardan en este dispositivo y vuelven al reiniciar.</p>
+      </div>
+    </section>
+
+    <!-- KARAOKE -->
+    <section class="panel" id="panel-karaoke">
+      <div class="glass block" id="karaokeCard">
+        <div class="block-head"><h3 data-i18n="tabKaraoke">Karaoke</h3><span class="pill" id="karaokeLock">DEMO 1×</span></div>
+        <label class="switch"><input id="karaokeOn" type="checkbox" /><span data-i18n="vocalCut">Atenuar voz</span></label>
+        <div class="row-actions">
+          <input id="lyricsQuery" type="text" placeholder="Artista - Canción" />
+          <button id="btnFetchLyrics" class="btn solid" type="button" data-i18n="detectLyrics">Letras</button>
+        </div>
+        <div class="karaoke-stage">
+          <p id="lyricPrev" class="lyric side"></p>
+          <p id="lyricCurrent" class="lyric current" data-i18n="lyricsHere">Las letras aparecerán aquí</p>
+          <p id="lyricNext" class="lyric side"></p>
+        </div>
+        <pre id="lyricsFull" class="lyrics-full hidden"></pre>
+      </div>
+    </section>
+
+    <!-- VIDEO -->
+    <section class="panel" id="panel-video">
+      <div class="glass block">
+        <div class="block-head"><h3 data-i18n="tabVideo">Video</h3><span class="pill" id="videoLock">DEMO 1×</span></div>
+        <div class="video-frame">
+          <video id="video" playsinline controls></video>
+          <p id="videoEmpty" class="hint center" data-i18n="noVideo">Sin video</p>
+        </div>
+        <div class="row-actions">
+          <input id="videoInput" type="file" accept="video/*" hidden />
+          <button id="btnImportVideo" class="btn solid" type="button" data-i18n="openVideo">Abrir</button>
+          <button id="btnUseCurrentVideo" class="btn soft" type="button" data-i18n="useFromList">De la cola</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- RADIO -->
+    <section class="panel" id="panel-radio">
+      <div class="glass block soon">
+        <h3 data-i18n="tabRadio">Radio</h3>
+        <p class="soon-badge" data-i18n="comingSoon">PRÓXIMAMENTE</p>
+        <p class="hint" data-i18n="radioSoonHint">Sintonizador y circuito cerrado Sweet Little Trauma llegarán en una próxima versión.</p>
+        <div class="row-actions stacked">
+          <a class="btn solid" href="https://www.studiosweetlittletrauma.com" target="_blank" rel="noopener">Studio Sweet Little Trauma</a>
+          <a class="btn soft" href="https://www.instagram.com/sweetlittletrauma" target="_blank" rel="noopener">Sweet Little Trauma</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- RECORD -->
+    <section class="panel" id="panel-record">
+      <div class="glass block">
+        <h3 data-i18n="tabRecord">Grabar</h3>
+        <div class="record-preview"><video id="recPreview" muted playsinline></video><p id="recTimer" class="rec-timer">00:00</p></div>
+        <div class="row-actions">
+          <button id="btnRecAudio" class="btn solid" type="button" data-i18n="recAudio">Voz</button>
+          <button id="btnRecVideo" class="btn soft" type="button" data-i18n="recVideo">Video</button>
+        </div>
+        <button id="btnRecStop" class="btn danger hidden" type="button" data-i18n="stopSave">Detener y guardar</button>
+        <p id="recStatus" class="hint" data-i18n="savedLibraryHint">Grabaciones de voz/video y videos importados se guardan en este dispositivo y vuelven al reiniciar.</p>
+      </div>
+    </section>
+
+    <footer class="foot">Sweet Deck · By Sweet Little Trauma</footer>
+  </main>
+
+  <!-- MENU DRAWER -->
+  <aside id="menuDrawer" class="drawer hidden" aria-hidden="true">
+    <div class="drawer-backdrop" id="menuBackdrop"></div>
+    <div class="drawer-panel glass">
+      <div class="block-head"><h3 data-i18n="menu">Menú</h3><button id="btnCloseMenu" class="icon-tile" type="button">✕</button></div>
+      <button class="menu-link" data-go="settings" type="button" data-i18n="settings">Ajustes</button>
+      <button class="menu-link" data-go="account" type="button" data-i18n="account">Cuenta</button>
+      <button class="menu-link hidden" data-go="admin" id="btnAdminMenu" type="button" data-i18n="admin">Admin dueño</button>
+      <button class="menu-link" data-go="contact" type="button" data-i18n="contact">Contacto</button>
+      <button class="menu-link" data-go="legal" type="button" data-i18n="legal">Bases y condiciones</button>
+      <button class="menu-link" data-go="pro" type="button" data-i18n="unlockPro">Desbloquear Pro</button>
+      <button id="btnLockNow" class="menu-link" type="button" data-i18n="lock">Bloquear</button>
+    </div>
+  </aside>
+
+  <dialog id="sheet" class="sheet">
+    <div class="sheet-body glass" id="sheetBody"></div>
+  </dialog>
+
+  <dialog id="payDialog" class="sheet">
+    <form method="dialog" class="sheet-body glass">
+      <h3 data-i18n="proTitle">Sweet Deck Pro</h3>
+      <p class="hint" data-i18n="proHint">Compra única. No es suscripción. Los primeros 50 Pro cuestan $5; después $10. Quita límites DEMO y permite audio en segundo plano.</p>
+      <menu class="row-actions">
+        <button value="cancel" class="btn soft" type="submit" data-i18n="cancel">Cancelar</button>
+        <button value="buy" class="btn solid" type="submit" data-i18n="payNow">Pagar</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="app.js?v=sweetdeck14"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "appId": "com.sweetlittletrauma.bullshitmp3",
+  "appName": "Sweet Deck",
+  "webDir": "../../app",
+  "server": {
+    "androidScheme": "https"
+  },
+  "ios": {
+    "contentInset": "automatic",
+    "scheme": "Sweet Deck",
+    "packageManager": "SPM"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchAutoHide": true,
+      "backgroundColor": "#ffffff"
+    }
+  }
+}

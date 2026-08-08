@@ -25,3 +25,15 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local recovery snapshots and runtime output
+.codex-backups/
+storage/
+*.backup-before-restore-*
+*-screenshot.png
+*-after.png
+
+# Native application build artifacts
+apps/**/DerivedData/
+apps/**/DerivedData-*/
+apps/**/DESCARGAS/

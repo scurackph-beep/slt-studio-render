@@ -1,0 +1,15 @@
+BullShit Mp3 Easy Reproductor
+(By Sweet Little Trauma)
+=============================
+
+Abrir: doble clic en iniciar-bullshit-mp3.command
+
+Pestañas:
+- Player: vinilo + lista + EQ
+- Karaoke: atenúa voz + busca letras (LRCLIB)
+- Stems: separación rápida (DSP) o IA (Demucs si está instalado)
+
+IA opcional:
+  pip3 install demucs torch torchaudio
+
+iPhone: misma Wi‑Fi → Safari → URL del terminal → Añadir a pantalla de inicio

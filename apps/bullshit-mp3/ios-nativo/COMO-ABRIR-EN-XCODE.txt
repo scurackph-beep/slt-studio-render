@@ -1,0 +1,12 @@
+BullShit Mp3 Easy Reproductor (By Sweet Little Trauma)
+SwiftUI + AVAudioEngine + AVAudioUnitEQ
+
+1. Instala Xcode desde la App Store.
+2. Abre Xcode → File → New → Project → iOS → App.
+3. Product Name: BullShitMp3
+   Interface: SwiftUI
+   Language: Swift
+4. Copia los archivos de la carpeta OndaPlayer/ dentro del target
+   (reemplaza ContentView.swift y el App file).
+5. Añade logo-con-auriculares.png / app/logo.png como Assets.
+6. Signing: tu Apple ID → conecta iPhone → Run ▶

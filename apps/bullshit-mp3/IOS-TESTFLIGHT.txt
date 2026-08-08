@@ -1,0 +1,30 @@
+BullShit Mp3 → iPhone / TestFlight / App Store
+==============================================
+
+1) Abre el proyecto (ya se puede con: npm run open:ios)
+   Ruta:
+   apps/bullshit-mp3/packaging/mobile/ios/App/App.xcodeproj
+
+2) En Xcode:
+   - Click en "App" (proyecto) → Signing & Capabilities
+   - Team: elige TU Apple Developer
+   - Bundle ID: com.sweetlittletrauma.bullshitmp3
+     (si está tomado, cámbialo a com.tunombre.bullshitmp3)
+
+3) Conecta tu iPhone por cable
+   - En el iPhone: Ajustes → General → VPN y gestión de dispositivos
+     → confiar en tu desarrollador
+   - En Xcode: elige tu iPhone arriba → ▶ Run
+
+4) TestFlight (pruebas):
+   - Xcode → Product → Archive
+   - Distribute App → App Store Connect → Upload
+   - En appstoreconnect.apple.com → TestFlight → añadir testers
+
+5) App Store:
+   - Completa ficha (nombre, capturas, descripción, privacidad)
+   - Enviar a revisión
+
+Notas:
+- Karaoke/letras funcionan online (LRCLIB) sin tu Mac.
+- Separación IA Demucs es opcional (en iPhone usa "Separación rápida").

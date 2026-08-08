@@ -1,0 +1,445 @@
+/* Premium studio skin — aesthetics only. Mechanics and markup stay unchanged. */
+
+.studio,
+.studio-container,
+.video-director,
+.info-page,
+.library-page,
+.contact-page {
+  --ps-bg: #09090b;
+  --ps-surface: rgba(24, 24, 27, 0.74);
+  --ps-surface-strong: rgba(14, 14, 16, 0.92);
+  --ps-border: rgba(255, 255, 255, 0.08);
+  --ps-border-strong: rgba(255, 255, 255, 0.14);
+  --ps-text: #fafafa;
+  --ps-muted: #a1a1aa;
+  --ps-subtle: #71717a;
+  --ps-radius: 14px;
+  --ps-radius-sm: 10px;
+}
+
+/* ─── Standard 3-column studios ─── */
+.studio {
+  grid-template-columns: minmax(250px, 280px) minmax(0, 1fr) minmax(230px, 260px);
+  gap: 18px;
+  padding: 24px clamp(18px, 3vw, 32px) 32px;
+  background: var(--ps-bg);
+  color: var(--ps-text);
+  min-height: calc(100vh - var(--navbar-height));
+}
+
+.studio-container {
+  padding: 24px clamp(18px, 3vw, 32px) 32px;
+  background: var(--ps-bg);
+  color: var(--ps-text);
+  min-height: calc(100vh - var(--navbar-height));
+  font-family: var(--font);
+}
+
+.studio-rail,
+.studio-aside {
+  padding: 20px 18px;
+  border: 1px solid var(--ps-border);
+  border-radius: var(--ps-radius);
+  background: var(--ps-surface);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.22);
+}
+
+.studio-rail {
+  border-right: 1px solid var(--ps-border);
+}
+
+.studio-aside {
+  border-left: 1px solid var(--ps-border);
+}
+
+.studio-main {
+  padding: 22px 24px 28px;
+  gap: 22px;
+  border: 1px solid var(--ps-border);
+  border-radius: var(--ps-radius);
+  background: var(--ps-surface);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.22);
+}
+
+.studio-rail-label,
+.studio-aside-label {
+  margin-bottom: 14px;
+  color: var(--ps-subtle);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+}
+
+.studio-main-title {
+  font-size: clamp(1.35rem, 2.2vw, 1.9rem);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  text-transform: none;
+  color: var(--ps-text);
+}
+
+.studio-main-meta,
+.studio-meta {
+  font-size: 13px;
+  letter-spacing: 0;
+  color: var(--ps-muted);
+}
+
+.studio-tool-list,
+.studio-provider-list {
+  border-top: none;
+  display: grid;
+  gap: 8px;
+}
+
+.studio-tool-item,
+.studio-provider-item {
+  padding: 12px 12px;
+  border: 1px solid var(--ps-border);
+  border-radius: var(--ps-radius-sm);
+  background: rgba(255, 255, 255, 0.02);
+  opacity: 1;
+  transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+}
+
+.studio-tool-item:hover,
+.studio-provider-item:hover {
+  border-color: var(--ps-border-strong);
+  background: rgba(255, 255, 255, 0.05);
+  opacity: 1;
+}
+
+.studio-tool-item.is-active,
+.studio-provider-item.is-active {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.studio-tool-label,
+.studio-provider-name {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ps-text);
+}
+
+.studio-tool-desc,
+.studio-provider-model,
+.studio-provider-status {
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ps-subtle);
+}
+
+.studio-glass-panel,
+.studio-result-block,
+.studio-project-row,
+.studio-image-grid,
+.library-card,
+.library-empty {
+  background: rgba(255, 255, 255, 0.03) !important;
+  border: 1px solid var(--ps-border) !important;
+  border-radius: var(--ps-radius) !important;
+  backdrop-filter: blur(16px);
+  box-shadow: none !important;
+  color: var(--ps-text);
+}
+
+.studio-preview,
+.studio-preview--wide {
+  border: 1px solid var(--ps-border);
+  border-radius: var(--ps-radius);
+  background: rgba(9, 9, 11, 0.88);
+  overflow: hidden;
+}
+
+.studio-preview-inner p {
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+.studio-media-placeholder {
+  background: radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.05), transparent 55%), #0c0c0e;
+  filter: none;
+  opacity: 1;
+  border-radius: calc(var(--ps-radius) - 2px);
+}
+
+.studio-controls {
+  gap: 12px;
+  padding: 0;
+  border-bottom: none;
+}
+
+.studio-action,
+.studio-button,
+.studio-chip,
+.video-primary-button,
+.video-secondary-button,
+.video-chip,
+.video-open-studio,
+.home-send-button,
+.home-open-studio {
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--ps-border-strong) !important;
+  border-radius: 999px !important;
+  background: rgba(255, 255, 255, 0.04) !important;
+  color: var(--ps-text) !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.02em !important;
+  text-transform: none !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.studio-button,
+.video-primary-button,
+.home-send-button,
+.home-open-studio {
+  background: #fafafa !important;
+  color: #09090b !important;
+  border-color: transparent !important;
+}
+
+.studio-button:disabled,
+.studio-action:disabled,
+.video-primary-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.studio-action:hover,
+.studio-button:hover:not(:disabled),
+.video-secondary-button:hover,
+.video-chip:hover {
+  border-color: rgba(255, 255, 255, 0.24) !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+
+.studio-button:hover:not(:disabled),
+.video-primary-button:hover:not(:disabled),
+.home-send-button:hover:not(:disabled),
+.home-open-studio:hover {
+  background: #ffffff !important;
+}
+
+.studio-input,
+.studio-select,
+.studio-field select,
+.studio-field input,
+.studio-textarea,
+.video-director-field select,
+.video-scene-grid input,
+.video-chat-input textarea,
+.profile-login input,
+.profile-login textarea,
+.contact-form input,
+.contact-form textarea,
+.contact-form select {
+  border: 1px solid var(--ps-border-strong) !important;
+  border-radius: var(--ps-radius-sm) !important;
+  background: var(--ps-surface-strong) !important;
+  color: var(--ps-text) !important;
+  font-size: 14px !important;
+  letter-spacing: 0 !important;
+  padding: 11px 12px !important;
+}
+
+.studio-input-bar {
+  left: 0;
+  right: 0;
+  width: auto;
+  margin: 0 clamp(18px, 3vw, 32px) 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--ps-border);
+  border-radius: var(--ps-radius);
+  background: rgba(12, 12, 14, 0.92);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+}
+
+.studio-prompt-field {
+  background: var(--ps-surface-strong);
+  border: 1px solid var(--ps-border-strong);
+  border-radius: var(--ps-radius-sm);
+}
+
+.studio-prompt-attach {
+  border-right: 1px solid var(--ps-border);
+  color: var(--ps-muted);
+}
+
+.studio-toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.studio-tag,
+.studio-toggle-row button,
+.home-category {
+  border: 1px solid var(--ps-border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--ps-muted);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  padding: 8px 14px;
+}
+
+.studio-tag.is-active,
+.studio-toggle-row button.is-active,
+.home-category.is-active {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--ps-text);
+}
+
+.studio-table {
+  border-collapse: separate;
+  border-spacing: 0 8px;
+  width: 100%;
+}
+
+.studio-table th,
+.studio-table td {
+  padding: 12px 14px;
+  border: 1px solid var(--ps-border);
+  background: rgba(255, 255, 255, 0.02);
+  font-size: 12px;
+}
+
+.studio-async-note,
+.studio-error-note {
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+.studio-reference-uploader,
+.studio-reference-dropzone {
+  border: 1px dashed var(--ps-border-strong) !important;
+  border-radius: var(--ps-radius-sm) !important;
+  background: rgba(255, 255, 255, 0.02) !important;
+}
+
+/* ─── Video director — see VideoStudio.css for premium cinema skin ─── */
+
+/* ─── Home command center ─── */
+.home-command::before,
+.home-command::after {
+  display: none;
+}
+
+.home-command-bg {
+  opacity: 0.18;
+  background-size: 96px 96px;
+}
+
+.home-chat-panel,
+.home-tool-panel {
+  border: 1px solid var(--ps-border) !important;
+  border-radius: var(--ps-radius) !important;
+  background: var(--ps-surface) !important;
+  backdrop-filter: blur(18px);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.22) !important;
+}
+
+.home-category-row {
+  border: 1px solid var(--ps-border);
+  border-radius: 999px;
+  padding: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.home-category + .home-category::before {
+  display: none;
+}
+
+.home-message-bubble--studio p {
+  border: 1px solid var(--ps-border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--ps-muted);
+}
+
+.home-message-bubble--user p {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--ps-text);
+}
+
+.home-chat-composer {
+  border: 1px solid var(--ps-border);
+  border-radius: var(--ps-radius-sm);
+  background: var(--ps-surface-strong);
+}
+
+.home-icon-button,
+.home-chat-suggestions button {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.home-video-action {
+  border: 1px solid var(--ps-border) !important;
+  border-radius: var(--ps-radius-sm) !important;
+  background: rgba(255, 255, 255, 0.03) !important;
+  box-shadow: none !important;
+}
+
+.home-video-action.is-active {
+  border-color: rgba(255, 255, 255, 0.22) !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+
+.home-provider-strip span {
+  border: 1px solid var(--ps-border);
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+
+/* ─── Info / profile pages using studio classes ─── */
+.info-page,
+.contact-page,
+.library-page {
+  color: var(--ps-text);
+}
+
+.info-page-title {
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  text-transform: none;
+}
+
+.page-container {
+  background: transparent;
+}
+
+@media (max-width: 1100px) {
+  .studio {
+    grid-template-columns: 1fr;
+  }
+
+  .studio-rail,
+  .studio-aside {
+    border-left: 1px solid var(--ps-border);
+    border-right: 1px solid var(--ps-border);
+  }
+
+  .video-director-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .studio-input-bar {
+    margin: 0 12px 12px;
+  }
+}

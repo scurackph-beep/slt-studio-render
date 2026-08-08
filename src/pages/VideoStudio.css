@@ -1,0 +1,695 @@
+/* Video Studio — luxury cinema workspace (SiteGate-aligned) */
+
+.layout:has(.video-director) .page-container {
+  padding: 0;
+  min-height: calc(100vh - var(--navbar-height));
+}
+
+.video-director {
+  --vd-bg: #000000;
+  --vd-ink: #ffffff;
+  --vd-muted: rgba(255, 255, 255, 0.42);
+  --vd-subtle: rgba(255, 255, 255, 0.28);
+  --vd-line: rgba(255, 255, 255, 0.08);
+  --vd-line-strong: rgba(255, 255, 255, 0.18);
+  --vd-serif: 'Cinzel', 'Playfair Display', Georgia, serif;
+  --vd-sans: 'Montserrat', 'Geist', sans-serif;
+
+  min-height: calc(100vh - var(--navbar-height));
+  padding: clamp(28px, 4vh, 48px) clamp(24px, 5vw, 72px) clamp(48px, 6vh, 80px);
+  background: var(--vd-bg);
+  color: var(--vd-ink);
+  font-family: var(--vd-sans);
+  font-weight: 300;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ─── Header ─── */
+.video-director .video-chat-header {
+  align-items: flex-start;
+  gap: clamp(20px, 3vw, 40px);
+  padding-bottom: clamp(24px, 4vh, 40px);
+  border-bottom: 1px solid var(--vd-line);
+}
+
+.video-director .video-chat-header h1 {
+  margin: 12px 0 8px;
+  font-family: var(--vd-serif);
+  font-size: clamp(1.35rem, 2.8vw, 2.1rem);
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  line-height: 1.15;
+  text-transform: uppercase;
+  color: var(--vd-ink);
+}
+
+.video-director .studio-rail-label {
+  margin: 0;
+  font-family: var(--vd-serif);
+  font-size: 0.58rem;
+  font-weight: 400;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--vd-subtle);
+}
+
+.video-director .video-chat-header p:not(.studio-rail-label) {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 300;
+  letter-spacing: 0.06em;
+  color: var(--vd-muted);
+}
+
+.video-director .video-chat-credits {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  font-family: var(--vd-serif);
+  font-size: 0.58rem;
+  font-weight: 400;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--vd-muted);
+}
+
+.video-director .video-secondary-button {
+  min-height: auto;
+  padding: 4px 0;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+  font-family: var(--vd-serif);
+  font-size: 0.58rem;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--vd-ink);
+  opacity: 0.72;
+  transition: opacity var(--fade);
+}
+
+.video-director .video-secondary-button:hover {
+  opacity: 1;
+  background: transparent !important;
+}
+
+/* ─── Grid — editorial columns, no boxed panels ─── */
+.video-director .video-director-grid {
+  grid-template-columns: minmax(200px, 220px) minmax(0, 1fr) minmax(180px, 200px);
+  gap: clamp(28px, 4vw, 56px);
+  margin-top: clamp(28px, 4vh, 44px);
+}
+
+.video-director .video-director-panel,
+.video-director .video-library-panel {
+  padding: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+.video-director .studio-aside-label {
+  margin: 0 0 18px;
+  font-family: var(--vd-serif);
+  font-size: 0.56rem;
+  font-weight: 400;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--vd-subtle);
+}
+
+.video-director .studio-rail-label--offset {
+  margin-top: clamp(32px, 5vh, 48px);
+  padding-top: clamp(24px, 3vh, 32px);
+  border-top: 1px solid var(--vd-line);
+}
+
+/* ─── Sidebar tools — list, not cards ─── */
+.video-director .video-director-actions,
+.video-director .video-provider-stack,
+.video-director .video-library-list {
+  gap: 0;
+}
+
+.video-director .video-director-action,
+.video-director .video-provider-button {
+  width: 100%;
+  padding: 14px 0 !important;
+  border: none !important;
+  border-bottom: 1px solid var(--vd-line) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+  text-align: left;
+  transition: color var(--fade), border-color var(--fade);
+}
+
+.video-director .video-director-action:hover,
+.video-director .video-provider-button:hover {
+  border-bottom-color: var(--vd-line-strong) !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.video-director .video-director-action span {
+  font-family: var(--vd-serif);
+  font-size: 0.62rem;
+  font-weight: 400;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--vd-ink);
+}
+
+.video-director .video-director-action small {
+  margin-top: 5px;
+  font-family: var(--vd-sans);
+  font-size: 0.68rem;
+  font-weight: 300;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--vd-muted);
+  line-height: 1.45;
+}
+
+.video-director .video-provider-button {
+  text-align: left;
+  font-family: var(--vd-serif);
+  font-size: 0.58rem;
+  font-weight: 400;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.video-director .video-provider-button:hover {
+  color: var(--vd-ink);
+}
+
+/* ─── Reference uploader ─── */
+.video-director .studio-reference-uploader {
+  margin: clamp(28px, 4vh, 40px) 0 0;
+  padding: clamp(24px, 3vh, 32px) 0 0;
+  border: none !important;
+  border-top: 1px solid var(--vd-line) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+
+.video-director .studio-reference-drop {
+  min-height: 88px;
+  padding: 20px 0;
+  border: none !important;
+  border-bottom: 1px dashed var(--vd-line-strong) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  transform: none !important;
+}
+
+.video-director .studio-reference-drop:hover,
+.video-director .studio-reference-drop.is-dragging {
+  border-bottom-color: rgba(255, 255, 255, 0.35) !important;
+  background: transparent !important;
+  transform: none !important;
+}
+
+.video-director .studio-reference-drop span {
+  font-family: var(--vd-serif);
+  font-size: 0.56rem;
+  letter-spacing: 0.22em;
+  color: var(--vd-muted);
+}
+
+.video-director .studio-reference-drop small {
+  font-family: var(--vd-sans);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--vd-subtle);
+}
+
+/* ─── Main canvas — unified surface ─── */
+.video-director .video-director-chat,
+.video-director .video-chat-shell {
+  min-height: auto;
+  margin-top: 0;
+  padding: 0 !important;
+  gap: clamp(28px, 4vh, 44px);
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* ─── Director controls — underline selects ─── */
+.video-director .video-director-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: clamp(14px, 2.5vw, 28px) clamp(20px, 3vw, 36px);
+  padding-bottom: clamp(24px, 3vh, 32px);
+  border-bottom: 1px solid var(--vd-line);
+}
+
+.video-director .video-director-field {
+  flex: 0 1 auto;
+  min-width: 88px;
+  gap: 8px;
+}
+
+.video-director .video-director-field span,
+.video-director .video-scene-grid span,
+.video-director .video-reference-current span {
+  font-family: var(--vd-serif);
+  font-size: 0.52rem;
+  font-weight: 400;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--vd-subtle);
+}
+
+.video-director .video-director-field select,
+.video-director .video-scene-grid input {
+  min-height: auto;
+  padding: 8px 0 10px !important;
+  border: none !important;
+  border-bottom: 1px solid var(--vd-line-strong) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  color: rgba(255, 255, 255, 0.88) !important;
+  font-family: var(--vd-sans);
+  font-size: 0.78rem;
+  font-weight: 300;
+  letter-spacing: 0.04em;
+  transition: border-color var(--fade);
+  cursor: pointer;
+}
+
+.video-director .video-director-field select:focus,
+.video-director .video-scene-grid input:focus {
+  outline: none;
+  border-bottom-color: rgba(255, 255, 255, 0.55) !important;
+  box-shadow: none !important;
+}
+
+.video-director .video-scene-grid input::placeholder {
+  color: rgba(255, 255, 255, 0.22);
+  letter-spacing: 0.06em;
+}
+
+/* ─── Scene brief ─── */
+.video-director .video-scene-grid {
+  grid-template-columns: 1fr 1fr;
+  gap: clamp(20px, 3vh, 28px);
+  padding: 0;
+  border: none;
+}
+
+.video-director .video-scene-wide {
+  grid-column: 1 / -1;
+}
+
+/* ─── Cinema editor ─── */
+.video-director .video-editor-panel {
+  gap: clamp(20px, 3vh, 28px);
+  padding: clamp(28px, 4vh, 40px) 0 !important;
+  border: none !important;
+  border-top: 1px solid var(--vd-line) !important;
+  border-bottom: 1px solid var(--vd-line) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+
+.video-director .video-editor-header h2 {
+  margin: 6px 0 0;
+  font-family: var(--vd-serif);
+  font-size: clamp(0.95rem, 1.6vw, 1.15rem);
+  font-weight: 400;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  line-height: 1.3;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.video-director .video-editor-header span {
+  font-family: var(--vd-serif);
+  font-size: 0.56rem;
+  letter-spacing: 0.22em;
+  color: var(--vd-subtle);
+}
+
+.video-director .video-editor-preview {
+  grid-template-columns: 1fr;
+  gap: 20px;
+}
+
+.video-director .video-editor-viewfinder {
+  aspect-ratio: 2.39 / 1;
+  min-height: clamp(160px, 22vw, 280px);
+  border: 1px solid var(--vd-line) !important;
+  border-radius: 0 !important;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 50%, rgba(255, 255, 255, 0.03), transparent 70%),
+    #000000 !important;
+  background-size: auto !important;
+  position: relative;
+}
+
+.video-director .video-editor-viewfinder::before {
+  content: '';
+  position: absolute;
+  inset: 12% 8%;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  pointer-events: none;
+}
+
+.video-director .video-editor-viewfinder span {
+  font-family: var(--vd-serif);
+  font-size: 0.56rem;
+  letter-spacing: 0.32em;
+  color: rgba(255, 255, 255, 0.22);
+}
+
+.video-director .video-editor-export {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: clamp(12px, 2vw, 20px);
+}
+
+/* ─── Timeline — cinematic, not spreadsheet ─── */
+.video-director .video-editor-timeline {
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.video-director .video-editor-lane {
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: clamp(16px, 2vw, 24px);
+  align-items: center;
+}
+
+.video-director .video-editor-lane > span {
+  font-family: var(--vd-serif);
+  font-size: 0.54rem;
+  font-weight: 400;
+  letter-spacing: 0.18em;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.video-director .video-editor-lane small {
+  display: none;
+}
+
+.video-director .video-editor-lane > div {
+  height: 1px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.video-director .video-editor-lane i {
+  height: 1px;
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.55);
+  opacity: 1;
+}
+
+.video-director .video-editor-lane.is-active i {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.video-director .video-editor-lane.is-active > span {
+  color: var(--vd-ink);
+}
+
+/* ─── Chat ─── */
+.video-director .video-chat-messages {
+  max-height: none;
+  padding: 0;
+  gap: clamp(16px, 2vh, 24px);
+}
+
+.video-director .video-chat-message {
+  max-width: min(680px, 100%);
+  padding: 0 0 0 16px;
+  border: none;
+  border-left: 1px solid var(--vd-line-strong);
+}
+
+.video-director .video-chat-sender {
+  font-family: var(--vd-serif);
+  font-size: 0.54rem;
+  letter-spacing: 0.24em;
+  color: var(--vd-subtle);
+}
+
+.video-director .video-chat-message pre {
+  margin: 8px 0 0;
+  font-family: var(--vd-sans);
+  font-size: 0.82rem;
+  font-weight: 300;
+  line-height: 1.65;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.video-director .video-chat-actions {
+  gap: clamp(12px, 2vw, 20px);
+}
+
+/* ─── Composer ─── */
+.video-director .video-chat-input {
+  gap: clamp(16px, 2vw, 24px);
+  padding-top: clamp(24px, 3vh, 32px);
+  border-top: 1px solid var(--vd-line);
+}
+
+.video-director .video-chat-input textarea {
+  min-height: 72px;
+  padding: 10px 0 14px !important;
+  border: none !important;
+  border-bottom: 1px solid var(--vd-line-strong) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  color: var(--vd-ink) !important;
+  font-family: var(--vd-sans);
+  font-size: 0.84rem;
+  font-weight: 300;
+  letter-spacing: 0.04em;
+  resize: vertical;
+}
+
+.video-director .video-chat-input textarea::placeholder {
+  color: rgba(255, 255, 255, 0.24);
+  letter-spacing: 0.08em;
+}
+
+.video-director .video-chat-input textarea:focus {
+  outline: none;
+  border-bottom-color: rgba(255, 255, 255, 0.5) !important;
+  box-shadow: none !important;
+}
+
+/* ─── Buttons — ghost / editorial ─── */
+.video-director .video-primary-button {
+  min-height: auto;
+  padding: 10px 0 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+  font-family: var(--vd-serif);
+  font-size: 0.58rem;
+  font-weight: 400;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--vd-ink);
+  transition: opacity var(--fade);
+}
+
+.video-director .video-primary-button:hover:not(:disabled) {
+  opacity: 0.65;
+  background: transparent !important;
+  transform: none !important;
+}
+
+.video-director .video-primary-button:disabled {
+  opacity: 0.28;
+}
+
+.video-director .video-chip {
+  min-height: auto;
+  padding: 6px 0 !important;
+  border: none !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.22) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+  font-family: var(--vd-serif);
+  font-size: 0.54rem;
+  font-weight: 400;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.55);
+  transition: color var(--fade), border-color var(--fade);
+}
+
+.video-director .video-chip:hover,
+.video-director .video-chip.is-active {
+  border-bottom-color: rgba(255, 255, 255, 0.65) !important;
+  color: var(--vd-ink);
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+/* ─── Library rail ─── */
+.video-director .video-library-header {
+  margin-bottom: 18px;
+}
+
+.video-director .video-library-header .studio-action {
+  font-family: var(--vd-serif);
+  font-size: 0.54rem;
+  letter-spacing: 0.22em;
+  opacity: 0.45;
+}
+
+.video-director .video-library-header .studio-action:hover {
+  opacity: 1;
+}
+
+.video-director .video-reference-current {
+  margin-bottom: 16px;
+  padding: 12px 0;
+  border: none;
+  border-bottom: 1px solid var(--vd-line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.video-director .video-reference-current strong {
+  font-family: var(--vd-sans);
+  font-size: 0.72rem;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+}
+
+.video-director .video-library-item {
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px 0;
+  border: none;
+  border-bottom: 1px solid var(--vd-line);
+  border-radius: 0;
+  background: transparent !important;
+  transition: opacity var(--fade);
+}
+
+.video-director .video-library-item:hover {
+  opacity: 0.72;
+}
+
+.video-director .video-library-item span {
+  font-family: var(--vd-sans);
+  font-size: 0.68rem;
+  font-weight: 300;
+  color: var(--vd-muted);
+}
+
+.video-director .video-library-thumb,
+.video-director .video-library-audio {
+  width: 48px;
+  height: 36px;
+  border-radius: 0;
+  border: 1px solid var(--vd-line);
+}
+
+.video-director .studio-meta {
+  font-family: var(--vd-sans);
+  font-size: 0.72rem;
+  font-weight: 300;
+  letter-spacing: 0.04em;
+  color: var(--vd-muted);
+}
+
+/* ─── REPORTE: subtle on studio pages ─── */
+.video-director ~ .site-report-trigger,
+.layout:has(.video-director) .site-report-trigger {
+  right: clamp(24px, 4vw, 48px);
+  bottom: clamp(24px, 4vh, 40px);
+  min-height: auto;
+  padding: 6px 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.22);
+  font-family: var(--vd-serif);
+  font-size: 0.52rem;
+  letter-spacing: 0.24em;
+  box-shadow: none;
+  animation: none;
+}
+
+.layout:has(.video-director) .site-report-trigger:hover {
+  color: rgba(255, 255, 255, 0.55);
+  transform: none;
+  box-shadow: none;
+}
+
+.layout:has(.video-director) .site-report-face {
+  display: none;
+}
+
+.layout:has(.video-director) .site-report-panel {
+  right: clamp(24px, 4vw, 48px);
+  bottom: 56px;
+  border-color: var(--vd-line);
+  background: rgba(0, 0, 0, 0.94);
+}
+
+/* ─── Responsive ─── */
+@media (max-width: 1180px) {
+  .video-director .video-director-grid {
+    grid-template-columns: 1fr;
+    gap: clamp(40px, 6vh, 56px);
+  }
+
+  .video-director .video-director-panel,
+  .video-director .video-library-panel {
+    padding-bottom: clamp(24px, 3vh, 32px) !important;
+    border-bottom: 1px solid var(--vd-line) !important;
+  }
+
+  .video-director .video-library-panel {
+    border-bottom: none !important;
+    padding-bottom: 0 !important;
+  }
+}
+
+@media (max-width: 680px) {
+  .video-director {
+    padding: 20px 20px 48px;
+  }
+
+  .video-director .video-director-controls {
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .video-director .video-scene-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .video-director .video-chat-input {
+    grid-template-columns: 1fr;
+  }
+}

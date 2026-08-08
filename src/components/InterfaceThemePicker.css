@@ -1,0 +1,156 @@
+.interface-theme-picker {
+  position: relative;
+}
+
+.interface-theme-trigger {
+  display: grid;
+  gap: 2px;
+  min-width: 148px;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #fff;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--fade), background var(--fade);
+}
+
+.interface-theme-trigger:hover,
+.interface-theme-trigger[aria-expanded='true'] {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.interface-theme-trigger-kicker {
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.interface-theme-trigger-name {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.interface-theme-trigger-mood {
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.interface-theme-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 140;
+  width: min(560px, calc(100vw - 28px));
+  max-height: min(70vh, 560px);
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  background: rgba(12, 12, 12, 0.96);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(16px);
+}
+
+.interface-theme-panel-head {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.interface-theme-panel-head p {
+  margin: 0;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.interface-theme-panel-head span {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.interface-theme-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.interface-theme-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  color: #fff;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--fade), background var(--fade), transform var(--fade);
+}
+
+.interface-theme-card:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.05);
+  transform: translateY(-1px);
+}
+
+.interface-theme-card.is-active {
+  border-color: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.interface-theme-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.interface-theme-card-glyph {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 12px;
+}
+
+.interface-theme-card-name {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.interface-theme-card-mood {
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 11px;
+}
+
+.interface-theme-card-world {
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+@media (max-width: 760px) {
+  .interface-theme-trigger {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .interface-theme-grid {
+    grid-template-columns: 1fr;
+  }
+}

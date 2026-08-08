@@ -1,0 +1,123 @@
+.void-mascot-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 85;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.void-mascot-preview-badge {
+  position: fixed;
+  left: 18px;
+  bottom: 18px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.78);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 9px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  pointer-events: auto;
+  backdrop-filter: blur(10px);
+}
+
+.void-mascot-preview-badge button {
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.void-mascot-preview-badge button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.void-mascot-track {
+  position: fixed;
+  bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+  left: 0;
+  width: var(--void-frame-width);
+  height: var(--void-frame-height);
+  transform-origin: center bottom;
+  animation: voidPatrol 24s linear infinite;
+  will-change: transform, left;
+}
+
+.void-mascot {
+  width: var(--void-frame-width);
+  height: var(--void-frame-height);
+  background-image: url('/assets/void/void-spritesheet.png');
+  background-repeat: no-repeat;
+  background-size: var(--void-sheet-width) var(--void-sheet-height);
+  background-position: 0 calc(var(--void-walk-y) * -1);
+  image-rendering: auto;
+  filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.28));
+  will-change: background-position;
+}
+
+.void-mascot--walk {
+  animation: voidWalkCycle 0.72s steps(var(--void-frames)) infinite;
+}
+
+@keyframes voidWalkCycle {
+  from {
+    background-position: 0 calc(var(--void-walk-y) * -1);
+  }
+
+  to {
+    background-position: calc(var(--void-frame-width) * var(--void-frames) * -1) calc(var(--void-walk-y) * -1);
+  }
+}
+
+@keyframes voidPatrol {
+  0% {
+    left: -12vw;
+    transform: scaleX(1);
+  }
+
+  48% {
+    left: calc(100vw - var(--void-frame-width) + 4vw);
+    transform: scaleX(1);
+  }
+
+  50% {
+    left: calc(100vw - var(--void-frame-width) + 4vw);
+    transform: scaleX(-1);
+  }
+
+  98% {
+    left: -12vw;
+    transform: scaleX(-1);
+  }
+
+  100% {
+    left: -12vw;
+    transform: scaleX(1);
+  }
+}
+
+@media (max-width: 760px) {
+  .void-mascot-track {
+    bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .void-mascot {
+    transform: scale(0.82);
+    transform-origin: center bottom;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .void-mascot-layer {
+    display: none;
+  }
+}
