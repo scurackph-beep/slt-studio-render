@@ -1184,6 +1184,25 @@ test("Runway and Replicate diagnostics expose their exact unavailable reasons wi
   assert.equal(replicate.message, "Temporarily unavailable — provider billing required.");
 });
 
+test("known provider blockers remain visible and cannot be selected for generation", () => {
+  __test.resetTestState({ credits: 100 });
+  const expected = [
+    ["MiniMax Music", "PROVIDER_AUTH_FAILED", "SLT-1103"],
+    ["MiniMax Speech", "PROVIDER_AUTH_FAILED", "SLT-1103"],
+    ["PixVerse", "API_KEY_REQUIRED", "SLT-1102"],
+    ["Moises", "API_KEY_REQUIRED", "SLT-1102"]
+  ];
+
+  for (const [provider, status, errorCode] of expected) {
+    const result = __test.providerStatus(provider);
+    assert.equal(result.connected, false, provider);
+    assert.equal(result.canGenerate, false, provider);
+    assert.equal(result.status, status, provider);
+    assert.equal(result.errorCode, errorCode, provider);
+    assert.match(result.message, /Temporarily unavailable/i, provider);
+  }
+});
+
 test("provider failure releases the exact reservation, creates one durable incident and one 5% coupon", async () => {
   __test.resetTestState({ credits: 100 });
   const auth = { ok: true, tenantId: "demo-user", userId: "demo-user", role: "standard" };

@@ -834,11 +834,14 @@
   .home-category-row {
     right: 16px;
     left: 16px;
+    width: auto;
     justify-content: flex-start;
     gap: 30px;
+    margin: 0;
     overflow-x: auto;
     padding: 0 22px;
     scrollbar-width: none;
+    transform: none;
   }
 
   .home-category-row::-webkit-scrollbar {

@@ -17,7 +17,11 @@ export function getApiBase() {
 
   const isLocalFrontend =
     window.location.protocol === 'file:'
-    || (['127.0.0.1', 'localhost'].includes(window.location.hostname) && window.location.port !== '3000');
+    || (
+      import.meta.env.DEV
+      && ['127.0.0.1', 'localhost'].includes(window.location.hostname)
+      && window.location.port !== '3000'
+    );
 
   const localApiBase = isLocalFrontend
     ? 'http://127.0.0.1:3000'

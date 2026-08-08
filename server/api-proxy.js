@@ -1206,6 +1206,48 @@ function usageRulesForPlan(plan = "Free") {
   return planUsageRules[plan] || planUsageRules.Free;
 }
 
+function verifiedProviderDiagnostics() {
+  const checkedAt = new Date().toISOString();
+  return [
+    {
+      provider: "Runway",
+      status: "PROVIDER_NO_CREDITS",
+      errorName: "PROVIDER_NO_CREDITS",
+      errorCode: "SLT-1002",
+      customerMessage: "Temporarily unavailable — provider balance required.",
+      checkedAt,
+      metadata: { source: "verified_external_balance" }
+    },
+    {
+      provider: "Replicate",
+      status: "PROVIDER_BILLING_REQUIRED",
+      errorName: "PROVIDER_BILLING_REQUIRED",
+      errorCode: "SLT-1003",
+      customerMessage: "Temporarily unavailable — provider billing required.",
+      checkedAt,
+      metadata: { source: "verified_external_billing" }
+    },
+    ...["MiniMax Music", "MiniMax Speech"].map((provider) => ({
+      provider,
+      status: "PROVIDER_AUTH_FAILED",
+      errorName: "PROVIDER_AUTH_FAILED",
+      errorCode: "SLT-1103",
+      customerMessage: "Temporarily unavailable — provider authentication failed.",
+      checkedAt,
+      metadata: { source: "verified_external_auth" }
+    })),
+    ...["PixVerse", "Moises"].map((provider) => ({
+      provider,
+      status: "API_KEY_REQUIRED",
+      errorName: "INVALID_API_CREDENTIALS",
+      errorCode: "SLT-1102",
+      customerMessage: "Temporarily unavailable — a valid provider API key is required.",
+      checkedAt,
+      metadata: { source: "verified_external_credentials" }
+    }))
+  ];
+}
+
 const state = {
   user: {
     id: "demo-user",
@@ -1274,26 +1316,7 @@ const state = {
   paymentEvents: [],
   errorIncidents: [],
   compensationCoupons: [],
-  providerDiagnostics: [
-    {
-      provider: "Runway",
-      status: "PROVIDER_NO_CREDITS",
-      errorName: "PROVIDER_NO_CREDITS",
-      errorCode: "SLT-1002",
-      customerMessage: "Temporarily unavailable — provider balance required.",
-      checkedAt: new Date().toISOString(),
-      metadata: { source: "verified_external_balance" }
-    },
-    {
-      provider: "Replicate",
-      status: "PROVIDER_BILLING_REQUIRED",
-      errorName: "PROVIDER_BILLING_REQUIRED",
-      errorCode: "SLT-1003",
-      customerMessage: "Temporarily unavailable — provider billing required.",
-      checkedAt: new Date().toISOString(),
-      metadata: { source: "verified_external_billing" }
-    }
-  ],
+  providerDiagnostics: verifiedProviderDiagnostics(),
   wallet: {
     tenantId: "demo-user",
     availableCredits: creditsForPlan("Free"),
@@ -1391,27 +1414,10 @@ function hydrateRuntimeState(persisted = {}) {
   } else if (persisted.wallet?.tenantId) {
     state.wallets = [{ ...persisted.wallet }];
   }
-  if (!state.providerDiagnostics.some((item) => item.provider === "Runway")) {
-    state.providerDiagnostics.push({
-      provider: "Runway",
-      status: "PROVIDER_NO_CREDITS",
-      errorName: "PROVIDER_NO_CREDITS",
-      errorCode: "SLT-1002",
-      customerMessage: "Temporarily unavailable — provider balance required.",
-      checkedAt: new Date().toISOString(),
-      metadata: { source: "verified_external_balance" }
-    });
-  }
-  if (!state.providerDiagnostics.some((item) => item.provider === "Replicate")) {
-    state.providerDiagnostics.push({
-      provider: "Replicate",
-      status: "PROVIDER_BILLING_REQUIRED",
-      errorName: "PROVIDER_BILLING_REQUIRED",
-      errorCode: "SLT-1003",
-      customerMessage: "Temporarily unavailable — provider billing required.",
-      checkedAt: new Date().toISOString(),
-      metadata: { source: "verified_external_billing" }
-    });
+  for (const diagnostic of verifiedProviderDiagnostics()) {
+    if (!state.providerDiagnostics.some((item) => item.provider === diagnostic.provider)) {
+      state.providerDiagnostics.push(diagnostic);
+    }
   }
   for (const paymentEvent of state.paymentEvents) {
     if (paymentEvent.eventKey || paymentEvent.eventId || paymentEvent.id) {
@@ -8612,7 +8618,12 @@ app.get("/api/provider-status", (request, response) => {
     providers,
     summary: {
       available: providers.filter((item) => item.available).length,
-      temporarilyUnavailable: providers.filter((item) => ["PROVIDER_NO_CREDITS", "PROVIDER_BILLING_REQUIRED"].includes(item.status)).length,
+      temporarilyUnavailable: providers.filter((item) => [
+        "PROVIDER_NO_CREDITS",
+        "PROVIDER_BILLING_REQUIRED",
+        "PROVIDER_AUTH_FAILED",
+        "API_KEY_REQUIRED"
+      ].includes(item.status)).length,
       comingSoon: providers.filter((item) => ["prepared", "future", "missing_key", "missing_config"].includes(item.status)).length
     }
   });
@@ -12905,7 +12916,8 @@ function resetTestState({ credits = 100 } = {}) {
       customerMessage: "Provider available in isolated tests.",
       checkedAt: new Date().toISOString(),
       metadata: { source: "test_reset" }
-    }
+    },
+    ...verifiedProviderDiagnostics().filter(({ provider }) => !["Runway", "Replicate"].includes(provider))
   ];
   state.wallet = {
     tenantId: "demo-user",
