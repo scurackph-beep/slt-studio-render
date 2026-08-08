@@ -88,6 +88,8 @@ export default function VideoStudioNext() {
   const [leftTab, setLeftTab] = useState('Projects');
   const [selectedId, setSelectedId] = useState('');
   const [query, setQuery] = useState('');
+  const [inspectorTab, setInspectorTab] = useState('System');
+  const [previewFit, setPreviewFit] = useState('contain');
   const { data, errors, loading, lastUpdatedAt, refresh } = useVideoStudioReadModel();
 
   const collection = COLLECTIONS.find((item) => item.id === leftTab) || COLLECTIONS[0];
@@ -188,15 +190,15 @@ export default function VideoStudioNext() {
 
       <main className="video-v2-canvas-section">
         <div className="video-v2-canvas-toolbar">
-          <div><button type="button" className="is-active">Selection</button></div>
+          <div><button type="button" className="is-active" onClick={() => setPreviewFit((value) => value === 'contain' ? 'cover' : 'contain')}>{previewFit === 'contain' ? 'Fit preview' : 'Fill preview'}</button></div>
           <div><span>{leftTab} / {recordTitle(selectedRecord, leftTab)}</span></div>
         </div>
         <section className="video-v2-monitor" aria-label="Stored asset preview">
           <div className="video-v2-monitor-stage">
             {mediaUrl ? (
               isVideoRecord(selectedRecord, mediaUrl)
-                ? <video className="video-next-media" src={mediaUrl} controls preload="metadata" />
-                : <img src={mediaUrl} alt={recordTitle(selectedRecord, leftTab)} />
+                ? <video className="video-next-media" src={mediaUrl} controls preload="metadata" style={{ objectFit: previewFit }} />
+                : <img src={mediaUrl} alt={recordTitle(selectedRecord, leftTab)} style={{ objectFit: previewFit }} />
             ) : (
               <div className="video-next-monitor-empty">
                 <strong>{selectedRecord ? recordTitle(selectedRecord, leftTab) : 'No stored media selected'}</strong>
@@ -216,11 +218,9 @@ export default function VideoStudioNext() {
 
       <aside className="video-v2-right" aria-label="Architecture status">
         <div className="video-v2-right-tabs">
-          <button type="button" className="is-active">System</button>
-          <button type="button">Selection</button>
-          <button type="button">Credits</button>
+          {['System', 'Selection', 'Credits'].map((tab) => <button key={tab} type="button" className={inspectorTab === tab ? 'is-active' : ''} onClick={() => setInspectorTab(tab)}>{tab}</button>)}
         </div>
-        <div className="video-v2-inspector-content">
+        {inspectorTab === 'Selection' ? <div className="video-v2-inspector-content">
           <label className="video-v2-field">
             <span>Selected record</span>
             <input value={recordTitle(selectedRecord, leftTab)} readOnly />
@@ -237,14 +237,20 @@ export default function VideoStudioNext() {
             <span>Provider</span>
             <input value={selectedRecord?.provider || 'Not applicable'} readOnly />
           </label>
-          <div className="video-next-system-list">
+        </div> : null}
+        {inspectorTab === 'System' ? <div className="video-v2-inspector-content"><div className="video-next-system-list">
             <p><span>Projects</span><strong>{data.projects.length}</strong></p>
             <p><span>Assets</span><strong>{data.assets.length}</strong></p>
             <p><span>History</span><strong>{data.history.length}</strong></p>
             <p><span>Video jobs</span><strong>{jobs.length}</strong></p>
             <p><span>Active jobs</span><strong>{activeJobs}</strong></p>
-          </div>
-        </div>
+          </div></div> : null}
+        {inspectorTab === 'Credits' ? <div className="video-v2-inspector-content video-next-system-list">
+          <p><span>Available</span><strong>{wallet.availableCredits ?? 0}</strong></p>
+          <p><span>Held</span><strong>{wallet.heldCredits ?? 0}</strong></p>
+          <p><span>Captured</span><strong>{wallet.capturedCredits ?? 0}</strong></p>
+          <p><span>Mode</span><strong>Read only</strong></p>
+        </div> : null}
         <div className="video-v2-cost-box">
           <div><span>Available</span><strong>{wallet.availableCredits ?? 0}</strong></div>
           <p>Held: {wallet.heldCredits ?? 0} · Captured: {wallet.capturedCredits ?? 0}</p>

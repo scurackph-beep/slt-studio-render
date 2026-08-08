@@ -766,6 +766,22 @@ export async function deleteTimelineItem(itemId) {
   return apiRequest(`/api/timeline/${encodeURIComponent(itemId)}`, { method: 'DELETE', timeoutMs: 25000 });
 }
 
+export async function splitTimelineItem(itemId, atSeconds) {
+  return apiRequest(`/api/timeline/${encodeURIComponent(itemId)}/split`, {
+    method: 'POST',
+    body: { atSeconds },
+    timeoutMs: 25000,
+  });
+}
+
+export async function renderTimeline(payload) {
+  return apiRequest('/api/timeline/render', {
+    method: 'POST',
+    body: payload,
+    timeoutMs: 30000,
+  });
+}
+
 export async function fetchWorkflows() {
   return apiRequest('/api/workflows', { timeoutMs: 25000 });
 }
@@ -787,6 +803,26 @@ export async function addWorkflowEdge(workflowId, payload) {
     method: 'POST',
     body: payload,
     timeoutMs: 25000,
+  });
+}
+
+export async function fetchWorkflowRuns(workflowId) {
+  return apiRequest(`/api/workflows/${encodeURIComponent(workflowId)}/runs`, { timeoutMs: 25000 });
+}
+
+export async function runWorkflow(workflowId, payload = {}) {
+  return apiRequest(`/api/workflows/${encodeURIComponent(workflowId)}/runs`, {
+    method: 'POST',
+    body: payload,
+    timeoutMs: 30000,
+  });
+}
+
+export async function retryWorkflowRun(workflowId, runId, payload = {}) {
+  return apiRequest(`/api/workflows/${encodeURIComponent(workflowId)}/runs/${encodeURIComponent(runId)}/retry`, {
+    method: 'POST',
+    body: payload,
+    timeoutMs: 30000,
   });
 }
 
@@ -816,6 +852,25 @@ export async function fetchCharacter(characterId) {
 
 export async function fetchCharacterReference(characterId) {
   return apiRequest(`/api/characters/${encodeURIComponent(characterId)}/use`, { timeoutMs: 25000 });
+}
+
+export async function fetchCharacterTrainings(characterId) {
+  return apiRequest(`/api/characters/${encodeURIComponent(characterId)}/trainings`, { timeoutMs: 25000 });
+}
+
+export async function createCharacterTraining(characterId, configuration = {}) {
+  return apiRequest(`/api/characters/${encodeURIComponent(characterId)}/trainings`, {
+    method: 'POST',
+    body: { configuration },
+    timeoutMs: 90000,
+  });
+}
+
+export async function deleteCharacterModel(characterId, trainingId) {
+  return apiRequest(`/api/characters/${encodeURIComponent(characterId)}/trainings/${encodeURIComponent(trainingId)}/model`, {
+    method: 'DELETE',
+    timeoutMs: 90000,
+  });
 }
 
 export async function setCharacterConsent(characterId, payload) {

@@ -12,7 +12,7 @@ import express from "express";
 import cors from "cors";
 import crypto from "node:crypto";
 import { createReadStream, createWriteStream, existsSync, openAsBlob, readFileSync } from "node:fs";
-import { mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { Readable, Transform, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -21,6 +21,9 @@ import { assertProductionInfrastructureReady, getProductionReadinessReport } fro
 import { createRuntimeStore } from "./postgres-store.js";
 import { createSupabaseAdminClient, createSupabaseStorageService, createSupabaseUserClient, verifySupabaseJwt } from "./supabase-service.js";
 import { assertMediaSignature, assertRealityTransformMedia, extractVideoFrame, validateMediaFile } from "./media-validation.js";
+import { mediaBinaryStatus } from "./media-binaries.js";
+import { renderTimeline } from "./timeline-renderer.js";
+import { createCharacterTrainingAdapter } from "./character-training-adapter.js";
 import {
   SLT_ERROR_BY_NAME,
   SLT_ERROR_REGISTRY,
@@ -41,6 +44,7 @@ let supabaseAdmin;
 let supabaseAuth;
 
 function loadEnvFile(filename) {
+  if (process.env.SLT_SKIP_ENV_FILES === "1") return false;
   const filePath = typeof filename === "string" && filename.includes("/")
     ? filename
     : resolve(projectDir, filename);
@@ -69,6 +73,7 @@ const startupInfrastructureReadiness = assertProductionInfrastructureReady(proce
 supabaseStorage = createSupabaseStorageService(process.env);
 supabaseAdmin = createSupabaseAdminClient(process.env);
 supabaseAuth = createSupabaseUserClient(process.env);
+const characterTrainingAdapter = createCharacterTrainingAdapter(process.env);
 
 function envList(key) {
   return String(process.env[key] || "")
@@ -1254,6 +1259,7 @@ const state = {
   characterCaptureSessions: [],
   characterAssets: [],
   characterVersions: [],
+  characterTrainings: [],
   creativeReferences: [],
   scenes: [],
   sceneItems: [],
@@ -1261,6 +1267,8 @@ const state = {
   workflows: [],
   workflowNodes: [],
   workflowEdges: [],
+  workflowRuns: [],
+  workflowNodeRuns: [],
   appInstances: [],
   webhookEvents: [],
   paymentEvents: [],
@@ -1355,6 +1363,7 @@ function hydrateRuntimeState(persisted = {}) {
     "characterCaptureSessions",
     "characterAssets",
     "characterVersions",
+    "characterTrainings",
     "creativeReferences",
     "scenes",
     "sceneItems",
@@ -1362,6 +1371,8 @@ function hydrateRuntimeState(persisted = {}) {
     "workflows",
     "workflowNodes",
     "workflowEdges",
+    "workflowRuns",
+    "workflowNodeRuns",
     "appInstances",
     "webhookEvents",
     "paymentEvents",
@@ -8507,6 +8518,7 @@ app.get("/health", (_request, response) => {
       configured: supabaseStorage.configured || Boolean(process.env.SLT_STORAGE_DIR),
       bucket: supabaseStorage.bucket || "local-assets"
     },
+    mediaTools: mediaBinaryStatus(),
     providersConnected: providers.filter((provider) => provider.connected).length,
     providersTotal: providers.length
   });
@@ -10580,11 +10592,17 @@ app.get("/api/characters", (request, response) => {
   const characters = filterRecordsForAuth(state.characters, auth).map((character) => {
     const creativeAsset = ensureCharacterCreativeAsset(character);
     const summary = characterDatasetSummary(character.id, auth);
+    const training = state.characterTrainings
+      .filter((item) => item.characterId === character.id && canAccessRecord(item, auth))
+      .sort((left, right) => new Date(right.updatedAt || 0) - new Date(left.updatedAt || 0))[0] || null;
     return {
       ...character,
       readiness: summary?.requirements || null,
       ready: Boolean(summary?.ready),
       consentGranted: Boolean(summary?.consentGranted),
+      referenceStatus: summary?.ready ? "REFERENCE_READY" : "DATASET_INCOMPLETE",
+      trainingStatus: training?.status || "NOT_TRAINED",
+      trainedModelReady: training?.status === "READY",
       assetCount: Number(summary?.counts?.total || 0),
       creativeAssetId: creativeAsset?.id || null,
       previewAsset: summary?.previewAsset ? serializeAssetForClient(summary.previewAsset) : null
@@ -10632,9 +10650,144 @@ app.get("/api/characters/:characterId", (request, response) => {
       response.status(404).json({ ok: false, code: "character_not_found", error: "Character not found." });
       return;
     }
-    response.json({ ok: true, auth, ...summary });
+    const trainings = state.characterTrainings
+      .filter((item) => item.characterId === request.params.characterId && canAccessRecord(item, auth))
+      .sort((left, right) => new Date(right.updatedAt || 0) - new Date(left.updatedAt || 0));
+    response.json({
+      ok: true,
+      auth,
+      ...summary,
+      referenceStatus: summary.ready ? "REFERENCE_READY" : "DATASET_INCOMPLETE",
+      trainingStatus: trainings[0]?.status || "NOT_TRAINED",
+      trainedModelReady: trainings[0]?.status === "READY",
+      trainings,
+      trainingProvider: characterTrainingAdapter.status()
+    });
   } catch (error) {
     response.status(error.statusCode || 500).json({ ok: false, code: error.code || "character_read_failed", error: error.message });
+  }
+});
+
+app.get("/api/characters/:characterId/trainings", async (request, response) => {
+  const auth = getAuth(request);
+  try {
+    const character = findOwnedCharacter(request.params.characterId, auth);
+    if (!character) {
+      response.status(404).json({ ok: false, code: "character_not_found", error: "Character not found." });
+      return;
+    }
+    const trainings = state.characterTrainings
+      .filter((item) => item.characterId === character.id && canAccessRecord(item, auth))
+      .sort((left, right) => new Date(right.updatedAt || 0) - new Date(left.updatedAt || 0));
+    const active = trainings.find((item) => ["VALIDATING", "TRAINING"].includes(item.status) && item.externalTrainingId);
+    if (active && characterTrainingAdapter.configured) {
+      const result = await characterTrainingAdapter.getTrainingStatus(active.externalTrainingId);
+      active.status = result.status;
+      active.modelRef = result.modelRef || active.modelRef;
+      active.error = result.error || null;
+      active.updatedAt = new Date().toISOString();
+      if (["READY", "FAILED"].includes(active.status)) active.completedAt = active.updatedAt;
+      if (active.status === "READY") {
+        character.datasetStatus = "trained";
+        character.trainingProvider = active.provider;
+        character.providerModelId = active.modelRef;
+        character.updatedAt = active.updatedAt;
+      }
+    }
+    response.json({ ok: true, auth, trainings, provider: characterTrainingAdapter.status() });
+  } catch (error) {
+    response.status(error.statusCode || 502).json({ ok: false, code: error.code || "character_training_status_failed", error: sanitizeDiagnosticText(error.message) });
+  }
+});
+
+app.post("/api/characters/:characterId/trainings", async (request, response) => {
+  const auth = getAuth(request);
+  try {
+    const summary = characterDatasetSummary(request.params.characterId, auth);
+    if (!summary) {
+      response.status(404).json({ ok: false, code: "character_not_found", error: "Character not found." });
+      return;
+    }
+    if (!summary.ready) {
+      response.status(422).json({
+        ok: false,
+        code: "character_dataset_not_ready",
+        error: "Complete the recommended Character dataset and consent before training.",
+        referenceStatus: "DATASET_INCOMPLETE",
+        requirements: summary.requirements
+      });
+      return;
+    }
+    if (!characterTrainingAdapter.configured) {
+      response.status(409).json({
+        ok: false,
+        code: "character_training_provider_unavailable",
+        error: "Trained Model is Coming Soon. This Character is REFERENCE READY and can already be used in Image, Video and Scene Builder.",
+        referenceStatus: "REFERENCE_READY",
+        trainingStatus: "NOT_TRAINED",
+        provider: characterTrainingAdapter.status()
+      });
+      return;
+    }
+    const now = new Date().toISOString();
+    const training = {
+      id: requestId("character_training"),
+      tenantId: requestIdentity(request, auth),
+      userId: auth.userId || null,
+      characterId: summary.character.id,
+      provider: characterTrainingAdapter.provider,
+      externalTrainingId: null,
+      status: "VALIDATING",
+      modelRef: null,
+      error: null,
+      configuration: request.body?.configuration && typeof request.body.configuration === "object" ? request.body.configuration : {},
+      metadata: { assetCount: summary.counts.total },
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null
+    };
+    state.characterTrainings.unshift(training);
+    const result = await characterTrainingAdapter.createTraining({
+      characterId: summary.character.id,
+      assets: summary.assets.map(({ asset, link }) => ({ assetId: asset.id, url: asset.publicUrl, category: link.category, angle: link.angle, expression: link.expression })),
+      configuration: training.configuration
+    });
+    training.externalTrainingId = result.externalTrainingId;
+    training.status = result.status;
+    training.modelRef = result.modelRef;
+    training.updatedAt = new Date().toISOString();
+    if (["READY", "FAILED"].includes(training.status)) training.completedAt = training.updatedAt;
+    response.status(202).json({ ok: true, accepted: true, auth, training, provider: characterTrainingAdapter.status() });
+  } catch (error) {
+    response.status(error.statusCode || 502).json({ ok: false, code: error.code || "character_training_create_failed", error: sanitizeDiagnosticText(error.message) });
+  }
+});
+
+app.delete("/api/characters/:characterId/trainings/:trainingId/model", async (request, response) => {
+  const auth = getAuth(request);
+  try {
+    const character = findOwnedCharacter(request.params.characterId, auth);
+    const training = state.characterTrainings.find((item) => item.id === request.params.trainingId && item.characterId === character?.id && canAccessRecord(item, auth));
+    if (!training) {
+      response.status(404).json({ ok: false, code: "character_training_not_found", error: "Character training not found." });
+      return;
+    }
+    if (!training.externalTrainingId || !characterTrainingAdapter.configured) {
+      response.status(409).json({ ok: false, code: "character_training_provider_unavailable", error: "No external trained model is connected to delete." });
+      return;
+    }
+    await characterTrainingAdapter.deleteCharacterModel(training.externalTrainingId);
+    training.status = "DATASET";
+    training.modelRef = null;
+    training.metadata = { ...(training.metadata || {}), modelDeletedAt: new Date().toISOString() };
+    training.updatedAt = training.metadata.modelDeletedAt;
+    character.datasetStatus = "ready";
+    character.providerModelId = null;
+    character.trainingProvider = null;
+    character.updatedAt = training.updatedAt;
+    response.json({ ok: true, auth, training, message: "External Character model deleted. The reference dataset remains available." });
+  } catch (error) {
+    response.status(error.statusCode || 502).json({ ok: false, code: error.code || "character_model_delete_failed", error: sanitizeDiagnosticText(error.message) });
   }
 });
 
@@ -11206,7 +11359,7 @@ app.delete("/api/assets/:assetId", async (request, response) => {
 
 const creativeReferenceTypes = new Set(["FACE", "CHARACTER", "IMAGE", "STYLE", "PRODUCT", "LOCATION", "AUDIO", "MUSIC", "VOICE"]);
 const timelineTrackTypes = new Set(["VIDEO", "DIALOGUE", "VOICE", "MUSIC", "SFX", "AMBIENCE", "FOLEY", "EFFECT"]);
-const workflowNodeTypes = new Set(["TEXT", "IMAGE", "VIDEO", "MUSIC", "AUDIO", "VOICE", "CHARACTER", "SCENE", "UTILITY"]);
+const workflowNodeTypes = new Set(["TEXT", "IMAGE", "VIDEO", "MUSIC", "SOUND", "AUDIO", "VOICE", "CHARACTER", "SCENE", "TIMELINE", "UTILITY"]);
 
 function normalizeReferenceType(value = "IMAGE") {
   const normalized = String(value || "IMAGE").trim().toUpperCase();
@@ -11311,12 +11464,18 @@ app.post("/api/assets/:assetId/actions", (request, response) => {
   const action = String(request.body?.action || "").trim().toUpperCase();
   const navigation = {
     OPEN: `/library?assetId=${encodeURIComponent(asset.id)}`,
+    OPEN_IMAGE: `/library?assetId=${encodeURIComponent(asset.id)}`,
+    OPEN_VIDEO: `/library?assetId=${encodeURIComponent(asset.id)}`,
+    OPEN_MUSIC: `/library?assetId=${encodeURIComponent(asset.id)}`,
+    OPEN_SOUND: `/library?assetId=${encodeURIComponent(asset.id)}`,
     DOWNLOAD: `/api/assets/${encodeURIComponent(asset.id)}/download`,
     USE_IN_VIDEO: `/video?studio=v2&referenceAssetId=${encodeURIComponent(asset.id)}`,
     USE_IN_IMAGE: `/image?studio=v2&referenceAssetId=${encodeURIComponent(asset.id)}`,
+    USE_IN_SCENE: `/scene-builder?assetId=${encodeURIComponent(asset.id)}`,
     OPEN_FRAME_IN_IMAGE: `/image?studio=v2&referenceAssetId=${encodeURIComponent(asset.id)}&versionType=VARIATION`,
     GENERATE_SOUND: `/sound?referenceAssetId=${encodeURIComponent(asset.id)}`,
-    GENERATE_MUSIC: `/music?referenceAssetId=${encodeURIComponent(asset.id)}`
+    GENERATE_MUSIC: `/music?referenceAssetId=${encodeURIComponent(asset.id)}`,
+    OPEN_TIMELINE: `/video?studio=v2&projectId=${encodeURIComponent(request.body?.projectId || asset.projectId || "")}`
   };
   if (navigation[action]) {
     response.json({ ok: true, auth, action, asset: serializeAssetForClient(asset), navigateTo: navigation[action] });
@@ -11325,6 +11484,93 @@ app.post("/api/assets/:assetId/actions", (request, response) => {
   if (action === "ADD_AS_REFERENCE") {
     const reference = createCreativeReference({ auth, asset, payload: request.body || {} });
     response.status(201).json({ ok: true, auth, action, reference: serializeReference(reference, auth) });
+    return;
+  }
+  if (action === "ADD_TO_CHARACTER") {
+    const character = findOwnedCharacter(request.body?.characterId, auth);
+    if (!character) {
+      response.status(404).json({ ok: false, code: "character_not_found", error: "Choose an existing Character first." });
+      return;
+    }
+    const summary = characterDatasetSummary(character.id, auth);
+    if (!summary?.consentGranted) {
+      response.status(409).json({ ok: false, code: "character_consent_required", error: "Character consent is required before linking this Asset." });
+      return;
+    }
+    const duplicate = state.characterAssets.find((item) => item.characterId === character.id && item.assetId === asset.id);
+    if (duplicate) {
+      response.json({ ok: true, auth, action, characterAsset: duplicate, duplicate: true });
+      return;
+    }
+    const characterAsset = {
+      id: requestId("character_asset"),
+      characterId: character.id,
+      assetId: asset.id,
+      tenantId: character.tenantId,
+      category: String(request.body?.category || (String(asset.contentType || "").startsWith("video/") ? "reference_video" : "identity_photo")).slice(0, 80),
+      angle: null,
+      expression: null,
+      captureStage: "library",
+      qualityStatus: "pending",
+      consentScope: "character_training",
+      metadata: { source: "library_action", originalName: asset.originalName || null },
+      createdAt: new Date().toISOString()
+    };
+    state.characterAssets.unshift(characterAsset);
+    character.updatedAt = new Date().toISOString();
+    response.status(201).json({ ok: true, auth, action, characterAsset });
+    return;
+  }
+  if (action === "ADD_TO_TIMELINE") {
+    const scene = request.body?.sceneId
+      ? state.scenes.find((item) => item.id === request.body.sceneId && canAccessRecord(item, auth))
+      : null;
+    const projectId = request.body?.projectId || scene?.projectId || asset.projectId || null;
+    if (!projectId && !scene) {
+      response.status(400).json({ ok: false, code: "timeline_target_required", error: "Choose a Project or Scene before adding an Asset to Timeline." });
+      return;
+    }
+    const contentType = String(asset.contentType || "");
+    const kind = String(asset.kind || "").toLowerCase();
+    const inferredTrack = kind === "music"
+      ? "MUSIC"
+      : kind === "voice"
+        ? "VOICE"
+        : contentType.startsWith("audio/") || ["sound", "audio"].includes(kind)
+          ? String(request.body?.trackType || "SFX").toUpperCase()
+          : "VIDEO";
+    const trackType = timelineTrackTypes.has(inferredTrack) ? inferredTrack : "SFX";
+    const sameTrack = state.timelineItems.filter((item) => !item.deletedAt
+      && item.trackType === trackType
+      && (scene ? item.sceneId === scene.id : item.projectId === projectId));
+    const startSeconds = request.body?.startSeconds == null
+      ? Math.max(0, ...sameTrack.map((item) => Number(item.startSeconds || 0) + Number(item.durationSeconds || 0)))
+      : Math.max(0, Number(request.body.startSeconds || 0));
+    const now = new Date().toISOString();
+    const timelineItem = {
+      id: requestId("timeline_item"),
+      tenantId: requestIdentity(request, auth),
+      projectId,
+      sessionId: request.body?.sessionId || scene?.sessionId || asset.sessionId || null,
+      sceneId: scene?.id || null,
+      assetId: asset.id,
+      trackType,
+      startSeconds,
+      sourceStartSeconds: 0,
+      durationSeconds: Math.max(0.25, Number(request.body?.durationSeconds || asset.metadata?.durationSeconds || 5)),
+      position: sameTrack.length,
+      muted: false,
+      solo: false,
+      volume: 1,
+      pan: 0,
+      fadeInSeconds: 0,
+      fadeOutSeconds: 0,
+      parameters: { source: "library_action" },
+      createdAt: now,
+      updatedAt: now
+    };
+    state.timelineItems.push(timelineItem);
+    response.status(201).json({ ok: true, auth, action, timelineItem });
     return;
   }
   if (action === "ADD_TO_SCENE") {
@@ -11350,6 +11596,36 @@ app.post("/api/assets/:assetId/actions", (request, response) => {
     state.sceneItems.push(item);
     if (asset.kind === "image") scene.currentFrameAssetId = asset.id;
     if (asset.kind === "video") scene.currentVideoAssetId = asset.id;
+    const contentType = String(asset.contentType || "");
+    if (contentType.startsWith("video/") || contentType.startsWith("audio/")) {
+      const kind = String(asset.kind || "").toLowerCase();
+      const trackType = kind === "music" ? "MUSIC" : kind === "voice" ? "VOICE" : contentType.startsWith("video/") ? "VIDEO" : "SFX";
+      const sameTrack = state.timelineItems.filter((entry) => !entry.deletedAt && entry.sceneId === scene.id && entry.trackType === trackType);
+      const timelineItem = {
+        id: requestId("timeline_item"),
+        tenantId: scene.tenantId,
+        projectId: scene.projectId || asset.projectId || null,
+        sessionId: scene.sessionId || asset.sessionId || null,
+        sceneId: scene.id,
+        assetId: asset.id,
+        trackType,
+        startSeconds: Math.max(0, ...sameTrack.map((entry) => Number(entry.startSeconds || 0) + Number(entry.durationSeconds || 0))),
+        sourceStartSeconds: 0,
+        durationSeconds: Math.max(0.25, Number(asset.metadata?.durationSeconds || 5)),
+        position: sameTrack.length,
+        muted: false,
+        solo: false,
+        volume: 1,
+        pan: 0,
+        fadeInSeconds: 0,
+        fadeOutSeconds: 0,
+        parameters: { source: "scene_library_action" },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      state.timelineItems.push(timelineItem);
+      item.parameters.timelineItemId = timelineItem.id;
+    }
     scene.updatedAt = new Date().toISOString();
     response.status(201).json({ ok: true, auth, action, scene, item });
     return;
@@ -11509,6 +11785,7 @@ app.post("/api/timeline", (request, response) => {
     assetId: request.body?.assetId || null,
     trackType,
     startSeconds: Math.max(0, Number(request.body?.startSeconds || 0)),
+    sourceStartSeconds: Math.max(0, Number(request.body?.sourceStartSeconds || 0)),
     durationSeconds: request.body?.durationSeconds == null ? null : Math.max(0, Number(request.body.durationSeconds)),
     position: Number(request.body?.position || 0),
     muted: Boolean(request.body?.muted),
@@ -11532,11 +11809,12 @@ app.patch("/api/timeline/:itemId", (request, response) => {
     response.status(404).json({ ok: false, code: "timeline_item_not_found", error: "Timeline item not found." });
     return;
   }
-  for (const key of ["startSeconds", "durationSeconds", "position", "volume", "pan", "fadeInSeconds", "fadeOutSeconds"]) {
+  for (const key of ["startSeconds", "sourceStartSeconds", "durationSeconds", "position", "volume", "pan", "fadeInSeconds", "fadeOutSeconds"]) {
     if (request.body?.[key] !== undefined) item[key] = Number(request.body[key]);
   }
   for (const key of ["muted", "solo"]) if (request.body?.[key] !== undefined) item[key] = Boolean(request.body[key]);
   if (request.body?.trackType && timelineTrackTypes.has(String(request.body.trackType).toUpperCase())) item.trackType = String(request.body.trackType).toUpperCase();
+  if (request.body?.parameters && typeof request.body.parameters === "object") item.parameters = { ...(item.parameters || {}), ...request.body.parameters };
   item.updatedAt = new Date().toISOString();
   response.json({ ok: true, auth, item });
 });
@@ -11553,6 +11831,290 @@ app.delete("/api/timeline/:itemId", (request, response) => {
   response.json({ ok: true, auth, itemId: item.id });
 });
 
+app.post("/api/timeline/:itemId/split", (request, response) => {
+  const auth = getAuth(request);
+  const item = state.timelineItems.find((entry) => entry.id === request.params.itemId && !entry.deletedAt);
+  if (!item || !canAccessRecord(item, auth)) {
+    response.status(404).json({ ok: false, code: "timeline_item_not_found", error: "Timeline item not found." });
+    return;
+  }
+  const start = Math.max(0, Number(item.startSeconds || 0));
+  const duration = Math.max(0, Number(item.durationSeconds || 0));
+  const atSeconds = Number(request.body?.atSeconds);
+  if (!Number.isFinite(atSeconds) || atSeconds <= start + 0.04 || atSeconds >= start + duration - 0.04) {
+    response.status(400).json({
+      ok: false,
+      code: "timeline_split_invalid",
+      error: "Split point must be inside the clip and at least 40ms from either edge."
+    });
+    return;
+  }
+  const now = new Date().toISOString();
+  const leftDuration = atSeconds - start;
+  const rightDuration = duration - leftDuration;
+  item.durationSeconds = leftDuration;
+  item.updatedAt = now;
+  const rightItem = {
+    ...item,
+    id: requestId("timeline_item"),
+    startSeconds: atSeconds,
+    sourceStartSeconds: Math.max(0, Number(item.sourceStartSeconds || 0)) + leftDuration,
+    durationSeconds: rightDuration,
+    position: Number(item.position || 0) + 1,
+    parameters: { ...(item.parameters || {}), splitFromItemId: item.id },
+    createdAt: now,
+    updatedAt: now
+  };
+  state.timelineItems.push(rightItem);
+  response.status(201).json({ ok: true, auth, leftItem: item, rightItem });
+});
+
+async function materializeTimelineAssets(items = []) {
+  const sources = [];
+  const temporaryPaths = [];
+  for (const item of items) {
+    const asset = state.assets.find((entry) => entry.id === item.assetId && !entry.deletedAt);
+    if (!asset) {
+      const error = new Error(`Timeline Asset ${item.assetId} was not found.`);
+      error.code = "asset_not_found";
+      throw error;
+    }
+    let fallbackUrl = asset.publicUrl || "";
+    if (asset.storageProvider === "supabase" && asset.storageKey && supabaseStorage.configured) {
+      fallbackUrl = (await supabaseStorage.createSignedDownload({ key: asset.storageKey, expiresIn: 300 })).signedUrl;
+    }
+    const source = await fileForInputAsset(asset, fallbackUrl);
+    if (source.temporary) temporaryPaths.push(source.filePath);
+    sources.push({ ...asset, filePath: source.filePath });
+  }
+  return { sources, temporaryPaths };
+}
+
+async function executeTimelineRender(jobId) {
+  const job = findJob(jobId);
+  if (!job) return;
+  let outputPath = "";
+  let temporaryPaths = [];
+  try {
+    updateJob(job.id, {
+      status: jobStates.processing,
+      progress: 8,
+      providerJobId: `ffmpeg:${job.id}`,
+      providerResult: { status: "processing", engine: "FFmpeg" }
+    });
+    appendJobEvent(job, { type: "timeline_render_started" });
+    const filter = job.parameters?.timelineFilter || {};
+    const items = state.timelineItems
+      .filter((item) => !item.deletedAt && item.tenantId === job.tenantId)
+      .filter((item) => !filter.projectId || item.projectId === filter.projectId)
+      .filter((item) => !filter.sceneId || item.sceneId === filter.sceneId);
+    const materialized = await materializeTimelineAssets(items);
+    temporaryPaths = materialized.temporaryPaths;
+    outputPath = await temporaryUploadPath("timeline-render", "mp4");
+    updateJob(job.id, { progress: 20 });
+    const render = await renderTimeline({
+      items,
+      assets: materialized.sources,
+      outputPath,
+      width: job.parameters?.width,
+      height: job.parameters?.height,
+      fps: job.parameters?.fps
+    });
+    updateJob(job.id, { progress: 82 });
+    const validation = await validateMediaFile({
+      filePath: outputPath,
+      declaredMime: "video/mp4",
+      kind: "video",
+      maxBytes: envNumber("MAX_TIMELINE_RENDER_BYTES", 4 * 1024 * 1024 * 1024),
+      probeLimits: {
+        maxDuration: envNumber("MAX_TIMELINE_DURATION_SECONDS", 7200),
+        maxWidth: 7680,
+        maxHeight: 4320,
+        maxFps: 120
+      }
+    });
+    const digest = (await hashFile(outputPath)).slice(0, 12);
+    const fileName = `timeline_${safeStorageSegment(job.tenantId)}_${Date.now()}_${digest}.mp4`;
+    const stored = await storeAssetFile({
+      filePath: outputPath,
+      contentType: "video/mp4",
+      fileName,
+      tenantId: job.tenantId,
+      move: true
+    });
+    outputPath = "";
+    const now = new Date().toISOString();
+    const asset = {
+      id: requestId("asset"),
+      tenantId: job.tenantId,
+      userId: job.userId || null,
+      jobId: job.id,
+      batchId: null,
+      projectId: job.projectId || null,
+      sessionId: job.sessionId || null,
+      parentAssetId: null,
+      parentVersionId: null,
+      version: 1,
+      versionType: "EDIT",
+      displayName: job.title,
+      kind: "video",
+      module: "video",
+      provider: "SLT FFmpeg",
+      role: "timeline_render",
+      originalName: fileName,
+      originalUrl: "slt-timeline",
+      publicUrl: stored.publicUrl,
+      storageKey: stored.storageKey,
+      storageProvider: stored.provider || "local",
+      storagePath: stored.storagePath || null,
+      contentType: "video/mp4",
+      bytes: validation.bytes,
+      status: "stored",
+      metadata: {
+        durationSeconds: render.durationSeconds,
+        width: render.width,
+        height: render.height,
+        frameRate: render.fps,
+        serverValidated: true,
+        timelineManifest: render.manifest
+      },
+      createdAt: now
+    };
+    state.assets.unshift(asset);
+    state.assets = state.assets.slice(0, 300);
+    const ledgerResolution = job.reservationId
+      ? await resolveReservationTransactional({
+          reservationId: job.reservationId,
+          outcome: "capture",
+          jobId: job.id,
+          idempotencyKey: `capture:${job.reservationId}`,
+          reason: "timeline_render_completed_asset_stored"
+        })
+      : { reservation: null, transaction: null, wallet: ledgerSnapshot(job.tenantId) };
+    updateJob(job.id, {
+      status: jobStates.completed,
+      progress: 100,
+      assetId: asset.id,
+      assets: [asset],
+      outputUrl: asset.publicUrl,
+      outputUrls: [asset.publicUrl],
+      storage: { status: "stored", provider: asset.storageProvider },
+      reservationStatus: ledgerResolution.reservation?.status || job.reservationStatus,
+      ledgerTransactionId: ledgerResolution.transaction?.id || null,
+      providerResult: { status: "completed", engine: "FFmpeg", ...render, outputPath: undefined }
+    });
+    updateHistoryItem(job.historyItemId, {
+      status: "completed",
+      message: "Timeline rendered with FFmpeg and saved to SLT Storage.",
+      creditsUsed: job.creditCost,
+      result: {
+        jobId: job.id,
+        status: "completed",
+        assetId: asset.id,
+        outputUrl: asset.publicUrl,
+        outputUrls: [asset.publicUrl],
+        storage: { provider: asset.storageProvider, storageKey: asset.storageKey },
+        timelineManifest: render.manifest
+      }
+    });
+    const project = state.projects.find((entry) => entry.id === job.projectId);
+    if (project) {
+      project.status = jobStates.completed;
+      project.thumbnail = asset.publicUrl;
+      project.updatedAt = now;
+    }
+    appendJobEvent(job, { type: "timeline_render_completed", assetId: asset.id });
+    await persistRuntimeState(`timeline_render_completed:${job.id}`);
+  } catch (error) {
+    await failAsyncJob({ job: findJob(jobId), error: mutableCodedError(error, error.code || "ffmpeg_render_failed") });
+  } finally {
+    if (outputPath) await rm(outputPath, { force: true }).catch(() => {});
+    await Promise.all(temporaryPaths.map((filePath) => rm(filePath, { force: true }).catch(() => {})));
+  }
+}
+
+app.post("/api/timeline/render", async (request, response) => {
+  const auth = getAuth(request);
+  const tenantId = requestIdentity(request, auth);
+  const projectId = String(request.body?.projectId || "").trim();
+  const sceneId = String(request.body?.sceneId || "").trim();
+  const items = filterRecordsForAuth(state.timelineItems, auth)
+    .filter((item) => !item.deletedAt)
+    .filter((item) => !projectId || item.projectId === projectId)
+    .filter((item) => !sceneId || item.sceneId === sceneId);
+  if (!items.length) {
+    response.status(400).json({ ok: false, code: "timeline_empty", error: "Add at least one Asset to the Timeline before rendering." });
+    return;
+  }
+  const jobId = requestId("job");
+  const creditCost = Math.max(0, envNumber("TIMELINE_RENDER_CREDITS", 5));
+  let reservationResult;
+  try {
+    reservationResult = await reserveCreditsTransactional({
+      amount: creditCost,
+      kind: "video",
+      auth,
+      request,
+      idempotencyKey: String(request.header?.("idempotency-key") || `timeline-render:${tenantId}:${jobId}`),
+      metadata: { jobId, projectId: projectId || null, sceneId: sceneId || null, operation: "timeline_render" }
+    });
+  } catch (error) {
+    response.status(error.statusCode || 402).json({ ok: false, code: error.code || "insufficient_credits", error: error.message, readableError: error.readableError || error.message });
+    return;
+  }
+  const checks = {
+    auth,
+    plan: { allowed: true },
+    provider: { name: "SLT FFmpeg", connected: true, adapter: "ffmpeg-timeline", execution: "async" },
+    credits: {
+      cost: creditCost,
+      reservation: reservationResult.reservation,
+      wallet: reservationResult.wallet,
+      remaining: reservationResult.wallet?.availableCredits
+    }
+  };
+  const title = String(request.body?.title || "Timeline render").slice(0, 180);
+  const job = createJob({
+    jobId,
+    kind: "video",
+    title,
+    providerName: "SLT FFmpeg",
+    prompt: "Timeline composition",
+    payload: {
+      operation: "timeline_render",
+      actionId: "timeline_render",
+      tool: "TIMELINE_RENDER",
+      projectId: projectId || items[0]?.projectId || null,
+      sessionId: request.body?.sessionId || items[0]?.sessionId || null,
+      timelineFilter: { projectId: projectId || null, sceneId: sceneId || null },
+      width: request.body?.width,
+      height: request.body?.height,
+      fps: request.body?.fps
+    },
+    checks,
+    request,
+    projectId: projectId || items[0]?.projectId || null,
+    sessionId: request.body?.sessionId || items[0]?.sessionId || null
+  });
+  if (reservationResult.reservation) reservationResult.reservation.jobId = job.id;
+  const historyItem = buildQueuedHistoryEntry({ job, checks });
+  state.history.unshift(historyItem);
+  job.historyItemId = historyItem.id;
+  updateJob(job.id, { status: jobStates.processing, progress: 1 });
+  setTimeout(() => void executeTimelineRender(job.id), 0);
+  response.status(202).json({
+    ok: true,
+    accepted: true,
+    async: true,
+    jobId: job.id,
+    request_id: job.id,
+    job: serializeJob(job),
+    reservationId: job.reservationId,
+    estimatedCredits: creditCost,
+    message: "Timeline render queued. Poll the Job endpoint for completion."
+  });
+});
+
 function workflowPayload(workflow, auth) {
   return {
     ...workflow,
@@ -11561,10 +12123,330 @@ function workflowPayload(workflow, auth) {
   };
 }
 
+function workflowRunPayload(run, auth) {
+  return {
+    ...run,
+    nodeRuns: state.workflowNodeRuns.filter((item) => item.workflowRunId === run.id && canAccessRecord(item, auth))
+  };
+}
+
+function orderedWorkflowNodes(workflowId) {
+  const nodes = state.workflowNodes.filter((item) => item.workflowId === workflowId);
+  const edges = state.workflowEdges.filter((item) => item.workflowId === workflowId);
+  const incoming = new Map(nodes.map((node) => [node.id, 0]));
+  const outgoing = new Map(nodes.map((node) => [node.id, []]));
+  for (const edge of edges) {
+    if (!incoming.has(edge.targetNodeId) || !outgoing.has(edge.sourceNodeId)) continue;
+    incoming.set(edge.targetNodeId, incoming.get(edge.targetNodeId) + 1);
+    outgoing.get(edge.sourceNodeId).push(edge.targetNodeId);
+  }
+  const ready = nodes.filter((node) => incoming.get(node.id) === 0)
+    .sort((left, right) => Number(left.position?.x || 0) - Number(right.position?.x || 0));
+  const ordered = [];
+  while (ready.length) {
+    const node = ready.shift();
+    ordered.push(node);
+    for (const targetId of outgoing.get(node.id) || []) {
+      incoming.set(targetId, incoming.get(targetId) - 1);
+      if (incoming.get(targetId) === 0) ready.push(nodes.find((item) => item.id === targetId));
+    }
+  }
+  if (ordered.length !== nodes.length) {
+    const error = new Error("Workflow contains a cycle and cannot be executed.");
+    error.code = "workflow_cycle";
+    throw error;
+  }
+  return { nodes: ordered, edges };
+}
+
+function syntheticGenerationResponse() {
+  let statusCode = 200;
+  let resolveResult;
+  const result = new Promise((resolve) => { resolveResult = resolve; });
+  return {
+    result,
+    response: {
+      status(code) { statusCode = code; return this; },
+      json(payload) { resolveResult({ statusCode, payload }); return this; },
+      setHeader() { return this; }
+    }
+  };
+}
+
+async function waitForWorkflowJob(jobId, timeoutMs = 30 * 60 * 1000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const job = findJob(jobId);
+    if (!job) {
+      const error = new Error("Workflow generation Job disappeared.");
+      error.code = "workflow_job_missing";
+      throw error;
+    }
+    if (job.status === jobStates.completed) return job;
+    if ([jobStates.failed, jobStates.cancelled].includes(job.status)) {
+      const error = new Error(job.error?.message || "Workflow generation Job failed.");
+      error.code = job.error?.code || "workflow_job_failed";
+      throw error;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1000));
+  }
+  const error = new Error("Workflow generation timed out while waiting for its provider Job.");
+  error.code = "workflow_job_timeout";
+  throw error;
+}
+
+function workflowPredecessorOutputs(node, edges, outputs) {
+  return edges
+    .filter((edge) => edge.targetNodeId === node.id)
+    .map((edge) => outputs.get(edge.sourceNodeId))
+    .filter(Boolean);
+}
+
+async function executeWorkflowRun(runId, authToken = "") {
+  const run = state.workflowRuns.find((item) => item.id === runId);
+  if (!run) return;
+  const workflow = state.workflows.find((item) => item.id === run.workflowId);
+  if (!workflow) return;
+  try {
+    const { nodes, edges } = orderedWorkflowNodes(workflow.id);
+    run.status = "RUNNING";
+    run.startedAt = new Date().toISOString();
+    run.updatedAt = run.startedAt;
+    workflow.status = "RUNNING";
+    const outputs = new Map();
+    for (const node of nodes) {
+      const now = new Date().toISOString();
+      const nodeRun = {
+        id: requestId("workflow_node_run"),
+        tenantId: run.tenantId,
+        workflowRunId: run.id,
+        workflowNodeId: node.id,
+        jobId: null,
+        status: "RUNNING",
+        input: { runInput: run.input, predecessors: workflowPredecessorOutputs(node, edges, outputs) },
+        output: {},
+        error: null,
+        attempt: 1,
+        createdAt: now,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now
+      };
+      state.workflowNodeRuns.push(nodeRun);
+      const predecessors = workflowPredecessorOutputs(node, edges, outputs);
+      const predecessorAssets = predecessors.flatMap((entry) => entry.assetIds || (entry.assetId ? [entry.assetId] : []));
+      const configuration = node.configuration || {};
+      let output;
+
+      if (node.nodeType === "TEXT") {
+        output = { text: String(configuration.text || run.input.prompt || "").trim() };
+      } else if (["SCENE", "CHARACTER"].includes(node.nodeType)) {
+        output = {
+          sceneId: configuration.sceneId || run.input.sceneId || null,
+          characterIds: configuration.characterIds || run.input.characterIds || [],
+          text: configuration.prompt || predecessors.find((entry) => entry.text)?.text || run.input.prompt || ""
+        };
+      } else if (["IMAGE", "VIDEO", "MUSIC", "SOUND", "AUDIO", "VOICE"].includes(node.nodeType)) {
+        const kind = node.nodeType === "AUDIO" || node.nodeType === "VOICE" ? "sound" : node.nodeType.toLowerCase();
+        const prompt = String(configuration.prompt || predecessors.find((entry) => entry.text)?.text || run.input.prompt || workflow.description || workflow.name);
+        const body = {
+          ...configuration,
+          title: configuration.title || `${workflow.name} · ${node.label}`,
+          kind,
+          prompt,
+          provider: configuration.provider || "SLT Auto",
+          providerLabel: configuration.provider || "SLT Auto",
+          capabilityAware: true,
+          outputCount: 1,
+          projectId: run.projectId || workflow.projectId || undefined,
+          sessionId: run.sessionId || undefined,
+          operation: configuration.operation || (kind === "video" && predecessorAssets.length ? "image_to_video" : `text_to_${kind}`),
+          actionId: configuration.operation || (kind === "video" && predecessorAssets.length ? "image_to_video" : `text_to_${kind}`),
+          referenceAssetIds: [...new Set([...(configuration.referenceAssetIds || []), ...predecessorAssets])],
+          sourceAssetId: configuration.sourceAssetId || predecessorAssets[0] || undefined
+        };
+        const requestKey = `workflow:${run.id}:${node.id}`;
+        const fakeRequest = {
+          body,
+          path: `/api/generate/${kind}`,
+          method: "POST",
+          query: {},
+          ip: "workflow-engine",
+          socket: { remoteAddress: "workflow-engine" },
+          header(name) {
+            const key = String(name || "").toLowerCase();
+            if (key === "authorization") return authToken ? `Bearer ${authToken}` : "";
+            if (key === "x-slt-session") return authToken;
+            if (key === "idempotency-key") return requestKey;
+            return "";
+          }
+        };
+        const capture = syntheticGenerationResponse();
+        await handleGenerate(kind)(fakeRequest, capture.response);
+        const accepted = await capture.result;
+        if (accepted.statusCode >= 400 || accepted.payload?.ok === false) {
+          const error = new Error(accepted.payload?.readableError || accepted.payload?.error || `Workflow ${kind} node was rejected.`);
+          error.code = accepted.payload?.code || "workflow_generation_rejected";
+          throw error;
+        }
+        const jobId = accepted.payload?.jobId || accepted.payload?.jobIds?.[0];
+        if (!jobId) {
+          const error = new Error(`Workflow ${kind} node did not return a Job ID.`);
+          error.code = "workflow_job_id_missing";
+          throw error;
+        }
+        nodeRun.jobId = jobId;
+        const job = await waitForWorkflowJob(jobId, Number(configuration.timeoutMs || 30 * 60 * 1000));
+        output = { jobId, assetId: job.assetId || null, assetIds: (job.assets || []).map((asset) => asset.id), outputUrl: job.outputUrl || null };
+      } else if (node.nodeType === "TIMELINE" || configuration.action === "ADD_TO_TIMELINE") {
+        const assetId = configuration.assetId || predecessorAssets[0];
+        if (!assetId || !state.assets.some((asset) => asset.id === assetId && asset.tenantId === run.tenantId)) {
+          const error = new Error("ADD TO TIMELINE needs an Asset from a previous node.");
+          error.code = "workflow_timeline_asset_missing";
+          throw error;
+        }
+        const asset = state.assets.find((entry) => entry.id === assetId);
+        const trackType = String(configuration.trackType || (String(asset.contentType || "").startsWith("audio/") ? "MUSIC" : "VIDEO")).toUpperCase();
+        const timelineItem = {
+          id: requestId("timeline_item"),
+          tenantId: run.tenantId,
+          projectId: run.projectId || workflow.projectId || asset.projectId || null,
+          sessionId: run.sessionId || asset.sessionId || null,
+          sceneId: run.input.sceneId || null,
+          assetId,
+          trackType: timelineTrackTypes.has(trackType) ? trackType : "VIDEO",
+          startSeconds: Math.max(0, Number(configuration.startSeconds || 0)),
+          sourceStartSeconds: 0,
+          durationSeconds: Number(configuration.durationSeconds || asset.metadata?.durationSeconds || 5),
+          position: state.timelineItems.filter((entry) => entry.projectId === run.projectId).length,
+          muted: false,
+          solo: false,
+          volume: 1,
+          pan: 0,
+          fadeInSeconds: 0,
+          fadeOutSeconds: 0,
+          parameters: { workflowRunId: run.id, workflowNodeId: node.id },
+          createdAt: now,
+          updatedAt: now
+        };
+        state.timelineItems.push(timelineItem);
+        output = { assetId, assetIds: [assetId], timelineItemId: timelineItem.id };
+      } else {
+        output = predecessors[0] || { skipped: true, reason: "No executable action configured." };
+      }
+      outputs.set(node.id, output);
+      nodeRun.status = "COMPLETED";
+      nodeRun.output = output;
+      nodeRun.completedAt = new Date().toISOString();
+      nodeRun.updatedAt = nodeRun.completedAt;
+      await persistRuntimeState(`workflow_node_completed:${nodeRun.id}`);
+    }
+    run.status = "COMPLETED";
+    run.output = Object.fromEntries(outputs);
+    run.completedAt = new Date().toISOString();
+    run.updatedAt = run.completedAt;
+    workflow.status = "COMPLETED";
+    workflow.updatedAt = run.completedAt;
+    await persistRuntimeState(`workflow_run_completed:${run.id}`);
+  } catch (error) {
+    const failedNode = state.workflowNodeRuns.findLast?.((item) => item.workflowRunId === run.id && item.status === "RUNNING")
+      || [...state.workflowNodeRuns].reverse().find((item) => item.workflowRunId === run.id && item.status === "RUNNING");
+    if (failedNode) {
+      failedNode.status = "FAILED";
+      failedNode.error = { code: error.code || "workflow_node_failed", message: sanitizeDiagnosticText(error.message) };
+      failedNode.completedAt = new Date().toISOString();
+      failedNode.updatedAt = failedNode.completedAt;
+    }
+    run.status = "FAILED";
+    run.error = { code: error.code || "workflow_run_failed", message: sanitizeDiagnosticText(error.message) };
+    run.completedAt = new Date().toISOString();
+    run.updatedAt = run.completedAt;
+    workflow.status = "FAILED";
+    workflow.updatedAt = run.completedAt;
+    await persistRuntimeState(`workflow_run_failed:${run.id}`);
+  }
+}
+
 app.get("/api/workflows", (request, response) => {
   const auth = getAuth(request);
   const workflows = filterRecordsForAuth(state.workflows, auth).map((item) => workflowPayload(item, auth));
   response.json({ ok: true, auth, workflows, nodeTypes: [...workflowNodeTypes] });
+});
+
+app.get("/api/workflows/:workflowId/runs", (request, response) => {
+  const auth = getAuth(request);
+  const workflow = state.workflows.find((item) => item.id === request.params.workflowId && canAccessRecord(item, auth));
+  if (!workflow) {
+    response.status(404).json({ ok: false, code: "workflow_not_found", error: "Workflow not found." });
+    return;
+  }
+  const runs = state.workflowRuns.filter((item) => item.workflowId === workflow.id && canAccessRecord(item, auth)).map((run) => workflowRunPayload(run, auth));
+  response.json({ ok: true, auth, runs });
+});
+
+app.post("/api/workflows/:workflowId/runs", (request, response) => {
+  const auth = getAuth(request);
+  const workflow = state.workflows.find((item) => item.id === request.params.workflowId && canAccessRecord(item, auth));
+  if (!workflow) {
+    response.status(404).json({ ok: false, code: "workflow_not_found", error: "Workflow not found." });
+    return;
+  }
+  try {
+    orderedWorkflowNodes(workflow.id);
+  } catch (error) {
+    response.status(400).json({ ok: false, code: error.code, error: error.message });
+    return;
+  }
+  const now = new Date().toISOString();
+  const run = {
+    id: requestId("workflow_run"),
+    tenantId: requestIdentity(request, auth),
+    userId: auth.userId || null,
+    workflowId: workflow.id,
+    projectId: request.body?.projectId || workflow.projectId || null,
+    sessionId: request.body?.sessionId || null,
+    status: "PENDING",
+    input: request.body?.input && typeof request.body.input === "object" ? request.body.input : {},
+    output: {},
+    error: null,
+    createdAt: now,
+    startedAt: null,
+    completedAt: null,
+    updatedAt: now
+  };
+  state.workflowRuns.unshift(run);
+  const token = authTokenFromRequest(request);
+  setTimeout(() => void executeWorkflowRun(run.id, token), 0);
+  response.status(202).json({ ok: true, accepted: true, run: workflowRunPayload(run, auth), message: "Workflow Run queued." });
+});
+
+app.post("/api/workflows/:workflowId/runs/:runId/retry", (request, response) => {
+  const auth = getAuth(request);
+  const previous = state.workflowRuns.find((item) => item.id === request.params.runId && item.workflowId === request.params.workflowId && canAccessRecord(item, auth));
+  if (!previous) {
+    response.status(404).json({ ok: false, code: "workflow_run_not_found", error: "Workflow Run not found." });
+    return;
+  }
+  if (previous.status !== "FAILED") {
+    response.status(409).json({ ok: false, code: "workflow_run_not_failed", error: "Only failed Workflow Runs can be retried." });
+    return;
+  }
+  const now = new Date().toISOString();
+  const run = {
+    ...previous,
+    id: requestId("workflow_run"),
+    status: "PENDING",
+    input: { ...previous.input, ...(request.body?.input || {}), retryOfRunId: previous.id },
+    output: {},
+    error: null,
+    createdAt: now,
+    startedAt: null,
+    completedAt: null,
+    updatedAt: now
+  };
+  state.workflowRuns.unshift(run);
+  setTimeout(() => void executeWorkflowRun(run.id, authTokenFromRequest(request)), 0);
+  response.status(202).json({ ok: true, accepted: true, run: workflowRunPayload(run, auth), message: "Workflow Run retry queued." });
 });
 
 app.post("/api/workflows", (request, response) => {
@@ -11640,28 +12522,116 @@ app.post("/api/workflows/:workflowId/edges", (request, response) => {
   response.status(201).json({ ok: true, auth, edge, workflow: workflowPayload(workflow, auth) });
 });
 
-const creativeApplicationCatalog = [
-  { id: "storyboard", label: "Storyboard Builder", status: "AVAILABLE", route: "/scene-builder" },
-  { id: "reality-transform", label: "Reality Transform", status: "AVAILABLE", route: "/video?studio=v2&operation=reality_transform" },
-  { id: "character-pack", label: "Character Reference Pack", status: "AVAILABLE", route: "/characters" },
-  { id: "ad-creator", label: "Multimodal Ad Creator", status: "COMING_SOON", reason: "WORKFLOW_EXECUTION_NOT_CONNECTED" },
-  { id: "social-campaign", label: "Social Campaign Factory", status: "COMING_SOON", reason: "WORKFLOW_EXECUTION_NOT_CONNECTED" }
+const creativeApplicationSpecs = [
+  { id: "scene-builder", label: "Scene Builder", route: "/scene-builder", requirements: [] },
+  {
+    id: "music-video",
+    label: "Music Video",
+    requirements: [["image", "text_to_image"], ["video", "image_to_video"], ["music", "text_to_music"]],
+    nodes: [
+      ["TEXT", "Concept", {}],
+      ["IMAGE", "Key Frame", { operation: "text_to_image" }],
+      ["VIDEO", "Animate Frame", { operation: "image_to_video", durationSeconds: 5 }],
+      ["TIMELINE", "Add Video to Timeline", { action: "ADD_TO_TIMELINE", trackType: "VIDEO" }],
+      ["MUSIC", "Generate Music", { operation: "text_to_music", durationSeconds: 10 }],
+      ["TIMELINE", "Add Music to Timeline", { action: "ADD_TO_TIMELINE", trackType: "MUSIC" }]
+    ],
+    edges: [[0, 1], [1, 2], [2, 3], [0, 4], [4, 5]]
+  },
+  {
+    id: "film-score",
+    label: "Film Score",
+    requirements: [["music", "film_score"]],
+    nodes: [["SCENE", "Scene", {}], ["MUSIC", "Film Score", { operation: "film_score", durationSeconds: 15 }], ["TIMELINE", "Add Score to Timeline", { action: "ADD_TO_TIMELINE", trackType: "MUSIC" }]],
+    edges: [[0, 1], [1, 2]]
+  },
+  {
+    id: "foley-generator",
+    label: "Foley Generator",
+    requirements: [["sound", "foley"]],
+    nodes: [["SCENE", "Scene", {}], ["SOUND", "Foley", { operation: "foley", durationSeconds: 10 }], ["TIMELINE", "Add Foley to Timeline", { action: "ADD_TO_TIMELINE", trackType: "SFX" }]],
+    edges: [[0, 1], [1, 2]]
+  },
+  {
+    id: "social-reel",
+    label: "Social Reel",
+    requirements: [["image", "text_to_image"], ["video", "image_to_video"]],
+    nodes: [["TEXT", "Reel Brief", {}], ["IMAGE", "Reel Frame", { operation: "text_to_image" }], ["VIDEO", "Reel Video", { operation: "image_to_video", durationSeconds: 5, aspectRatio: "9:16" }], ["TIMELINE", "Add Reel to Timeline", { action: "ADD_TO_TIMELINE", trackType: "VIDEO" }]],
+    edges: [[0, 1], [1, 2], [2, 3]]
+  },
+  { id: "reality-transform", label: "Reality Transform", route: "/video?studio=v2&operation=reality_transform", requirements: [["video", "reality_transform"]] },
+  { id: "character-pack", label: "Character Reference Pack", route: "/characters", requirements: [] }
 ];
+
+function creativeApplicationCatalog() {
+  return creativeApplicationSpecs.map((spec) => {
+    const routes = (spec.requirements || []).map(([modality, operation]) => routeMultimodalModel({ modality, operation }));
+    const unavailable = routes.filter((route) => !route.ok);
+    if (!unavailable.length) return { ...spec, status: "AVAILABLE", reason: null };
+    const hasCompatibleRoute = unavailable.some((route) => route.candidates.length > 0);
+    return {
+      ...spec,
+      status: hasCompatibleRoute ? "TEMPORARILY_UNAVAILABLE" : "COMING_SOON",
+      reason: hasCompatibleRoute ? "REQUIRED_PROVIDER_UNAVAILABLE" : "REQUIRED_WORKFLOW_NODE_UNAVAILABLE",
+      missingOperations: unavailable.map((route) => `${route.request.modality}:${route.request.operation}`)
+    };
+  });
+}
+
+function createApplicationWorkflow({ definition, instance, auth, now }) {
+  if (!Array.isArray(definition.nodes) || !definition.nodes.length) return null;
+  const workflow = {
+    id: requestId("workflow"),
+    tenantId: instance.tenantId,
+    userId: auth.userId || null,
+    projectId: instance.projectId,
+    name: instance.title,
+    status: "DRAFT",
+    description: `${definition.label} application workflow`,
+    metadata: { applicationInstanceId: instance.id, applicationType: definition.id },
+    createdAt: now,
+    updatedAt: now
+  };
+  state.workflows.unshift(workflow);
+  const nodes = definition.nodes.map(([nodeType, label, configuration], index) => ({
+    id: requestId("workflow_node"),
+    workflowId: workflow.id,
+    tenantId: workflow.tenantId,
+    nodeType,
+    label,
+    position: { x: index * 240, y: index % 2 ? 120 : 0 },
+    configuration: { ...configuration },
+    createdAt: now,
+    updatedAt: now
+  }));
+  state.workflowNodes.push(...nodes);
+  const edges = (definition.edges || []).map(([sourceIndex, targetIndex]) => ({
+    id: requestId("workflow_edge"),
+    workflowId: workflow.id,
+    tenantId: workflow.tenantId,
+    sourceNodeId: nodes[sourceIndex].id,
+    targetNodeId: nodes[targetIndex].id,
+    metadata: { source: "application_template" },
+    createdAt: now
+  }));
+  state.workflowEdges.push(...edges);
+  return workflowPayload(workflow, auth);
+}
 
 app.get("/api/applications", (request, response) => {
   const auth = getAuth(request);
-  response.json({ ok: true, auth, applications: creativeApplicationCatalog, instances: filterRecordsForAuth(state.appInstances, auth) });
+  response.json({ ok: true, auth, applications: creativeApplicationCatalog(), instances: filterRecordsForAuth(state.appInstances, auth) });
 });
 
 app.post("/api/applications", (request, response) => {
   const auth = getAuth(request);
-  const definition = creativeApplicationCatalog.find((item) => item.id === request.body?.appType);
+  const definition = creativeApplicationCatalog().find((item) => item.id === request.body?.appType);
   if (!definition) {
     response.status(400).json({ ok: false, code: "application_not_found", error: "Application type not found." });
     return;
   }
   if (definition.status !== "AVAILABLE") {
-    response.status(409).json({ ok: false, code: "application_coming_soon", error: "Coming Soon", reason: definition.reason });
+    response.status(409).json({ ok: false, code: definition.status === "COMING_SOON" ? "application_coming_soon" : "application_temporarily_unavailable", error: definition.status === "COMING_SOON" ? "Coming Soon" : "Temporarily unavailable", reason: definition.reason, missingOperations: definition.missingOperations || [] });
     return;
   }
   const now = new Date().toISOString();
@@ -11678,8 +12648,10 @@ app.post("/api/applications", (request, response) => {
     createdAt: now,
     updatedAt: now
   };
+  const workflow = createApplicationWorkflow({ definition, instance, auth, now });
+  instance.configuration = { ...instance.configuration, workflowId: workflow?.id || null, route: definition.route || null };
   state.appInstances.unshift(instance);
-  response.status(201).json({ ok: true, auth, instance, definition });
+  response.status(201).json({ ok: true, auth, instance, definition, workflow });
 });
 
 app.post(["/api/forms/:kind", "/api/contact"], (request, response) => {
@@ -11900,6 +12872,7 @@ function resetTestState({ credits = 100 } = {}) {
   state.characterCaptureSessions = [];
   state.characterAssets = [];
   state.characterVersions = [];
+  state.characterTrainings = [];
   state.creativeReferences = [];
   state.scenes = [];
   state.sceneItems = [];
@@ -11907,6 +12880,8 @@ function resetTestState({ credits = 100 } = {}) {
   state.workflows = [];
   state.workflowNodes = [];
   state.workflowEdges = [];
+  state.workflowRuns = [];
+  state.workflowNodeRuns = [];
   state.appInstances = [];
   state.webhookEvents = [];
   state.paymentEvents = [];
@@ -11975,7 +12950,7 @@ async function startServer() {
   });
 }
 
-if (process.env.SLT_TEST_MODE !== "1") {
+if (process.env.SLT_TEST_MODE !== "1" && process.env.SLT_MANUAL_START !== "1") {
   startServer().catch((error) => {
     console.error("[SLT] Server startup failed:", error.message);
     if (error.report) {
@@ -12019,6 +12994,7 @@ export const __test = {
   multimodalModelRegistry,
   operationCatalog,
   routeMultimodalModel,
+  mediaBinaryStatus,
   runProviderGateway,
   creditCostFor,
   billableOutputCount,
@@ -12056,6 +13032,10 @@ export const __test = {
   findOwnedCharacter,
   characterDatasetSummary,
   characterCapturePlan,
+  orderedWorkflowNodes,
+  executeWorkflowRun,
+  creativeApplicationCatalog,
+  createApplicationWorkflow,
   savePlatformForm,
   buildQueuedHistoryEntry,
   completeAsyncJob,

@@ -24,6 +24,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useStudio } from '../../context/StudioContext';
 import StudioErrorPanel from './StudioErrorPanel';
+import TimelineEditor from './TimelineEditor';
 import '../../pages/VideoStudioV2Preview.css';
 
 const LEFT_TABS = ['Projects', 'Sessions', 'Assets', 'Characters', 'References'];
@@ -736,10 +737,23 @@ export default function MultimodalStudioV2({ modality = 'video' }) {
         </div>
       </aside>
 
-      <section className="video-v2-timeline" aria-label={isVideo ? 'Video timeline' : 'Image generations and versions'}>
-        <div className="video-v2-timeline-head"><div><strong>{isVideo ? 'Timeline' : 'Creative history'}</strong><span>{isVideo ? 'View only · editing Coming Soon' : `${history.length} records`}</span></div><div>{['Generations', 'Versions', 'Variations', 'Queue'].map((tab) => <button type="button" key={tab} className={bottomTab === tab ? 'is-active' : ''} onClick={() => setBottomTab(tab)}>{tab}</button>)}</div></div>
-        {isVideo ? <><div className="video-v2-ruler"><span>00:00</span><span>00:03</span><span>00:06</span><span>00:09</span><span>00:12</span></div><div className="video-v2-tracks"><div className="video-v2-track-labels"><span>V1</span><span>FX</span><span>A1</span></div><div className="video-v2-track-area"><div className="video-v2-playhead" style={{ left: `${Math.min(100, (playhead / Math.max(1, duration)) * 100)}%` }} /><div className="video-v2-track-row"><button type="button" disabled style={{ width: '100%' }}><i />Generated clip · editing Coming Soon</button></div><div className="video-v2-track-row is-fx"><span style={{ width: '100%' }}>Post effects · Coming Soon</span></div><div className="video-v2-track-row is-audio"><span style={{ width: '100%' }}>Audio separation · Coming Soon</span></div></div></div></> : <div className="video-v2-bottom-summary"><strong>{bottomTab}</strong><span>{bottomTab === 'Queue' ? `${currentQueue.length} jobs` : bottomTab === 'Versions' ? `${history.length} versions` : `${completedAssets.length} Assets`}</span><p>Every result remains attached to its Project, Session, Batch, Job and persistent Asset.</p></div>}
-      </section>
+      {isVideo ? (
+        <TimelineEditor
+          projectId={selectedProjectId}
+          sessionId={selectedSessionId}
+          assets={assets}
+          onRendered={(asset) => {
+            if (!asset) return;
+            setAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)]);
+            setSelectedAssetId(asset.id);
+          }}
+        />
+      ) : (
+        <section className="video-v2-timeline" aria-label="Image generations and versions">
+          <div className="video-v2-timeline-head"><div><strong>Creative history</strong><span>{history.length} records</span></div><div>{['Generations', 'Versions', 'Variations', 'Queue'].map((tab) => <button type="button" key={tab} className={bottomTab === tab ? 'is-active' : ''} onClick={() => setBottomTab(tab)}>{tab}</button>)}</div></div>
+          <div className="video-v2-bottom-summary"><strong>{bottomTab}</strong><span>{bottomTab === 'Queue' ? `${currentQueue.length} jobs` : bottomTab === 'Versions' ? `${history.length} versions` : `${completedAssets.length} Assets`}</span><p>Every result remains attached to its Project, Session, Batch, Job and persistent Asset.</p></div>
+        </section>
+      )}
 
       <section className="video-v2-queue" aria-label="Global generation queue">
         <div className="video-v2-section-title"><div><p>Background jobs</p><h2>Generation queue</h2></div><span>{activeJobs.length} active</span></div>

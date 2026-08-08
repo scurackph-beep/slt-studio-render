@@ -3,7 +3,9 @@ import { Link, useNavigate } from 'react-router-dom';
 import {
   assetDownloadUrl,
   deleteAsset,
+  extractVideoFrame,
   fetchAssets,
+  fetchCharacters,
   fetchProjects,
   fetchScenes,
   fetchVersions,
@@ -29,6 +31,7 @@ export default function LibraryPage() {
   const navigate = useNavigate();
   const [assets, setAssets] = useState([]);
   const [projects, setProjects] = useState([]);
+  const [characters, setCharacters] = useState([]);
   const [scenes, setScenes] = useState([]);
   const [versions, setVersions] = useState([]);
   const [status, setStatus] = useState('Loading library...');
@@ -36,16 +39,18 @@ export default function LibraryPage() {
   const [kind, setKind] = useState('all');
   const [projectId, setProjectId] = useState('');
   const [sceneId, setSceneId] = useState('');
+  const [characterId, setCharacterId] = useState('');
   const [selectedAssetId, setSelectedAssetId] = useState(new URLSearchParams(window.location.search).get('assetId') || '');
   const [displayName, setDisplayName] = useState('');
 
   const refresh = useCallback(async () => {
     setStatus('Loading library...');
-    const [result, projectResult, sceneResult, versionResult] = await Promise.all([
+    const [result, projectResult, sceneResult, versionResult, characterResult] = await Promise.all([
       fetchAssets({ kind: kind === 'all' ? '' : kind, projectId }),
       fetchProjects(),
       fetchScenes(projectId),
       fetchVersions(selectedAssetId),
+      fetchCharacters(),
     ]);
     if (!result.ok) {
       setStatus(result.message || result.data?.readableError || 'Could not load library.');
@@ -56,6 +61,7 @@ export default function LibraryPage() {
     if (projectResult.ok) setProjects(projectResult.data.projects || []);
     if (sceneResult.ok) setScenes(sceneResult.data.scenes || []);
     if (versionResult.ok) setVersions(versionResult.data.versions || []);
+    if (characterResult.ok) setCharacters(characterResult.data.characters || []);
     setStatus(result.data.assets?.length ? 'CDN assets loaded.' : 'No creations yet.');
   }, [kind, projectId, selectedAssetId]);
 
@@ -93,7 +99,9 @@ export default function LibraryPage() {
   const handleAction = async (asset, action) => {
     setBusyId(asset.id);
     const result = await runAssetAction(asset.id, action, {
+      projectId: projectId || undefined,
       sceneId: sceneId || undefined,
+      characterId: characterId || undefined,
       referenceType: asset.kind === 'music' ? 'MUSIC' : asset.kind === 'sound' ? 'AUDIO' : 'IMAGE',
       name: asset.displayName || asset.originalName || `${asset.kind} reference`,
     });
@@ -101,6 +109,17 @@ export default function LibraryPage() {
     if (!result.ok) return setStatus(result.message || result.data?.reason || 'Asset action failed.');
     setStatus(`${action.replaceAll('_', ' ')} completed.`);
     if (result.data?.navigateTo && !result.data.navigateTo.startsWith('/api/')) navigate(result.data.navigateTo);
+    await refresh();
+  };
+
+  const handleExtractFrame = async (asset) => {
+    setBusyId(asset.id);
+    const result = await extractVideoFrame(asset.id, 0);
+    setBusyId('');
+    if (!result.ok) return setStatus(result.message || 'Frame extraction failed.');
+    const frame = result.data?.asset;
+    setSelectedAssetId(frame?.id || asset.id);
+    setStatus('Frame extracted with FFmpeg and stored as a new Image Asset.');
     await refresh();
   };
 
@@ -116,6 +135,7 @@ export default function LibraryPage() {
         <label className="studio-control-group"><span className="studio-control-label">Type</span><select className="studio-select" value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All Assets</option><option value="image">Image</option><option value="video">Video</option><option value="music">Music</option><option value="sound">Sound</option><option value="audio">Audio</option></select></label>
         <label className="studio-control-group"><span className="studio-control-label">Project</span><select className="studio-select" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">All Projects</option>{projects.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>
         <label className="studio-control-group"><span className="studio-control-label">Scene target</span><select className="studio-select" value={sceneId} onChange={(event) => setSceneId(event.target.value)}><option value="">Select Scene</option>{scenes.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>
+        <label className="studio-control-group"><span className="studio-control-label">Character target</span><select className="studio-select" value={characterId} onChange={(event) => setCharacterId(event.target.value)}><option value="">Select Character</option>{characters.map((item) => <option key={item.id} value={item.id}>{item.name || item.title || item.id}{item.consentGranted ? '' : ' · Consent required'}</option>)}</select></label>
         <button type="button" className="studio-action" onClick={refresh}>[ Refresh ]</button>
       </div>
 
@@ -147,8 +167,13 @@ export default function LibraryPage() {
                   </a>
                   {String(asset.contentType || '').startsWith('image/') ? <button type="button" className="studio-action" onClick={() => handleAction(asset, 'USE_IN_VIDEO')}>[ Use in Video ]</button> : null}
                   {String(asset.contentType || '').startsWith('video/') || String(asset.contentType || '').startsWith('image/') ? <button type="button" className="studio-action" onClick={() => handleAction(asset, 'USE_IN_IMAGE')}>[ Use in Image ]</button> : null}
+                  {String(asset.contentType || '').startsWith('video/') ? <button type="button" className="studio-action" disabled={busyId === asset.id} onClick={() => handleExtractFrame(asset)}>[ Extract Frame ]</button> : null}
                   <button type="button" className="studio-action" onClick={() => handleAction(asset, 'ADD_AS_REFERENCE')}>[ Add Reference ]</button>
+                  {(String(asset.contentType || '').startsWith('image/') || String(asset.contentType || '').startsWith('video/')) ? <button type="button" className="studio-action" disabled={!characterId} onClick={() => handleAction(asset, 'ADD_TO_CHARACTER')}>[ {characterId ? 'Add to Character' : 'Choose Character'} ]</button> : null}
                   <button type="button" className="studio-action" disabled={!sceneId} onClick={() => handleAction(asset, 'ADD_TO_SCENE')}>[ {sceneId ? 'Add to Scene' : 'Choose Scene'} ]</button>
+                  {(String(asset.contentType || '').startsWith('video/') || String(asset.contentType || '').startsWith('audio/')) ? <button type="button" className="studio-action" disabled={!projectId && !sceneId} onClick={() => handleAction(asset, 'ADD_TO_TIMELINE')}>[ {projectId || sceneId ? 'Add to Timeline' : 'Choose Project'} ]</button> : null}
+                  {String(asset.contentType || '').startsWith('video/') ? <button type="button" className="studio-action" onClick={() => handleAction(asset, 'GENERATE_MUSIC')}>[ Add Music ]</button> : null}
+                  {String(asset.contentType || '').startsWith('video/') ? <button type="button" className="studio-action" onClick={() => handleAction(asset, 'GENERATE_SOUND')}>[ Add Sound ]</button> : null}
                   <button
                     type="button"
                     className="studio-action"

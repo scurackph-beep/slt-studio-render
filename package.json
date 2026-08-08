@@ -11,6 +11,8 @@
     "start:prod": "npm run build && npm run start",
     "deploy:hetzner": "bash scripts/deploy-hetzner.sh",
     "db:migrate": "node scripts/migrate-postgres.js",
+    "db:local:verify": "node scripts/verify-local-postgres.js",
+    "start:durable": "node scripts/start-local-durable.js",
     "db:verify-persistence": "node scripts/verify-supabase-persistence.js",
     "supabase:configure": "node scripts/configure-supabase.js",
     "providers:verify": "node scripts/verify-providers.js",
@@ -22,6 +24,8 @@
     "@supabase/supabase-js": "^2.110.2",
     "cors": "^2.8.5",
     "express": "^4.21.2",
+    "ffmpeg-static": "^5.3.0",
+    "ffprobe-static": "^3.1.0",
     "pg": "^8.22.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
@@ -31,6 +35,7 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
+    "embedded-postgres": "^18.4.0-beta.17",
     "oxlint": "^1.69.0",
     "vite": "^8.1.0"
   }

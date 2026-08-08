@@ -555,7 +555,10 @@ export class PostgresRuntimeStore {
       workflows,
       workflowNodes,
       workflowEdges,
-      appInstances
+      appInstances,
+      characterTrainings,
+      workflowRuns,
+      workflowNodeRuns
     ] =
       await Promise.all([
         this.pool.query("select * from users order by created_at asc limit 2000"),
@@ -587,7 +590,10 @@ export class PostgresRuntimeStore {
         this.pool.query("select * from workflows order by updated_at desc limit 10000"),
         this.pool.query("select * from workflow_nodes order by workflow_id, created_at limit 50000"),
         this.pool.query("select * from workflow_edges order by workflow_id, created_at limit 50000"),
-        this.pool.query("select * from creative_app_instances order by updated_at desc limit 10000")
+        this.pool.query("select * from creative_app_instances order by updated_at desc limit 10000"),
+        this.pool.query("select * from character_trainings order by updated_at desc limit 10000"),
+        this.pool.query("select * from workflow_runs order by created_at desc limit 10000"),
+        this.pool.query("select * from workflow_node_runs order by created_at desc limit 50000")
       ]);
     const user = users.rows.find((row) => row.tenant_id === tenantId) || users.rows[0] || {};
     const wallet = wallets.rows.find((row) => row.tenant_id === tenantId) || wallets.rows[0] || {};
@@ -770,6 +776,7 @@ export class PostgresRuntimeStore {
         assetId: row.asset_id,
         trackType: row.track_type,
         startSeconds: Number(row.start_seconds || 0),
+        sourceStartSeconds: Number(row.source_start_seconds || 0),
         durationSeconds: row.duration_seconds == null ? null : Number(row.duration_seconds),
         position: row.position,
         muted: row.muted,
@@ -830,6 +837,54 @@ export class PostgresRuntimeStore {
         configuration: row.configuration || {},
         createdAt: row.created_at,
         updatedAt: row.updated_at
+      })),
+      characterTrainings: characterTrainings.rows.map((row) => ({
+        id: row.id,
+        tenantId: row.tenant_id,
+        userId: row.user_id,
+        characterId: row.character_id,
+        provider: row.provider,
+        externalTrainingId: row.external_training_id,
+        status: row.status,
+        modelRef: row.model_ref,
+        error: row.error,
+        configuration: row.configuration || {},
+        metadata: row.metadata || {},
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        completedAt: row.completed_at
+      })),
+      workflowRuns: workflowRuns.rows.map((row) => ({
+        id: row.id,
+        tenantId: row.tenant_id,
+        userId: row.user_id,
+        workflowId: row.workflow_id,
+        projectId: row.project_id,
+        sessionId: row.session_id,
+        status: row.status,
+        input: row.input || {},
+        output: row.output || {},
+        error: row.error,
+        createdAt: row.created_at,
+        startedAt: row.started_at,
+        completedAt: row.completed_at,
+        updatedAt: row.updated_at
+      })),
+      workflowNodeRuns: workflowNodeRuns.rows.map((row) => ({
+        id: row.id,
+        tenantId: row.tenant_id,
+        workflowRunId: row.workflow_run_id,
+        workflowNodeId: row.workflow_node_id,
+        jobId: row.job_id,
+        status: row.status,
+        input: row.input || {},
+        output: row.output || {},
+        error: row.error,
+        attempt: row.attempt,
+        createdAt: row.created_at,
+        startedAt: row.started_at,
+        completedAt: row.completed_at,
+        updatedAt: row.updated_at
       }))
     };
   }
@@ -886,6 +941,9 @@ export class PostgresRuntimeStore {
       ...safeArray(state.scenes),
       ...safeArray(state.workflows),
       ...safeArray(state.appInstances),
+      ...safeArray(state.characterTrainings),
+      ...safeArray(state.workflowRuns),
+      ...safeArray(state.workflowNodeRuns),
       ...safeArray(state.errorIncidents),
       ...safeArray(state.compensationCoupons)
     ]) {
@@ -1476,10 +1534,10 @@ export class PostgresRuntimeStore {
       await client.query(
         `insert into timeline_items
           (id, tenant_id, project_id, session_id, scene_id, asset_id, track_type,
-           start_seconds, duration_seconds, position, muted, solo, volume, pan,
+           start_seconds, source_start_seconds, duration_seconds, position, muted, solo, volume, pan,
            fade_in_seconds, fade_out_seconds, parameters, deleted_at, created_at, updated_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18,
-           coalesce($19, now()),coalesce($20, now()))
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,
+           coalesce($20, now()),coalesce($21, now()))
          on conflict (id) do update set
            project_id = excluded.project_id,
            session_id = excluded.session_id,
@@ -1487,6 +1545,7 @@ export class PostgresRuntimeStore {
            asset_id = excluded.asset_id,
            track_type = excluded.track_type,
            start_seconds = excluded.start_seconds,
+           source_start_seconds = excluded.source_start_seconds,
            duration_seconds = excluded.duration_seconds,
            position = excluded.position,
            muted = excluded.muted,
@@ -1507,6 +1566,7 @@ export class PostgresRuntimeStore {
           item.assetId || null,
           item.trackType || "VIDEO",
           Number(item.startSeconds || 0),
+          Number(item.sourceStartSeconds || 0),
           item.durationSeconds == null ? null : Number(item.durationSeconds),
           Number(item.position || 0),
           Boolean(item.muted),
@@ -1617,6 +1677,109 @@ export class PostgresRuntimeStore {
           json(instance.configuration || {}),
           dateOrNull(instance.createdAt),
           dateOrNull(instance.updatedAt)
+        ]
+      );
+    }
+    for (const training of safeArray(state.characterTrainings)) {
+      await client.query(
+        `insert into character_trainings
+          (id, tenant_id, user_id, character_id, provider, external_training_id, status,
+           model_ref, error, configuration, metadata, created_at, updated_at, completed_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,
+           coalesce($12, now()),coalesce($13, now()),$14)
+         on conflict (id) do update set
+           provider = excluded.provider,
+           external_training_id = excluded.external_training_id,
+           status = excluded.status,
+           model_ref = excluded.model_ref,
+           error = excluded.error,
+           configuration = excluded.configuration,
+           metadata = excluded.metadata,
+           updated_at = excluded.updated_at,
+           completed_at = excluded.completed_at`,
+        [
+          training.id,
+          training.tenantId || tenantId,
+          training.userId || null,
+          training.characterId,
+          training.provider || null,
+          training.externalTrainingId || null,
+          training.status || "DATASET",
+          training.modelRef || null,
+          training.error || null,
+          json(training.configuration || {}),
+          json(training.metadata || {}),
+          dateOrNull(training.createdAt),
+          dateOrNull(training.updatedAt),
+          dateOrNull(training.completedAt)
+        ]
+      );
+    }
+    for (const run of safeArray(state.workflowRuns)) {
+      await client.query(
+        `insert into workflow_runs
+          (id, tenant_id, user_id, workflow_id, project_id, session_id, status, input,
+           output, error, created_at, started_at, completed_at, updated_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,
+           coalesce($11, now()),$12,$13,coalesce($14, now()))
+         on conflict (id) do update set
+           status = excluded.status,
+           input = excluded.input,
+           output = excluded.output,
+           error = excluded.error,
+           started_at = excluded.started_at,
+           completed_at = excluded.completed_at,
+           updated_at = excluded.updated_at`,
+        [
+          run.id,
+          run.tenantId || tenantId,
+          run.userId || null,
+          run.workflowId,
+          run.projectId || null,
+          run.sessionId || null,
+          run.status || "PENDING",
+          json(run.input || {}),
+          json(run.output || {}),
+          json(run.error || null),
+          dateOrNull(run.createdAt),
+          dateOrNull(run.startedAt),
+          dateOrNull(run.completedAt),
+          dateOrNull(run.updatedAt)
+        ]
+      );
+    }
+    for (const nodeRun of safeArray(state.workflowNodeRuns)) {
+      await client.query(
+        `insert into workflow_node_runs
+          (id, tenant_id, workflow_run_id, workflow_node_id, job_id, status, input,
+           output, error, attempt, created_at, started_at, completed_at, updated_at)
+         values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,
+           coalesce($11, now()),$12,$13,coalesce($14, now()))
+         on conflict (id) do update set
+           job_id = excluded.job_id,
+           status = excluded.status,
+           input = excluded.input,
+           output = excluded.output,
+           error = excluded.error,
+           attempt = excluded.attempt,
+           started_at = excluded.started_at,
+           completed_at = excluded.completed_at,
+           updated_at = excluded.updated_at`,
+        [
+          nodeRun.id,
+          nodeRun.tenantId || tenantId,
+          nodeRun.workflowRunId,
+          nodeRun.workflowNodeId,
+          nodeRun.jobId || null,
+          nodeRun.status || "PENDING",
+          json(nodeRun.input || {}),
+          json(nodeRun.output || {}),
+          json(nodeRun.error || null),
+          Math.max(1, Number(nodeRun.attempt || 1)),
+          dateOrNull(nodeRun.createdAt),
+          dateOrNull(nodeRun.startedAt),
+          dateOrNull(nodeRun.completedAt),
+          dateOrNull(nodeRun.updatedAt)
         ]
       );
     }
@@ -1762,6 +1925,8 @@ export function createRuntimeStore(env = process.env) {
   migrations.push("migrations/004_unified_generation_batches.sql");
   migrations.push("migrations/005_error_incidents_and_compensation.sql");
   migrations.push("migrations/006_multimodal_workspace.sql");
+  migrations.push("migrations/007_history_linkage.sql");
+  migrations.push("migrations/008_functional_closure.sql");
   return new PostgresRuntimeStore({
     databaseUrl: env.DATABASE_URL,
     migrations

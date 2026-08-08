@@ -28,6 +28,7 @@ dist-ssr
 
 # Local recovery snapshots and runtime output
 .codex-backups/
+.local/
 storage/
 *.backup-before-restore-*
 *-screenshot.png

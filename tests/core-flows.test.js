@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { execFile } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 process.env.SLT_TEST_MODE = "1";
 process.env.NODE_ENV = "test";
@@ -16,7 +18,11 @@ process.env.STRIPE_WEBHOOK_SECRET = "stripe_test_secret";
 
 const { __test } = await import("../server/api-proxy.js");
 const { detectMediaMime, extractVideoFrame, validateMediaFile, validateProbeMetadata } = await import("../server/media-validation.js");
+const { buildTimelineRenderPlan, renderTimeline } = await import("../server/timeline-renderer.js");
+const { resolveFfmpegPath, resolveFfprobePath } = await import("../server/media-binaries.js");
+const { createCharacterTrainingAdapter } = await import("../server/character-training-adapter.js");
 const originalFetch = globalThis.fetch;
+const execFileAsync = promisify(execFile);
 
 function makeRequest({ path = "/", method = "GET", headers = {}, body = {}, query = {}, rawBody = null } = {}) {
   const normalizedHeaders = Object.fromEntries(
@@ -102,6 +108,32 @@ function makeSupabaseJwt(payload, secret) {
 
 function wait(ms = 25) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withApiServer(callback) {
+  const server = await new Promise((resolve) => {
+    const instance = __test.app.listen(0, "127.0.0.1", () => resolve(instance));
+  });
+  const address = server.address();
+  try {
+    return await callback(`http://127.0.0.1:${address.port}`);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+async function apiRequest(baseUrl, path, { token = "session_functional", method = "GET", body } = {}) {
+  const response = await originalFetch(`${baseUrl}${path}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${token}`,
+      "x-slt-session": token,
+      "x-slt-site-gate": process.env.SLT_SITE_GATE_KEY || "",
+      ...(body === undefined ? {} : { "content-type": "application/json" })
+    },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  return { status: response.status, data: await response.json() };
 }
 
 function isDurableAssetUrl(value = "") {
@@ -1250,4 +1282,193 @@ test("retry payload creates a separate Job linked to the failure and never reuse
   assert.equal(next.providerJobId, null);
   assert.notEqual(retry.retryKey, original.requestId);
   assert.equal(retry.payload.outputCount, 1);
+});
+
+test("Timeline API edits, moves, trims, splits, mutes, solos and deletes tenant clips", async () => {
+  __test.resetTestState({ credits: 100 });
+  __test.sessions.set("session_functional", { tenantId: "demo-user", userId: "demo-user", role: "standard" });
+  __test.state.assets.push({
+    id: "asset_timeline_api",
+    tenantId: "demo-user",
+    userId: "demo-user",
+    kind: "video",
+    contentType: "video/mp4",
+    metadata: { durationSeconds: 8 },
+    createdAt: new Date().toISOString()
+  });
+
+  await withApiServer(async (baseUrl) => {
+    const created = await apiRequest(baseUrl, "/api/timeline", {
+      method: "POST",
+      body: { projectId: "project_timeline", assetId: "asset_timeline_api", trackType: "VIDEO", startSeconds: 1, durationSeconds: 6 }
+    });
+    assert.equal(created.status, 201);
+    const itemId = created.data.item.id;
+
+    const edited = await apiRequest(baseUrl, `/api/timeline/${itemId}`, {
+      method: "PATCH",
+      body: { startSeconds: 2, sourceStartSeconds: 1, durationSeconds: 4, position: 3, muted: true, solo: true, volume: 0.65, fadeInSeconds: 0.4, fadeOutSeconds: 0.5 }
+    });
+    assert.equal(edited.data.item.startSeconds, 2);
+    assert.equal(edited.data.item.sourceStartSeconds, 1);
+    assert.equal(edited.data.item.position, 3);
+    assert.equal(edited.data.item.muted, true);
+    assert.equal(edited.data.item.solo, true);
+
+    const split = await apiRequest(baseUrl, `/api/timeline/${itemId}/split`, { method: "POST", body: { atSeconds: 4 } });
+    assert.equal(split.status, 201);
+    assert.equal(split.data.leftItem.durationSeconds, 2);
+    assert.equal(split.data.rightItem.sourceStartSeconds, 3);
+
+    const removed = await apiRequest(baseUrl, `/api/timeline/${split.data.rightItem.id}`, { method: "DELETE" });
+    assert.equal(removed.status, 200);
+    assert.ok(__test.state.timelineItems.find((item) => item.id === split.data.rightItem.id).deletedAt);
+  });
+});
+
+test("real FFmpeg composition mixes Video, Music and SFX into H.264/AAC MP4", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "slt-real-render-"));
+  const sourcePath = join(directory, "source.mp4");
+  const outputPath = join(directory, "final.mp4");
+  await execFileAsync(resolveFfmpegPath(), [
+    "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x180:r=12:d=1",
+    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+    "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", sourcePath
+  ]);
+  const assets = [{ id: "asset_av", filePath: sourcePath, contentType: "video/mp4", originalName: "source.mp4" }];
+  const items = [
+    { id: "clip_video", assetId: "asset_av", trackType: "VIDEO", startSeconds: 0, sourceStartSeconds: 0, durationSeconds: 1 },
+    { id: "clip_music", assetId: "asset_av", trackType: "MUSIC", startSeconds: 0, sourceStartSeconds: 0, durationSeconds: 1, volume: 0.4, fadeInSeconds: 0.1, fadeOutSeconds: 0.1 },
+    { id: "clip_sfx", assetId: "asset_av", trackType: "SFX", startSeconds: 0.25, sourceStartSeconds: 0, durationSeconds: 0.5, volume: 0.25 }
+  ];
+  const plan = buildTimelineRenderPlan({ items, assets, width: 320, height: 180, fps: 12 });
+  assert.equal(plan.videoItemCount, 1);
+  assert.equal(plan.audioItemCount, 2);
+  await renderTimeline({ items, assets, outputPath, width: 320, height: 180, fps: 12 });
+  assert.equal(existsSync(outputPath), true);
+  const { stdout } = await execFileAsync(resolveFfprobePath(), ["-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", outputPath]);
+  const streams = JSON.parse(stdout).streams;
+  assert.equal(streams.some((stream) => stream.codec_type === "video" && stream.codec_name === "h264"), true);
+  assert.equal(streams.some((stream) => stream.codec_type === "audio" && stream.codec_name === "aac"), true);
+});
+
+test("Music, Sound and Character Assets use real cross-modal Library actions", async () => {
+  __test.resetTestState({ credits: 100 });
+  __test.sessions.set("session_functional", { tenantId: "demo-user", userId: "demo-user", role: "standard" });
+  const now = new Date().toISOString();
+  __test.state.assets.push(
+    { id: "asset_music_route", tenantId: "demo-user", userId: "demo-user", kind: "music", contentType: "audio/mpeg", metadata: { durationSeconds: 12 }, createdAt: now },
+    { id: "asset_sound_route", tenantId: "demo-user", userId: "demo-user", kind: "sound", contentType: "audio/wav", metadata: { durationSeconds: 3 }, createdAt: now },
+    { id: "asset_face_route", tenantId: "demo-user", userId: "demo-user", kind: "image", contentType: "image/png", createdAt: now }
+  );
+  __test.state.scenes.push({ id: "scene_route", tenantId: "demo-user", userId: "demo-user", projectId: "project_route", sessionId: "session_route", title: "Route Scene", parameters: {}, createdAt: now, updatedAt: now });
+  __test.state.characters.push({ id: "character_route", tenantId: "demo-user", userId: "demo-user", name: "Route Character", createdAt: now, updatedAt: now });
+  __test.state.characterConsents.push({ id: "consent_route", characterId: "character_route", tenantId: "demo-user", status: "granted", scope: { likeness: true, training: true }, signedAt: now });
+
+  await withApiServer(async (baseUrl) => {
+    const music = await apiRequest(baseUrl, "/api/assets/asset_music_route/actions", { method: "POST", body: { action: "ADD_TO_TIMELINE", projectId: "project_route" } });
+    const sound = await apiRequest(baseUrl, "/api/assets/asset_sound_route/actions", { method: "POST", body: { action: "ADD_TO_SCENE", sceneId: "scene_route" } });
+    const character = await apiRequest(baseUrl, "/api/assets/asset_face_route/actions", { method: "POST", body: { action: "ADD_TO_CHARACTER", characterId: "character_route" } });
+    assert.equal(music.status, 201);
+    assert.equal(music.data.timelineItem.trackType, "MUSIC");
+    assert.equal(sound.status, 201);
+    assert.equal(__test.state.timelineItems.some((item) => item.assetId === "asset_sound_route" && item.trackType === "SFX"), true);
+    assert.equal(character.status, 201);
+    assert.equal(__test.state.characterAssets.some((item) => item.assetId === "asset_face_route" && item.characterId === "character_route"), true);
+  });
+});
+
+test("Scene final render creates an async Job, persistent Asset, History and captured credits", async () => {
+  __test.resetTestState({ credits: 100 });
+  __test.sessions.set("session_functional", { tenantId: "demo-user", userId: "demo-user", role: "standard" });
+  const sourcePath = join(process.env.SLT_STORAGE_DIR, "scene-render-source.mp4");
+  await execFileAsync(resolveFfmpegPath(), [
+    "-y", "-f", "lavfi", "-i", "color=c=red:s=320x180:r=12:d=1",
+    "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=1",
+    "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", sourcePath
+  ]);
+  const now = new Date().toISOString();
+  __test.state.assets.push({ id: "asset_scene_render", tenantId: "demo-user", userId: "demo-user", projectId: "project_scene_render", kind: "video", contentType: "video/mp4", storagePath: sourcePath, publicUrl: "/cdn/assets/scene.mp4", metadata: { durationSeconds: 1 }, createdAt: now });
+  __test.state.timelineItems.push(
+    { id: "timeline_scene_video", tenantId: "demo-user", projectId: "project_scene_render", sceneId: "scene_final", assetId: "asset_scene_render", trackType: "VIDEO", startSeconds: 0, sourceStartSeconds: 0, durationSeconds: 1, position: 0, volume: 1, pan: 0, createdAt: now, updatedAt: now },
+    { id: "timeline_scene_music", tenantId: "demo-user", projectId: "project_scene_render", sceneId: "scene_final", assetId: "asset_scene_render", trackType: "MUSIC", startSeconds: 0, sourceStartSeconds: 0, durationSeconds: 1, position: 0, volume: 0.4, pan: 0, createdAt: now, updatedAt: now }
+  );
+
+  await withApiServer(async (baseUrl) => {
+    const accepted = await apiRequest(baseUrl, "/api/timeline/render", { method: "POST", body: { projectId: "project_scene_render", sceneId: "scene_final", width: 320, height: 180, fps: 12 } });
+    assert.equal(accepted.status, 202);
+    const job = await waitForJobStatus(accepted.data.jobId, "COMPLETED", 15000);
+    assert.equal(job.status, "COMPLETED", job.error?.message);
+    assert.ok(job.assetId);
+    assert.equal(__test.state.assets.some((asset) => asset.id === job.assetId && asset.provider === "SLT FFmpeg"), true);
+    assert.equal(__test.state.history.some((entry) => entry.jobId === job.id && entry.status === "completed"), true);
+    assert.equal(__test.ledgerSnapshot("demo-user").heldCredits, 0);
+    assert.equal(__test.ledgerSnapshot("demo-user").capturedCredits, 5);
+  });
+});
+
+test("Workflow executor persists typed node runs and adds predecessor Assets to Timeline", async () => {
+  __test.resetTestState({ credits: 100 });
+  const now = new Date().toISOString();
+  __test.state.assets.push({ id: "asset_workflow_timeline", tenantId: "demo-user", userId: "demo-user", projectId: "project_workflow", kind: "music", contentType: "audio/mpeg", metadata: { durationSeconds: 6 }, createdAt: now });
+  __test.state.workflows.push({ id: "workflow_exec", tenantId: "demo-user", userId: "demo-user", projectId: "project_workflow", name: "Typed workflow", status: "DRAFT", description: "", createdAt: now, updatedAt: now });
+  __test.state.workflowNodes.push(
+    { id: "workflow_text", workflowId: "workflow_exec", tenantId: "demo-user", nodeType: "TEXT", label: "Brief", position: { x: 0, y: 0 }, configuration: { text: "A restrained film score" }, createdAt: now, updatedAt: now },
+    { id: "workflow_timeline", workflowId: "workflow_exec", tenantId: "demo-user", nodeType: "TIMELINE", label: "Add Music", position: { x: 1, y: 0 }, configuration: { assetId: "asset_workflow_timeline", action: "ADD_TO_TIMELINE", trackType: "MUSIC" }, createdAt: now, updatedAt: now }
+  );
+  __test.state.workflowEdges.push({ id: "workflow_edge_exec", workflowId: "workflow_exec", tenantId: "demo-user", sourceNodeId: "workflow_text", targetNodeId: "workflow_timeline", metadata: {}, createdAt: now });
+  __test.state.workflowRuns.push({ id: "workflow_run_exec", tenantId: "demo-user", userId: "demo-user", workflowId: "workflow_exec", projectId: "project_workflow", sessionId: null, status: "PENDING", input: { prompt: "A restrained film score" }, output: {}, error: null, createdAt: now, updatedAt: now });
+
+  const ordered = __test.orderedWorkflowNodes("workflow_exec");
+  assert.deepEqual(ordered.nodes.map((node) => node.id), ["workflow_text", "workflow_timeline"]);
+  await __test.executeWorkflowRun("workflow_run_exec");
+  const run = __test.state.workflowRuns.find((item) => item.id === "workflow_run_exec");
+  assert.equal(run.status, "COMPLETED", run.error?.message);
+  assert.equal(__test.state.workflowNodeRuns.filter((item) => item.workflowRunId === run.id && item.status === "COMPLETED").length, 2);
+  assert.equal(__test.state.timelineItems.some((item) => item.assetId === "asset_workflow_timeline" && item.trackType === "MUSIC"), true);
+});
+
+test("Applications expose real availability and create reusable workflow templates", () => {
+  __test.resetTestState({ credits: 100 });
+  const catalog = __test.creativeApplicationCatalog();
+  assert.equal(catalog.find((item) => item.id === "scene-builder")?.status, "AVAILABLE");
+  assert.equal(catalog.every((item) => ["AVAILABLE", "TEMPORARILY_UNAVAILABLE", "COMING_SOON"].includes(item.status)), true);
+  const definition = catalog.find((item) => item.id === "music-video");
+  const now = new Date().toISOString();
+  const instance = { id: "application_music_video", tenantId: "demo-user", userId: "demo-user", projectId: "project_application", sessionId: null, appType: "music-video", title: "Music Video Test", status: "DRAFT", configuration: {}, createdAt: now, updatedAt: now };
+  const workflow = __test.createApplicationWorkflow({ definition, instance, auth: { userId: "demo-user" }, now });
+  assert.ok(workflow.id);
+  assert.equal(workflow.nodes.some((node) => node.nodeType === "IMAGE"), true);
+  assert.equal(workflow.nodes.some((node) => node.nodeType === "VIDEO"), true);
+  assert.equal(workflow.nodes.some((node) => node.nodeType === "MUSIC"), true);
+  assert.equal(workflow.nodes.filter((node) => node.nodeType === "TIMELINE").length, 2);
+});
+
+test("Character datasets stay REFERENCE READY when no real training provider is configured", async () => {
+  __test.resetTestState({ credits: 100 });
+  const previousUrl = process.env.CHARACTER_TRAINING_API_URL;
+  const previousKey = process.env.CHARACTER_TRAINING_API_KEY;
+  delete process.env.CHARACTER_TRAINING_API_URL;
+  delete process.env.CHARACTER_TRAINING_API_KEY;
+  const now = new Date().toISOString();
+  __test.state.characters.push({ id: "character_reference_ready", tenantId: "demo-user", userId: "demo-user", name: "Reference Ready", datasetStatus: "ready", providerModelId: null, createdAt: now, updatedAt: now });
+  __test.state.characterConsents.push({ id: "consent_reference_ready", characterId: "character_reference_ready", tenantId: "demo-user", status: "granted", scope: { likeness: true, training: true }, signedAt: now });
+  const summary = __test.characterDatasetSummary("character_reference_ready", { ok: true, tenantId: "demo-user", userId: "demo-user", role: "standard" });
+  const adapter = createCharacterTrainingAdapter(process.env);
+  assert.equal(summary.character.datasetStatus, "ready");
+  assert.equal(summary.character.providerModelId, null);
+  assert.equal(adapter.configured, false);
+  await assert.rejects(() => adapter.createTraining({ characterId: "character_reference_ready" }), (error) => error.code === "character_training_provider_unavailable");
+  if (previousUrl !== undefined) process.env.CHARACTER_TRAINING_API_URL = previousUrl;
+  if (previousKey !== undefined) process.env.CHARACTER_TRAINING_API_KEY = previousKey;
+});
+
+test("media binary detection is real and both executables answer with versions", async () => {
+  const status = __test.mediaBinaryStatus();
+  assert.equal(status.ffmpeg.detected, true);
+  assert.equal(status.ffprobe.detected, true);
+  const ffmpeg = await execFileAsync(status.ffmpeg.path, ["-version"]);
+  const ffprobe = await execFileAsync(status.ffprobe.path, ["-version"]);
+  assert.match(ffmpeg.stdout, /ffmpeg version/i);
+  assert.match(ffprobe.stdout, /ffprobe version/i);
 });

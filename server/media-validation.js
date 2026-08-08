@@ -1,5 +1,6 @@
 import { open, stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { resolveFfmpegPath, resolveFfprobePath } from "./media-binaries.js";
 
 const VIDEO_MIMES = new Set(["video/mp4", "video/quicktime", "video/webm"]);
 const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
@@ -125,7 +126,7 @@ export function validateProbeMetadata(metadata = {}, limits = {}) {
   return metadata;
 }
 
-export function probeMediaFile(filePath, { ffprobePath = process.env.FFPROBE_PATH || "ffprobe", timeoutMs = 20000 } = {}) {
+export function probeMediaFile(filePath, { ffprobePath = resolveFfprobePath(), timeoutMs = 20000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(ffprobePath, [
       "-v", "error",
@@ -176,7 +177,7 @@ export function extractVideoFrame({
   sourcePath,
   outputPath,
   timestampSeconds = 0,
-  ffmpegPath = process.env.FFMPEG_PATH || "ffmpeg",
+  ffmpegPath = resolveFfmpegPath(),
   timeoutMs = 60000
 } = {}) {
   if (!sourcePath || !outputPath) {
