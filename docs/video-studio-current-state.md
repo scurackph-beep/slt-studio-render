@@ -1,3 +1,27 @@
+> # ⚠️ DOCUMENTO OBSOLETO — NO USAR COMO REFERENCIA
+>
+> Marcado obsoleto el **2026-08-10** (Fase 0, punto 3).
+>
+> Este documento describe un estado que ya no existe. Se conserva sólo como
+> registro histórico del checkpoint del 2026-08-06.
+>
+> **Lo que afirma y hoy es falso:**
+>
+> 1. Dice que `VideoStudioV2Preview` es una maqueta con datos simulados que no
+>    importa `api-client` ni `useStudioGenerate` (secciones 4, 5 y 8). Hoy ese
+>    archivo tiene 5 líneas y sólo envuelve a `MultimodalStudioV2`, que sí llama
+>    a la API real, genera de verdad y persiste resultados.
+> 2. Los tres checksums de la sección 1 ya no coinciden con ningún archivo del
+>    repo. Los tres cambiaron.
+> 3. El fragmento de enrutado que cita ya no es el que está en
+>    `src/pages/VideoStudio.jsx`. Hoy hay tres variantes de interfaz detrás del
+>    parámetro `studio`, y la que se muestra por defecto no es la que el
+>    documento supone.
+>
+> Para el estado real del proyecto, ver `CLAUDE.md` en la raíz.
+
+---
+
 # Sweet Little Trauma Studio - Video Studio V2 Current State
 
 Date: 2026-08-06
