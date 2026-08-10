@@ -930,7 +930,10 @@ test("Stripe signature verification and payment webhook idempotency are enforced
         metadata: {
           type: "credit_pack",
           creditPackId: "credits_500",
-          credits: "500"
+          credits: "500",
+          // handleCreditPackCheckout siempre nombra el tenant en la metadata.
+          // Un evento sin tenant no acredita a nadie, por diseño.
+          tenantId: "demo-user"
         }
       }
     }
@@ -955,6 +958,113 @@ test("Stripe signature verification and payment webhook idempotency are enforced
   assert.equal(duplicate.idempotent, true);
   assert.ok(duplicate.actions.includes("duplicate_ignored"));
   assert.equal(__test.ledgerSnapshot().availableCredits, 600);
+});
+
+test("a Stripe subscription webhook only moves the plan of its own tenant", async () => {
+  __test.resetTestState({ credits: 100 });
+
+  const tenantA = "tenant-alpha";
+  const tenantB = "tenant-beta";
+  __test.subscriptionForTenant(tenantA).stripeCustomerId = "cus_alpha";
+  __test.subscriptionForTenant(tenantB).stripeCustomerId = "cus_beta";
+
+  assert.equal(__test.planForTenant(tenantA), "Free");
+  assert.equal(__test.planForTenant(tenantB), "Free");
+
+  // Alpha compra Studio. El evento nombra su tenant en metadata.
+  const upgradeAlpha = await __test.applyStripeWebhookEvent({
+    id: "evt_alpha_checkout",
+    type: "checkout.session.completed",
+    data: {
+      object: {
+        id: "cs_alpha",
+        customer: "cus_alpha",
+        mode: "subscription",
+        subscription: "sub_alpha",
+        payment_status: "paid",
+        metadata: { plan: "Studio", tenantId: tenantA }
+      }
+    }
+  });
+
+  assert.equal(upgradeAlpha.tenantId, tenantA);
+  assert.equal(__test.planForTenant(tenantA), "Studio");
+  assert.equal(__test.planForTenant(tenantB), "Free", "el plan de beta no debe moverse");
+
+  // Beta recibe una factura que sólo trae el customer, sin metadata de tenant.
+  // Tiene que resolverse por customer y no tocar a alpha.
+  const invoiceBeta = await __test.applyStripeWebhookEvent({
+    id: "evt_beta_invoice",
+    type: "invoice.paid",
+    data: {
+      object: {
+        id: "in_beta",
+        customer: "cus_beta",
+        subscription: "sub_beta",
+        amount_paid: 1900,
+        lines: { data: [{ metadata: { plan: "Pro" }, period: { start: 1 } }] }
+      }
+    }
+  });
+
+  assert.equal(invoiceBeta.tenantId, tenantB);
+  assert.equal(__test.planForTenant(tenantB), "Pro");
+  assert.equal(__test.planForTenant(tenantA), "Studio", "el plan de alpha no debe moverse");
+
+  // La cancelación de beta tampoco puede alcanzar a alpha.
+  await __test.applyStripeWebhookEvent({
+    id: "evt_beta_cancel",
+    type: "customer.subscription.deleted",
+    data: { object: { id: "sub_beta", customer: "cus_beta" } }
+  });
+
+  assert.equal(__test.subscriptionForTenant(tenantB).status, "cancelled");
+  assert.equal(__test.subscriptionForTenant(tenantA).status, "active");
+
+  // Un evento de un customer desconocido no puede caer sobre ningún tenant.
+  const orphan = await __test.applyStripeWebhookEvent({
+    id: "evt_orphan",
+    type: "invoice.paid",
+    data: {
+      object: {
+        id: "in_orphan",
+        customer: "cus_desconocido",
+        subscription: "sub_orphan",
+        lines: { data: [{ metadata: { plan: "Enterprise" }, period: { start: 1 } }] }
+      }
+    }
+  });
+
+  assert.ok(orphan.actions.includes("tenant_unresolved"));
+  assert.equal(orphan.tenantId, null);
+  assert.equal(__test.planForTenant(tenantA), "Studio");
+  assert.equal(__test.planForTenant(tenantB), "Pro");
+  assert.ok(
+    !__test.state.subscriptions.some((item) => item.plan === "Enterprise"),
+    "ningún tenant debe haber recibido el plan del evento huérfano"
+  );
+});
+
+test("credit grants and plan limits read the tenant of the caller, not a global default", async () => {
+  __test.resetTestState({ credits: 0 });
+
+  const tenantA = "limits-alpha";
+  const tenantB = "limits-beta";
+  __test.subscriptionForTenant(tenantA).plan = "Creator";
+  __test.subscriptionForTenant(tenantB).plan = "Free";
+
+  const authA = { ok: true, tenantId: tenantA, userId: tenantA, role: "standard" };
+  const authB = { ok: true, tenantId: tenantB, userId: tenantB, role: "standard" };
+
+  // Creator permite 60 segundos de video; Free, 10.
+  const longClip = { durationSeconds: 45, videoDurationSeconds: 45 };
+  assert.doesNotThrow(() => {
+    __test.resolveVideoPlan({ payload: longClip, auth: authA, providerName: "Runway" });
+  });
+  assert.throws(
+    () => __test.resolveVideoPlan({ payload: longClip, auth: authB, providerName: "Runway" }),
+    /capped at/
+  );
 });
 
 test("multimodal router exposes only implemented operations and rejects incompatible native output", () => {

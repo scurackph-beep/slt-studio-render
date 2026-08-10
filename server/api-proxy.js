@@ -1249,11 +1249,11 @@ function verifiedProviderDiagnostics() {
 }
 
 const state = {
+  // El plan no vive acá: se deriva de la suscripción del tenant en cada lectura.
   user: {
     id: "demo-user",
     email: "creator@sweetlittletrauma.studio",
     username: "sweetcreator",
-    plan: "Free",
     language: "Spanish",
     accountType: "Creator",
     credits: creditsForPlan("Free"),
@@ -1264,17 +1264,20 @@ const state = {
       assistantMemory: "creative preferences"
     }
   },
-  subscription: {
-    plan: "Free",
-    status: "active",
-    renewsAt: "2026-06-18",
-    credits: creditsForPlan("Free"),
-    heldCredits: 0,
-    capturedCredits: 0,
-    cancellationReason: "",
-    stripeCustomerId: process.env.STRIPE_CUSTOMER_ID || "",
-    stripeSubscriptionId: ""
-  },
+  subscriptions: [
+    {
+      tenantId: "demo-user",
+      plan: "Free",
+      status: "active",
+      renewsAt: "2026-06-18",
+      credits: creditsForPlan("Free"),
+      heldCredits: 0,
+      capturedCredits: 0,
+      cancellationReason: "",
+      stripeCustomerId: process.env.STRIPE_CUSTOMER_ID || "",
+      stripeSubscriptionId: ""
+    }
+  ],
   billing: {
     paymentMethod: "•••• 4242",
     coupon: "",
@@ -1368,7 +1371,7 @@ let runtimeStoreLastError = null;
 let runtimePersistChain = Promise.resolve();
 
 function hydrateRuntimeState(persisted = {}) {
-  for (const key of ["user", "subscription", "billing", "wallet"]) {
+  for (const key of ["user", "billing", "wallet"]) {
     if (persisted[key] && typeof persisted[key] === "object") {
       state[key] = { ...state[key], ...persisted[key] };
     }
@@ -1413,6 +1416,16 @@ function hydrateRuntimeState(persisted = {}) {
     state.wallets = persisted.wallets;
   } else if (persisted.wallet?.tenantId) {
     state.wallets = [{ ...persisted.wallet }];
+  }
+  if (Array.isArray(persisted.subscriptions)) {
+    state.subscriptions = persisted.subscriptions;
+  } else if (persisted.subscription && typeof persisted.subscription === "object") {
+    // Estado anterior al plan por tenant: la suscripción global se adopta como la
+    // del tenant que tenía el wallet activo.
+    state.subscriptions = [{
+      ...persisted.subscription,
+      tenantId: persisted.subscription.tenantId || persisted.wallet?.tenantId || state.wallet.tenantId
+    }];
   }
   for (const diagnostic of verifiedProviderDiagnostics()) {
     if (!state.providerDiagnostics.some((item) => item.provider === diagnostic.provider)) {
@@ -1621,7 +1634,7 @@ async function syncCompensationCouponWithStripe(coupon) {
       name: `SLT incident ${coupon.incidentId}`,
       metadata: { incidentId: coupon.incidentId, tenantId: coupon.tenantId, userId: coupon.userId || "" }
     });
-    const customer = currentStripeCustomerId();
+    const customer = currentStripeCustomerId(coupon.tenantId);
     const promotion = await stripeRequest("/v1/promotion_codes", {
       coupon: stripeCoupon.id,
       code: coupon.code,
@@ -1810,6 +1823,47 @@ function walletForTenant(tenantId = state.wallet.tenantId, { create = true, init
   return wallet;
 }
 
+// Las suscripciones viven por tenant, igual que los wallets. No hay plan global:
+// cada lectura y cada escritura tiene que nombrar el tenant al que pertenece.
+function subscriptionForTenant(tenantId = state.wallet.tenantId, { create = true } = {}) {
+  const normalizedTenantId = String(tenantId || state.wallet.tenantId || "demo-user");
+  let subscription = state.subscriptions.find((item) => item.tenantId === normalizedTenantId) || null;
+  if (!subscription && create) {
+    subscription = {
+      tenantId: normalizedTenantId,
+      plan: "Free",
+      status: "active",
+      renewsAt: "",
+      credits: creditsForPlan("Free"),
+      heldCredits: 0,
+      capturedCredits: 0,
+      cancellationReason: "",
+      stripeCustomerId: "",
+      stripeSubscriptionId: ""
+    };
+    state.subscriptions.push(subscription);
+  }
+  return subscription;
+}
+
+function planForTenant(tenantId = state.wallet.tenantId) {
+  return subscriptionForTenant(tenantId, { create: true }).plan || "Free";
+}
+
+function planForAuth(auth = {}) {
+  return planForTenant(auth.tenantId || auth.userId || state.wallet.tenantId);
+}
+
+// Resuelve el tenant dueño de un customer de Stripe. Es lo que permite que un
+// evento de suscripción o de factura, que sólo trae el customer, toque un único
+// tenant en vez del estado global.
+function tenantIdForStripeCustomer(customerId = "") {
+  const normalized = String(customerId || "").trim();
+  if (!normalized) return "";
+  const owner = state.subscriptions.find((item) => item.stripeCustomerId === normalized);
+  return owner?.tenantId || "";
+}
+
 function ledgerSnapshot(tenantId = state.wallet.tenantId) {
   const wallet = walletForTenant(tenantId, { create: true });
   return {
@@ -1824,11 +1878,12 @@ function ledgerSnapshot(tenantId = state.wallet.tenantId) {
 
 function syncCreditViews(tenantId = state.wallet.tenantId) {
   const wallet = walletForTenant(tenantId, { create: true });
+  const subscription = subscriptionForTenant(wallet.tenantId, { create: true });
+  subscription.credits = wallet.availableCredits;
+  subscription.heldCredits = wallet.heldCredits;
+  subscription.capturedCredits = wallet.capturedCredits;
   if (state.wallet.tenantId === wallet.tenantId) {
     state.wallet = wallet;
-    state.subscription.credits = wallet.availableCredits;
-    state.subscription.heldCredits = wallet.heldCredits;
-    state.subscription.capturedCredits = wallet.capturedCredits;
     state.user.credits = wallet.availableCredits;
   }
   return ledgerSnapshot(wallet.tenantId);
@@ -2692,7 +2747,7 @@ function incrementUsage({ kind, request, auth }) {
 }
 
 function validatePlan(kind, request, auth) {
-  const plan = state.subscription.plan || "Free";
+  const plan = planForAuth(auth);
   const rules = usageRulesForPlan(plan);
   if (isGuestAuth(auth)) {
     return {
@@ -2805,7 +2860,7 @@ function resolveVideoPlan({ payload = {}, auth = {}, providerName = "Seedance" }
   const requested = requestedVideoDurationSeconds(payload);
   const providerMax = maxClipSecondsForProvider(providerName);
   const ownerAllowed = isOwnerAuth(auth);
-  const plan = state.subscription.plan || "Free";
+  const plan = planForAuth(auth);
   const rules = usageRulesForPlan(plan);
   const planMaxSeconds = envNumber(`PLAN_${plan.toUpperCase()}_MAX_VIDEO_SECONDS`, rules.maxVideoSeconds);
   const maxAllowedSeconds = ownerAllowed
@@ -3161,7 +3216,9 @@ function createJob({ jobId = null, kind, title, providerName, prompt, payload, c
     providerRoute: [],
     providerFallback: null,
     creditCost: checks.credits?.cost || 0,
-    creditsRemaining: checks.credits?.wallet?.availableCredits ?? checks.credits?.remaining ?? state.subscription.credits,
+    creditsRemaining: checks.credits?.wallet?.availableCredits
+      ?? checks.credits?.remaining
+      ?? ledgerSnapshot(requestIdentity(request, checks.auth)).availableCredits,
     usageKey: usageBucketKey({ kind, request, auth: checks.auth })
   };
   job.requestId = job.id;
@@ -4552,8 +4609,14 @@ function stripeReturnUrl(kind = "success") {
   return process.env.STRIPE_SUCCESS_URL || "http://127.0.0.1:4173/?stripe=success";
 }
 
-function currentStripeCustomerId() {
-  return state.billing.stripeCustomerId || state.subscription.stripeCustomerId || process.env.STRIPE_CUSTOMER_ID || "";
+// El customer de Stripe pertenece al tenant, no al proceso. Sin tenant explícito
+// sólo queda el valor de entorno, que existe para desarrollo local.
+function currentStripeCustomerId(tenantId = "") {
+  if (tenantId) {
+    const subscription = subscriptionForTenant(tenantId, { create: true });
+    return subscription.stripeCustomerId || process.env.STRIPE_CUSTOMER_ID || "";
+  }
+  return process.env.STRIPE_CUSTOMER_ID || "";
 }
 
 function stripeSetupStatus() {
@@ -4635,14 +4698,14 @@ function planFromStripePriceId(priceId = "") {
   return "";
 }
 
-function planFromStripeObject(object = {}) {
+function planFromStripeObject(object = {}, tenantId = "") {
   const line = stripeLineItems(object).find((item) => item?.metadata?.plan || item?.price?.id || item?.plan?.id) || {};
   const priceId = line.price?.id || line.plan?.id || object.price?.id || "";
   return object.metadata?.plan
     || object.subscription_details?.metadata?.plan
     || line.metadata?.plan
     || planFromStripePriceId(priceId)
-    || state.subscription.plan
+    || (tenantId ? planForTenant(tenantId) : "")
     || "Free";
 }
 
@@ -4664,8 +4727,9 @@ function recordStripePaymentEvent(event, result = {}) {
     objectId: object.id || null,
     status: result.idempotent ? "duplicate_ignored" : "processed",
     actions: result.actions || [],
-    tenantId,
-    wallet: result.wallet || ledgerSnapshot(tenantId),
+    tenantId: tenantId || null,
+    stripeCustomerId: object.customer || null,
+    wallet: result.wallet || (tenantId ? ledgerSnapshot(tenantId) : null),
     receivedAt: new Date().toISOString()
   });
   state.paymentEvents = state.paymentEvents.slice(0, 100);
@@ -4708,16 +4772,20 @@ async function handleStripeWebhook(request, response) {
   }
 }
 
+// Devuelve "" cuando el evento no identifica a ningún tenant. Antes caía al
+// tenant global, que era exactamente el camino por el que el pago de una cuenta
+// terminaba cambiándole el plan a otra.
 function stripeTenantIdFromObject(object = {}) {
-  return String(
+  const declared =
     object.metadata?.tenantId ||
     object.metadata?.tenant_id ||
     object.subscription_details?.metadata?.tenantId ||
     object.subscription_details?.metadata?.tenant_id ||
     object.client_reference_id ||
     object.metadata?.userId ||
-    state.wallet.tenantId
-  );
+    "";
+  if (declared) return String(declared);
+  return tenantIdForStripeCustomer(object.customer);
 }
 
 async function applyStripeWebhookEvent(event = {}) {
@@ -4725,12 +4793,34 @@ async function applyStripeWebhookEvent(event = {}) {
   const eventKey = stripeEventKey(event);
   const tenantId = stripeTenantIdFromObject(object);
   if (processedWebhookEvents.has(eventKey)) {
-    const result = { idempotent: true, eventKey, actions: ["duplicate_ignored"], wallet: ledgerSnapshot(tenantId) };
+    const result = {
+      idempotent: true,
+      eventKey,
+      actions: ["duplicate_ignored"],
+      tenantId: tenantId || null,
+      wallet: tenantId ? ledgerSnapshot(tenantId) : null
+    };
+    recordStripePaymentEvent(event, result);
+    return result;
+  }
+
+  // Sin tenant no se toca nada. El evento queda registrado para inspección, pero
+  // no se le cambia el plan ni el saldo a nadie por descarte.
+  if (!tenantId) {
+    processedWebhookEvents.add(eventKey);
+    const result = {
+      idempotent: false,
+      eventKey,
+      actions: ["tenant_unresolved"],
+      tenantId: null,
+      wallet: null
+    };
     recordStripePaymentEvent(event, result);
     return result;
   }
 
   processedWebhookEvents.add(eventKey);
+  const subscription = subscriptionForTenant(tenantId, { create: true });
   const actions = [];
 
   try {
@@ -4753,8 +4843,7 @@ async function applyStripeWebhookEvent(event = {}) {
           });
           actions.push(ledgerResult.idempotent ? "credit_pack_duplicate" : "credit_pack_granted");
         }
-        state.billing.stripeCustomerId = object.customer || state.billing.stripeCustomerId;
-        state.subscription.stripeCustomerId = object.customer || state.subscription.stripeCustomerId;
+        subscription.stripeCustomerId = object.customer || subscription.stripeCustomerId;
         saveHistory({
           id: requestId("credits"),
           kind: "billing",
@@ -4766,13 +4855,11 @@ async function applyStripeWebhookEvent(event = {}) {
           createdAt: new Date().toISOString()
         });
       } else {
-        const plan = planFromStripeObject(object);
-        state.billing.stripeCustomerId = object.customer || state.billing.stripeCustomerId;
-        state.subscription.stripeCustomerId = object.customer || state.subscription.stripeCustomerId;
-        state.subscription.stripeSubscriptionId = object.subscription || state.subscription.stripeSubscriptionId;
-        state.subscription.plan = plan;
-        state.subscription.status = "active";
-        state.user.plan = plan;
+        const plan = planFromStripeObject(object, tenantId);
+        subscription.stripeCustomerId = object.customer || subscription.stripeCustomerId;
+        subscription.stripeSubscriptionId = object.subscription || subscription.stripeSubscriptionId;
+        subscription.plan = plan;
+        subscription.status = "active";
         const ledgerResult = await adjustAvailableCreditsTransactional({
           targetAmount: creditsForPlan(plan),
           tenantId,
@@ -4799,7 +4886,7 @@ async function applyStripeWebhookEvent(event = {}) {
     }
 
     if (event.type === "customer.subscription.deleted") {
-      state.subscription.status = "cancelled";
+      subscription.status = "cancelled";
       actions.push("subscription_cancelled");
       saveHistory({
         id: requestId("subscription"),
@@ -4830,7 +4917,7 @@ async function applyStripeWebhookEvent(event = {}) {
     }
 
     if (["invoice.paid", "invoice.payment_succeeded"].includes(event.type)) {
-      const plan = planFromStripeObject(object);
+      const plan = planFromStripeObject(object, tenantId);
       const amountPaid = object.amount_paid ?? object.total ?? 0;
       state.billing.invoices.unshift({
         id: object.number || object.id || requestId("invoice"),
@@ -4840,10 +4927,10 @@ async function applyStripeWebhookEvent(event = {}) {
       });
       state.billing.invoices = state.billing.invoices.slice(0, 20);
       if (object.subscription || plan !== "Free") {
-        state.subscription.plan = plan;
-        state.subscription.status = "active";
-        state.subscription.stripeSubscriptionId = object.subscription || state.subscription.stripeSubscriptionId;
-        state.user.plan = plan;
+        subscription.plan = plan;
+        subscription.status = "active";
+        subscription.stripeSubscriptionId = object.subscription || subscription.stripeSubscriptionId;
+        subscription.stripeCustomerId = object.customer || subscription.stripeCustomerId;
         const periodStart = object.lines?.data?.[0]?.period?.start || object.period_start || object.created || "current";
         const ledgerResult = await adjustAvailableCreditsTransactional({
           targetAmount: creditsForPlan(plan),
@@ -4859,7 +4946,7 @@ async function applyStripeWebhookEvent(event = {}) {
       }
     }
 
-    const result = { idempotent: false, eventKey, actions, wallet: ledgerSnapshot(tenantId) };
+    const result = { idempotent: false, eventKey, actions, tenantId, wallet: ledgerSnapshot(tenantId) };
     recordStripePaymentEvent(event, result);
     return result;
   } catch (error) {
@@ -10187,9 +10274,9 @@ async function handleSubscriptionCheckout(request, response) {
   }
 
   try {
-    const customer = currentStripeCustomerId();
     const auth = getAuth(request);
     const tenantId = requestIdentity(request, auth);
+    const customer = currentStripeCustomerId(tenantId);
     const requestedCompensationCode = String(request.body?.compensationCode || "").trim();
     const compensationCoupon = requestedCompensationCode
       ? compensationCouponForCheckout(requestedCompensationCode, tenantId, auth.userId)
@@ -10290,9 +10377,9 @@ async function handleCreditPackCheckout(request, response) {
   }
 
   try {
-    const customer = currentStripeCustomerId();
     const auth = getAuth(request);
     const tenantId = requestIdentity(request, auth);
+    const customer = currentStripeCustomerId(tenantId);
     const requestedCompensationCode = String(request.body?.compensationCode || "").trim();
     const compensationCoupon = requestedCompensationCode
       ? compensationCouponForCheckout(requestedCompensationCode, tenantId, auth.userId)
@@ -10373,7 +10460,7 @@ app.post("/api/stripe/portal", async (request, response) => {
     subscription_cancel: "subscription_cancel",
     subscription_update: "subscription_update"
   };
-  const customer = currentStripeCustomerId();
+  const customer = currentStripeCustomerId(requestIdentity(request, getAuth(request)));
   if (!customer) {
     response.status(503).json({
       ok: false,
@@ -12698,13 +12785,15 @@ app.post(["/api/forms/:kind", "/api/contact"], (request, response) => {
 });
 
 app.get("/api/subscription", (request, response) => {
-  response.json({ ok: true, auth: getAuth(request), subscription: state.subscription });
+  const auth = getAuth(request);
+  response.json({ ok: true, auth, subscription: subscriptionForTenant(requestIdentity(request, auth)) });
 });
 
 app.get("/api/subscription-status", (request, response) => {
   const auth = getAuth(request);
-  const wallet = ledgerSnapshot(requestIdentity(request, auth));
-  const subscription = state.subscription;
+  const tenantId = requestIdentity(request, auth);
+  const wallet = ledgerSnapshot(tenantId);
+  const subscription = subscriptionForTenant(tenantId);
   const isCeo = auth.role === "CEO";
   response.json({
     ok: true,
@@ -12723,7 +12812,8 @@ app.post("/api/subscription", async (request, response) => {
   const auth = getAuth(request);
   const tenantId = requestIdentity(request, auth);
   const action = request.body?.action || "status";
-  const nextPlan = request.body?.plan || state.subscription.plan;
+  const subscription = subscriptionForTenant(tenantId, { create: true });
+  const nextPlan = request.body?.plan || subscription.plan;
   if (action !== "status" && !isOwnerAuth(auth)) {
     response.status(403).json({
       ok: false,
@@ -12735,9 +12825,8 @@ app.post("/api/subscription", async (request, response) => {
     return;
   }
   if (["upgrade", "downgrade", "reactivate"].includes(action)) {
-    state.subscription.plan = nextPlan;
-    state.subscription.status = "active";
-    state.user.plan = nextPlan;
+    subscription.plan = nextPlan;
+    subscription.status = "active";
     await adjustAvailableCreditsTransactional({
       tenantId,
       userId: auth.userId || null,
@@ -12748,19 +12837,21 @@ app.post("/api/subscription", async (request, response) => {
     });
   }
   if (action === "cancel") {
-    state.subscription.status = "cancelled";
-    state.subscription.cancellationReason = request.body?.reason || "";
+    subscription.status = "cancelled";
+    subscription.cancellationReason = request.body?.reason || "";
   }
   response.json({
     ok: true,
     auth,
-    subscription: state.subscription,
+    subscription,
     message: action === "cancel" ? "Your subscription has been cancelled successfully." : "Subscription updated successfully."
   });
 });
 
 app.get("/api/user", (request, response) => {
-  response.json({ ok: true, auth: getAuth(request), user: state.user });
+  const auth = getAuth(request);
+  const tenantId = requestIdentity(request, auth);
+  response.json({ ok: true, auth, user: { ...state.user, plan: planForTenant(tenantId) } });
 });
 
 app.post("/api/user", (request, response) => {
@@ -12850,7 +12941,6 @@ function resetTestState({ credits = 100 } = {}) {
     id: "demo-user",
     email: "creator@sweetlittletrauma.studio",
     username: "sweetcreator",
-    plan: "Free",
     language: "Spanish",
     accountType: "Creator",
     credits,
@@ -12861,17 +12951,20 @@ function resetTestState({ credits = 100 } = {}) {
       assistantMemory: "creative preferences"
     }
   };
-  state.subscription = {
-    plan: "Free",
-    status: "active",
-    renewsAt: "2026-06-18",
-    credits,
-    heldCredits: 0,
-    capturedCredits: 0,
-    cancellationReason: "",
-    stripeCustomerId: process.env.STRIPE_CUSTOMER_ID || "",
-    stripeSubscriptionId: ""
-  };
+  state.subscriptions = [
+    {
+      tenantId: "demo-user",
+      plan: "Free",
+      status: "active",
+      renewsAt: "2026-06-18",
+      credits,
+      heldCredits: 0,
+      capturedCredits: 0,
+      cancellationReason: "",
+      stripeCustomerId: process.env.STRIPE_CUSTOMER_ID || "",
+      stripeSubscriptionId: ""
+    }
+  ];
   state.projects = [];
   state.generationSessions = [];
   state.generationBatches = [];
@@ -12985,6 +13078,9 @@ export const __test = {
   resetTestState,
   getAuth,
   requestIdentity,
+  subscriptionForTenant,
+  planForTenant,
+  tenantIdForStripeCustomer,
   getProductionReadinessReport,
   authProtectionMiddleware,
   rateLimitForPath,
@@ -13029,6 +13125,7 @@ export const __test = {
   handleProviderWebhook,
   verifyStripeWebhookSignature,
   applyStripeWebhookEvent,
+  resolveVideoPlan,
   createJob,
   createGenerationBatch,
   findGenerationBatch,
