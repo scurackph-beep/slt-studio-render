@@ -86,7 +86,22 @@ function isLocalOrigin(origin = "") {
   return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin);
 }
 
-const allowedCorsOrigins = envList("CORS_ORIGINS");
+// Orígenes permitidos: los de CORS_ORIGINS más el propio dominio público, para
+// que producción funcione sin configuración extra.
+const allowedCorsOrigins = [
+  ...envList("CORS_ORIGINS"),
+  ...[process.env.PUBLIC_APP_URL, process.env.APP_URL]
+    .filter(Boolean)
+    .map((value) => String(value).trim().replace(/\/$/, ""))
+].filter((value, index, list) => value && list.indexOf(value) === index);
+
+function corsOriginAllowed(origin = "") {
+  // Sin cabecera Origin no hay petición cruzada: mismo origen, curl o webhook.
+  if (!origin) return true;
+  if (allowedCorsOrigins.includes(origin.replace(/\/$/, ""))) return true;
+  // En desarrollo el front de Vite corre en otro puerto del mismo equipo.
+  return process.env.NODE_ENV !== "production" && isLocalOrigin(origin);
+}
 
 app.use((request, response, next) => {
   response.setHeader("X-Content-Type-Options", "nosniff");
@@ -96,9 +111,13 @@ app.use((request, response, next) => {
   next();
 });
 
-app.use(cors({ origin: "*" }));
+app.use(cors({
+  origin: (origin, callback) => callback(null, corsOriginAllowed(origin))
+}));
 
-const SITE_GATE_KEY = String(process.env.SLT_SITE_GATE_KEY || "Dientito2032").trim();
+// Sin SLT_SITE_GATE_KEY no hay cortina. No hay clave por defecto: una clave
+// escrita en el código es pública desde el momento en que se publica el repo.
+const SITE_GATE_KEY = String(process.env.SLT_SITE_GATE_KEY || "").trim();
 const INVITE_CODES = envList("SLT_INVITE_CODES").map((entry, index) => {
   const separator = entry.indexOf(":");
   if (separator === -1) {
@@ -9551,23 +9570,13 @@ app.post("/api/login", async (request, response) => {
     return;
   }
 
-  const token = requestId("session");
-  const session = {
-    token,
-    userId: "demo-user",
-    role: "standard",
-    email: email || state.user.email,
-    username: username || request.body?.full_name || state.user.username,
-    mode: "standard",
-    createdAt: new Date().toISOString()
-  };
-  sessions.set(token, session);
-  state.user = { ...state.user, email: session.email, username: session.username, role: session.role };
-  response.json({
-    ok: true,
-    session: { token, id: session.userId, email: session.email, username: session.username, role: session.role, mode: session.mode },
-    user: state.user,
-    message: "Session started."
+  // Sin proveedor de identidad no hay contra qué validar una contraseña. Antes
+  // este camino emitía una sesión válida para cualquier email. Ahora rechaza.
+  response.status(503).json({
+    ok: false,
+    code: "auth_provider_not_configured",
+    error: "No identity provider is configured. Set AUTH_PROVIDER=supabase.",
+    readableError: "El inicio de sesión no está disponible: falta configurar el proveedor de identidad."
   });
 });
 
@@ -13078,6 +13087,8 @@ export const __test = {
   resetTestState,
   getAuth,
   requestIdentity,
+  corsOriginAllowed,
+  allowedCorsOrigins,
   subscriptionForTenant,
   planForTenant,
   tenantIdForStripeCustomer,

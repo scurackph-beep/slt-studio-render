@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -204,6 +204,60 @@ test("critical endpoints reject missing auth and ignore injected user headers", 
 
   const jobsAttack = runMiddleware(__test.authProtectionMiddleware, makeRequest({ path: "/api/jobs" }));
   assert.equal(jobsAttack.response.statusCode, 401);
+});
+
+test("login refuses to issue a session when no identity provider is configured", async () => {
+  __test.resetTestState({ credits: 100 });
+  const previousProvider = process.env.AUTH_PROVIDER;
+  delete process.env.AUTH_PROVIDER;
+
+  try {
+    const before = __test.sessions.size;
+    const result = await withApiServer((base) => apiRequest(base, "/api/login", {
+      method: "POST",
+      body: { email: "cualquiera@ejemplo.com", password: "lo-que-sea" }
+    }));
+
+    assert.equal(result.status, 503);
+    assert.equal(result.data.ok, false);
+    assert.equal(result.data.code, "auth_provider_not_configured");
+    assert.equal(result.data.session, undefined, "no debe devolver una sesión");
+    assert.equal(__test.sessions.size, before, "no debe quedar ninguna sesión emitida");
+  } finally {
+    if (previousProvider === undefined) delete process.env.AUTH_PROVIDER;
+    else process.env.AUTH_PROVIDER = previousProvider;
+  }
+});
+
+test("cross-origin access is restricted to configured origins", () => {
+  const allowed = __test.corsOriginAllowed;
+
+  // Sin cabecera Origin no hay petición cruzada: mismo origen, curl o webhook.
+  assert.equal(allowed(""), true);
+  assert.equal(allowed(undefined), true);
+
+  // El dominio público se acepta por PUBLIC_APP_URL / CORS_ORIGINS.
+  for (const origin of __test.allowedCorsOrigins) {
+    assert.equal(allowed(origin), true, `${origin} debería estar permitido`);
+  }
+
+  assert.equal(allowed("https://sitio-atacante.example"), false);
+  assert.equal(allowed("https://studiosweetlittletrauma.com.attacker.example"), false);
+  assert.equal(allowed("null"), false);
+});
+
+test("the preview curtain has no key baked into the code", () => {
+  // Con SLT_SITE_GATE_KEY vacío el middleware deja pasar: no hay cortina.
+  // Lo que no puede pasar nunca es que exista una clave por defecto en el código.
+  const source = readFileSync(new URL("../server/api-proxy.js", import.meta.url), "utf8");
+  const clientSource = readFileSync(new URL("../src/lib/site-gate.js", import.meta.url), "utf8");
+
+  assert.match(source, /SLT_SITE_GATE_KEY \|\| ""/, "el servidor no debe tener clave por defecto");
+  assert.doesNotMatch(clientSource, /\|\|\s*'[A-Za-z0-9]{6,}'/, "el cliente no debe tener clave por defecto");
+
+  const exampleEnv = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
+  assert.match(exampleEnv, /^SLT_SITE_GATE_KEY=$/m, ".env.example no debe traer la clave real");
+  assert.match(exampleEnv, /^VITE_SITE_GATE_KEY=$/m, ".env.example no debe traer la clave real");
 });
 
 test("production readiness blocks fake production infrastructure", () => {
