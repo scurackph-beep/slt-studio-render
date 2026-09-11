@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      {
+        "type": "prompt",
+        "prompt": "You are a brand-guard for the music player app. Inspect this user prompt: $ARGUMENTS\n\nIf the prompt is about the app logo, name, branding, canvas logo, or icon, enforce ALL of these rules in how the agent should proceed:\n1) Do NOT reuse, crop, or adapt the old neon broken-rainbow PNG / Studio logo.\n2) Redesign marks from scratch (SVG/canvas or new generated art).\n3) App title must NOT contain the words Sweet, Little, or Trauma (any language/casing).\n4) Credit line only: \"By Sweet Little Trauma\".\n5) Prefer updating the canvas at canvases/logo-estetico.canvas.tsx for logo work.\n6) Keep the mark aesthetic, premium, not cartoonish, with clean transparent edges (no checkerboard).\n\nIf the prompt is unrelated to logo/branding, allow it without extra constraints.\nRespond with a brief policy decision for the agent.",
+        "timeout": 15
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": ".cursor/hooks/brand-logo-context.sh"
+      }
+    ]
+  }
+}
