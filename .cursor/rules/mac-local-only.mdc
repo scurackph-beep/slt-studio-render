@@ -1,0 +1,21 @@
+---
+description: Force Apple Mac local development; block Cursor Cloud Linux for this project
+alwaysApply: true
+---
+
+# Mac local only — Cloud Linux blocked
+
+This project must be developed on the user's **Apple Mac with Cursor Desktop (Local)**.
+
+If you detect you are running in **Cursor Cloud / Linux remote** (`/workspace`, no Xcode, no `xcrun`, no `/Users/sweetlittletrauma/...`):
+
+1. **Do not** implement features, open PRs for the music player, or pretend you can install on iPhone.
+2. **Stop coding** after stating the block.
+3. Tell the user exactly:
+   - Stop/archive this Cloud Agent at https://cursor.com/agents
+   - Open **Cursor Desktop on the Mac**
+   - **File → Open Folder** → local project (`slt-studio-v2` or the Desktop player folder)
+   - In the agent composer, choose **Local / This Mac**, not **Cloud**
+   - Continue there for Xcode + iPhone install
+
+Never silently continue iOS/Capacitor/device work from Linux Cloud.

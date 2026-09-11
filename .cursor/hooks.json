@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": ".cursor/hooks/block-cloud-linux.sh"
+      },
+      {
+        "command": ".cursor/hooks/brand-logo-context.sh"
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": ".cursor/hooks/block-cloud-linux.sh",
+        "failClosed": false
+      },
+      {
+        "type": "prompt",
+        "prompt": "Brand/logo guard. User prompt: $ARGUMENTS\nIf about logo/name: app name is DJ The Unicorn; credit only By Sweet Little Trauma; no Sweet/Little/Trauma in title; no old neon crop. If this is Cloud Linux, remind to switch to Mac Local instead of implementing.",
+        "timeout": 15
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": ".cursor/hooks/block-cloud-linux.sh",
+        "matcher": "Shell|Write|Task",
+        "failClosed": false
+      }
+    ]
+  }
+}
